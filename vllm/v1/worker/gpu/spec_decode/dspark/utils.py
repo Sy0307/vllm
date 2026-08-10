@@ -5,7 +5,6 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig, replace
 from vllm.logger import init_logger
-from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -43,6 +42,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         _should_share,
         get_target_lm_head,
+        maybe_share_target_embed,
     )
 
     draft_attention_backend = _resolve_dspark_attention_backend(
@@ -85,24 +85,8 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_inner = draft_model.model
     target_vocab_size = vllm_config.model_config.get_vocab_size()
 
-    target_embed = getattr(target_inner, "embed_tokens", None)
-    draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if isinstance(target_embed, PPMissingLayer):
-        raise RuntimeError(
-            f"{type(target_inner).__name__} has no embed_tokens on the last "
-            "PP rank; instantiate it when spec_decode_needs_target_embed() is true "
-            "so the DSpark drafter can share it."
-        )
-    if (
-        target_embed is not None
-        and draft_model_config.get_vocab_size() <= target_vocab_size
-        and _should_share(
-            draft_model, "has_own_embed_tokens", draft_embed, target_embed
-        )
-    ):
-        if draft_embed is not None:
-            del draft_inner.embed_tokens
-        draft_inner.embed_tokens = target_embed
+    if draft_model_config.get_vocab_size() <= target_vocab_size:
+        maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)
