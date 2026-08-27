@@ -134,6 +134,7 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadat
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     def __init__(
         self,

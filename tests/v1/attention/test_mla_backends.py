@@ -906,6 +906,8 @@ def test_flashinfer_mla_dcp_multi_token_decode_uses_per_query_bounds(monkeypatch
     flashinfer_mla_module = pytest.importorskip(
         "vllm.v1.attention.backends.mla.flashinfer_mla"
     )
+    builder = flashinfer_mla_module.FlashInferMLAMetadataBuilder
+    assert builder.supports_non_causal_multi_token_dcp
 
     decode_call = None
 
