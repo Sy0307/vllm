@@ -178,8 +178,9 @@ def _make_metadata_with_slice(
         query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
     # Read raw fields to avoid triggering the deprecated D2H-syncing properties.
+    # Each microbatch adjusts its CPU sequence lengths independently.
     seq_lens_cpu = (
-        attn_metadata._seq_lens_cpu[request_slice]
+        attn_metadata._seq_lens_cpu[request_slice].clone()
         if attn_metadata._seq_lens_cpu is not None
         else None
     )
@@ -194,6 +195,10 @@ def _make_metadata_with_slice(
         else None
     )
 
+    if splits_first_request and num_computed_tokens_cpu is not None:
+        num_computed_tokens_cpu = num_computed_tokens_cpu.clone()
+        num_computed_tokens_cpu[0] += first_tok - start_locs[first_req]
+
     if splits_last_request:
         # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
         # the tokens skipped because query_start_loc_cpu might have been modified
@@ -207,7 +212,6 @@ def _make_metadata_with_slice(
         seq_lens = seq_lens.clone()
         seq_lens[-1] -= tokens_skipped
         if seq_lens_cpu is not None:
-            seq_lens_cpu = seq_lens_cpu.clone()
             seq_lens_cpu[-1] -= tokens_skipped
         if seq_lens_cpu_upper_bound is not None:
             seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound.clone()
@@ -232,6 +236,27 @@ def _make_metadata_with_slice(
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
+    def slice_requests(value):
+        return value[request_slice] if value is not None else None
+
+    causal = attn_metadata.causal
+    if isinstance(causal, torch.Tensor):
+        causal = causal[request_slice]
+
+    positions = attn_metadata.positions
+    if positions is not None:
+        positions = (
+            positions[:, token_slice] if positions.ndim == 2 else positions[token_slice]
+        )
+
+    mm_req_doc_ranges = None
+    if attn_metadata.mm_req_doc_ranges is not None:
+        mm_req_doc_ranges = {
+            req_idx - request_slice.start: list(doc_ranges)
+            for req_idx, doc_ranges in attn_metadata.mm_req_doc_ranges.items()
+            if request_slice.start <= req_idx < request_slice.stop
+        }
+
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
@@ -242,6 +267,18 @@ def _make_metadata_with_slice(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        causal=causal,
+        encoder_seq_lens=slice_requests(attn_metadata.encoder_seq_lens),
+        encoder_seq_lens_cpu=slice_requests(attn_metadata.encoder_seq_lens_cpu),
+        dcp_local_seq_lens=slice_requests(attn_metadata.dcp_local_seq_lens),
+        dcp_local_seq_lens_cpu=slice_requests(attn_metadata.dcp_local_seq_lens_cpu),
+        positions=positions,
+        is_prefilling=slice_requests(attn_metadata.is_prefilling),
+        mm_req_doc_ranges=mm_req_doc_ranges,
+        rswa_prefix_lens=slice_requests(attn_metadata.rswa_prefix_lens),
+        replayssm_decode_base_cpu=slice_requests(
+            attn_metadata.replayssm_decode_base_cpu
+        ),
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,

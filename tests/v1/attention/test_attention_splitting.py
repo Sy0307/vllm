@@ -330,6 +330,16 @@ def test_prefill_split_across_ubatches(
     device = torch.device("cpu")
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     common = create_common_attn_metadata(batch_spec, block_size=16, device=device)
+    common.dcp_local_seq_lens = torch.arange(batch_spec.batch_size) + 10
+    common.dcp_local_seq_lens_cpu = common.dcp_local_seq_lens.clone()
+    common.positions = torch.arange(3 * common.num_actual_tokens).view(
+        3, common.num_actual_tokens
+    )
+    common.is_prefilling = torch.tensor([True] * batch_spec.batch_size)
+    common.mm_req_doc_ranges = {
+        req_idx: [(req_idx * 100 + 1, req_idx * 100 + 5)]
+        for req_idx in range(batch_spec.batch_size)
+    }
 
     num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
     qsl_np = common.query_start_loc_cpu.numpy()
@@ -347,6 +357,34 @@ def test_prefill_split_across_ubatches(
 
     first_meta = _make_metadata_with_slice(ubatch_slices[0], common)
     second_meta = _make_metadata_with_slice(ubatch_slices[1], common)
+
+    for metadata in (first_meta, second_meta):
+        assert metadata._num_computed_tokens_cpu is not None
+        assert torch.equal(
+            metadata._num_computed_tokens_cpu,
+            metadata.compute_num_computed_tokens().cpu(),
+        )
+
+    for metadata, ubatch_slice in zip(
+        (first_meta, second_meta), ubatch_slices, strict=True
+    ):
+        req_slice = ubatch_slice.request_slice
+        token_slice = ubatch_slice.token_slice
+        assert torch.equal(
+            metadata.dcp_local_seq_lens,
+            common.dcp_local_seq_lens[req_slice],
+        )
+        assert torch.equal(
+            metadata.dcp_local_seq_lens_cpu,
+            common.dcp_local_seq_lens_cpu[req_slice],
+        )
+        assert torch.equal(metadata.positions, common.positions[:, token_slice])
+        assert torch.equal(metadata.is_prefilling, common.is_prefilling[req_slice])
+        assert metadata.mm_req_doc_ranges == {
+            req_idx - req_slice.start: list(doc_ranges)
+            for req_idx, doc_ranges in common.mm_req_doc_ranges.items()
+            if req_slice.start <= req_idx < req_slice.stop
+        }
 
     # Token counts match the split
     assert first_meta.num_actual_tokens == split_point
@@ -395,6 +433,15 @@ def test_prefill_split_across_ubatches(
         # Map to original request index
         orig_idx = split_req_idx + j
         assert int(second_meta.seq_lens[j]) == seq_lens[orig_idx]
+
+    assert common._seq_lens_cpu is not None
+    assert first_meta._seq_lens_cpu is not None
+    assert second_meta._seq_lens_cpu is not None
+    common_seq_lens_cpu = common._seq_lens_cpu.clone()
+    second_seq_lens_cpu = second_meta._seq_lens_cpu.clone()
+    first_meta._seq_lens_cpu.add_(1000)
+    assert torch.equal(common._seq_lens_cpu, common_seq_lens_cpu)
+    assert torch.equal(second_meta._seq_lens_cpu, second_seq_lens_cpu)
 
 
 def test_build_attention_metadata_zeros_stale_is_prefilling():
