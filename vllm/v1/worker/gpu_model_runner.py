@@ -7130,6 +7130,14 @@ class GPUModelRunner(
                     uniform_decode=uniform_decode,
                 )
             )
+            if allow_microbatching:
+                self._warmup_and_capture(
+                    batch_desc,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    allow_microbatching=False,
+                    profiler=profiler,
+                )
+                torch.accelerator.synchronize()
             self._warmup_and_capture(
                 batch_desc,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,

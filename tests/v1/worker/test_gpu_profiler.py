@@ -16,6 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.profiler import _is_uri_path
+from vllm.forward_context import BatchDescriptor
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
@@ -347,6 +348,49 @@ def test_profiler_entered_during_capture():
 
     mock_profiler.__enter__.assert_called_once()
     mock_profiler.__exit__.assert_called_once()
+
+
+def test_capture_cudagraphs_captures_plain_and_ubatched(monkeypatch):
+    runner = MagicMock()
+    runner.parallel_config.use_ubatching = True
+    runner.vllm_config.parallel_config = runner.parallel_config
+    runner.load_config.use_tqdm_on_load = False
+    runner.lora_config = None
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.is_global_first_rank",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.check_ubatch_thresholds",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_model_runner.torch.accelerator.synchronize",
+        lambda: None,
+    )
+
+    desc = BatchDescriptor(num_tokens=32, num_reqs=32, uniform=True)
+    GPUModelRunner._capture_cudagraphs(
+        runner,
+        batch_descriptors=[desc],
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+    )
+
+    assert runner._warmup_and_capture.call_args_list == [
+        call(
+            desc,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            allow_microbatching=False,
+            profiler=None,
+        ),
+        call(
+            desc,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            allow_microbatching=True,
+            profiler=None,
+        ),
+    ]
 
 
 def make_proton(session_id: int | None = 7):
