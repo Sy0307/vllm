@@ -177,9 +177,10 @@ class PPHandler:
         assert self.is_last_rank
         if compute_need_sampled_mask(input_batch) is None:
             return
+        assert draft_tokens.shape[0] == input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            send = draft_tokens[input_batch.idx_mapping].contiguous()
+            send = draft_tokens.contiguous()
             torch.distributed.broadcast(
                 send, src=self.last_rank, group=self.broadcast_group
             )
