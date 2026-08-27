@@ -1957,7 +1957,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # they must feed the target on the next step.
             if self.pp_handler is not None:
                 self.pp_handler.broadcast_drafts(
-                    self.req_states.draft_tokens, input_batch
+                    self.req_states.draft_tokens[input_batch.idx_mapping],
+                    input_batch,
                 )
 
         # Post-step KV connector related operations.

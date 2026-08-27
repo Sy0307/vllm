@@ -179,7 +179,7 @@ class PPHandler:
             return
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            send = draft_tokens[input_batch.idx_mapping].contiguous()
+            send = draft_tokens.contiguous()
             torch.distributed.broadcast(
                 send, src=self.last_rank, group=self.broadcast_group
             )

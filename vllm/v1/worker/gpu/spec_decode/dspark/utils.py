@@ -4,6 +4,7 @@
 import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig, replace
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -51,8 +52,14 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         vllm_config.attention_config.backend,
     )
 
+    draft_parallel_config = replace(
+        vllm_config.parallel_config,
+        pipeline_parallel_size=1,
+        rank=get_tp_group().rank_in_group,
+    )
     draft_vllm_config = replace(
         vllm_config,
+        parallel_config=draft_parallel_config,
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
