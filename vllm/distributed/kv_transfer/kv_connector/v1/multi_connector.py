@@ -150,6 +150,44 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 return True
         return False
 
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        return any(
+            connector.requires_block_zeroing_before_async_load
+            for connector in self._connectors
+        )
+
+    @property
+    def supports_partial_tail_offload(self) -> bool:
+        return any(
+            connector.supports_partial_tail_offload for connector in self._connectors
+        )
+
+    @classmethod
+    def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
+        connectors_config = extra_config.get("connectors", [])
+        return bool(connectors_config) and all(
+            KVConnectorFactory.supports_kda_recoverssm_config(
+                KVTransferConfig(**connector_config)
+            )
+            for connector_config in connectors_config
+        )
+
+    @classmethod
+    def supports_dspark_context_transport(cls, extra_config: dict[str, Any]) -> bool:
+        connectors_config = extra_config.get("connectors", [])
+        if not connectors_config:
+            return False
+        for connector_config in connectors_config:
+            config = KVTransferConfig(**connector_config)
+            connector_cls = KVConnectorFactory.get_connector_class(config)
+            capability = getattr(
+                connector_cls, "supports_dspark_context_transport", None
+            )
+            if not capability or not capability(config.kv_connector_extra_config):
+                return False
+        return True
+
     @classmethod
     def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Return True only if every configured child connector supports HMA."""
@@ -165,6 +203,22 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             if not KVConnectorFactory.supports_hma_config(child_config):
                 return False
         return True
+
+    @classmethod
+    def all_children_support_kda_recoverssm(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return cls.supports_kda_recoverssm_transport(
+            kv_transfer_config.kv_connector_extra_config
+        )
+
+    @classmethod
+    def all_children_support_dspark_context(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        return cls.supports_dspark_context_transport(
+            kv_transfer_config.kv_connector_extra_config
+        )
 
     def __init__(
         self,

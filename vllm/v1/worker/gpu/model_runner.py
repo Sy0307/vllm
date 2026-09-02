@@ -193,6 +193,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
         self.kv_block_zeroer: KVBlockZeroer | None = None
+        # Host-visible completion fence for pages that an out-of-band Direct
+        # RDMA or Store GET may start filling in this execute_model call.
+        self._async_load_zero_event: torch.cuda.Event | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -294,6 +297,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             num_prefill_lookahead=num_prefill_lookahead,
         )
+        # Per-slot guard for an external target prefix whose drafter context
+        # cache was not transferred.
+        self.spec_decode_disabled = np.zeros(self.max_num_reqs, dtype=np.bool_)
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -957,6 +963,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
+        self.spec_decode_disabled[req_idx] = False
         if self.pooling_runner is not None:
             self.pooling_runner.remove_request(req_idx)
         if self.pp_handler is not None:
@@ -994,8 +1001,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             outputs = self.pp_handler.get_prev_sampled_outputs(
                 self.req_states.draft_tokens
             )
+            deferred_pp = bool(
+                getattr(self.model_state, "requires_deferred_pp_postprocess", False)
+            )
             if outputs is not None:
-                self.postprocess_sampled(**outputs)
+                self.postprocess_sampled(**outputs, deferred_pp=deferred_pp)
+            elif deferred_pp and getattr(
+                self.pp_handler, "consumed_pending_slot", False
+            ):
+                # Every request in this old PP slot was freed or aborted.
+                # Keep the RecoverSSM metadata FIFO aligned without touching
+                # cache blocks which may already belong to new requests.
+                self.model_state.discard_deferred_pp_postprocess()
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1017,6 +1034,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+            self.spec_decode_disabled[req_index] = (
+                new_req_data.disable_speculative_decoding
+            )
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
 
@@ -1081,6 +1101,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.new_block_ids_to_zero:
             assert self.kv_block_zeroer is not None
             self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
+            if self.kv_connector.requires_block_zeroing_before_async_load:
+                zero_event = torch.cuda.Event()
+                zero_event.record(self.main_stream)
+                self._async_load_zero_event = zero_event
 
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
@@ -1090,6 +1114,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config.num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
+
+    def _fence_zeroing_before_async_load(self) -> None:
+        """Complete page zeroing before a connector can write out of band."""
+        zero_event = self._async_load_zero_event
+        if zero_event is None:
+            return
+        zero_event.synchronize()
+        self._async_load_zero_event = None
 
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
@@ -1464,6 +1496,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         query_start_loc: torch.Tensor | None = None,
+        deferred_pp: bool = False,
     ) -> None:
         # Update the number of computed tokens.
         if self.is_last_pp_rank:
@@ -1484,9 +1517,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
-        self.model_state.postprocess_state(
-            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+        postprocess = (
+            self.model_state.postprocess_deferred_state
+            if deferred_pp
+            else self.model_state.postprocess_state
         )
+        postprocess(idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu)
 
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
@@ -1517,6 +1553,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_tables.apply_staged_writes()
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
+                self._fence_zeroing_before_async_load()
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
@@ -1565,6 +1602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
+            self._fence_zeroing_before_async_load()
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
@@ -1700,10 +1738,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            received_num_tokens = n
+            if not dummy_run:
+                received_lengths = {
+                    tensor.shape[0] for tensor in intermediate_tensors.tensors.values()
+                }
+                assert len(received_lengths) == 1
+                received_num_tokens = received_lengths.pop()
+                assert received_num_tokens <= n
             new_tensors = {
-                k: v[:n]
+                k: v[:received_num_tokens]
                 if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                else v[:received_num_tokens].copy_(intermediate_tensors.tensors[k])
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
@@ -1723,6 +1769,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
+            self._fence_zeroing_before_async_load()
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
@@ -1746,6 +1793,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
+                self._fence_zeroing_before_async_load()
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
@@ -1830,7 +1878,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
-            if not all_decode_next:
+            if getattr(self.model_state, "requires_deferred_pp_postprocess", False):
+                if self.pp_handler.current_receive_pending:
+                    # Snapshot the KDA commit plan and let the ordinary PP FIFO
+                    # apply it when this step's accept/reject result arrives.
+                    self.model_state.defer_pp_postprocess()
+                else:
+                    # Non-final Prefill chunks and finishing requests have no
+                    # result to enqueue, so clear this step immediately.
+                    self.model_state.postprocess_state(input_batch.idx_mapping, 0)
+            elif not all_decode_next:
                 # Might contain non-final prefill chunks, which will be scheduled
                 # in the immediate next step (rather than in pp_size steps).
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
@@ -1914,7 +1971,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None:
+        all_speculation_disabled = self.speculator is not None and bool(
+            self.spec_decode_disabled[input_batch.idx_mapping_np].all()
+        )
+        if self.speculator is not None and not all_speculation_disabled:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
@@ -1945,6 +2005,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
+        elif all_speculation_disabled:
+            logger.warning_once(
+                "Skipping speculative proposal for a batch whose requests all "
+                "lack externally transferred drafter context state."
+            )
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

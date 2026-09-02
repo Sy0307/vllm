@@ -385,7 +385,11 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
-def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
+def _setup_remote_kv_resume(
+    num_prompt_tokens: int,
+    matched_tokens: int,
+    num_speculative_tokens: int | None = None,
+):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
     eligible. Returns the scheduler. The connector matches `matched_tokens` of
@@ -398,6 +402,7 @@ def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
         block_size=BLOCK_SIZE,
+        num_speculative_tokens=num_speculative_tokens,
     )
     # Distinct prompts so r2 gets no local prefix cache hit from r1, only the
     # connector's external async load.
@@ -429,6 +434,28 @@ def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     )
     assert "r2" in scheduler.finished_recving_kv_req_ids
     return scheduler
+
+
+def test_spec_decode_padding_skipped_for_external_n_minus_one_prefill():
+    """Do not spec-pad the final prompt token after a remote N-1 KV hit.
+
+    P/D connectors intentionally leave the last prompt token for the decode
+    worker to recompute. Although only one token remains, the request is still
+    in prefill. Treating it as a 1+spec verify step corrupts Mamba scheduling
+    metadata and can leave speculative output placeholders behind.
+    """
+    num_prompt = 33
+    num_spec = 7
+    scheduler = _setup_remote_kv_resume(
+        num_prompt,
+        matched_tokens=num_prompt - 1,
+        num_speculative_tokens=num_spec,
+    )
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["r2"] == 1
+    assert "r2" not in output.scheduled_spec_decode_tokens
 
 
 def test_throttle_prefills_excludes_fully_transferred_remote_kv():
@@ -1724,6 +1751,64 @@ def test_spec_decode_padding_first_decode_step():
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+
+
+def test_spec_decode_padding_skipped_for_guarded_local_hit():
+    """An invalid inherited DSpark prefix must never enter verify padding."""
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    r2.disable_speculative_decoding = True
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
+def test_dspark_draft_context_block_provenance_helpers():
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.uses_dspark = True
+    block = KVCacheBlock(7)
+    blocks = KVCacheBlocks(([block],))
+
+    assert scheduler._local_prefix_lacks_dspark_context(blocks)
+    block.draft_context_valid = True
+    assert not scheduler._local_prefix_lacks_dspark_context(blocks)
+
+    block.draft_context_valid = False
+    scheduler.kv_cache_config = Mock(
+        kv_cache_groups=[Mock(kv_cache_spec=Mock(block_size=16))]
+    )
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.get_blocks.return_value = blocks
+    request = Mock(
+        request_id="req",
+        num_computed_tokens=8,
+        disable_speculative_decoding=False,
+    )
+    scheduler._mark_dspark_context_valid(request)
+    assert block.draft_context_valid
+
+    block.draft_context_valid = False
+    request.disable_speculative_decoding = True
+    scheduler._mark_dspark_context_valid(request)
+    assert not block.draft_context_valid
 
 
 def test_spec_decode_padding_skipped_for_diffusion():

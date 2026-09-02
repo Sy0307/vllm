@@ -604,3 +604,153 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
+
+
+def test_full_boundary_handoff_uses_explicit_mamba_running_slot():
+    """A full Mamba boundary can still be past Store's LCM save floor.
+
+    The request table is sparse and may expose a checkpoint at the logical
+    index, so the explicit core handoff remains authoritative even though the
+    boundary page itself is full.
+    """
+    full = FullAttentionSpec(block_size=4, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], mamba)]
+    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=4)
+
+    class _RecordingStore(_DictStore):
+        def __init__(self):
+            super().__init__()
+            self.puts: dict[str, list[int]] = {}
+            self.put_key_batches: list[list[str]] = []
+
+        def batch_put_from_multi_buffers(self, keys, addrs, sizes, *args, **kwargs):
+            self.put_key_batches.append(list(keys))
+            for key, addr in zip(keys, addrs, strict=True):
+                self.puts[key] = addr
+            return super().batch_put_from_multi_buffers(
+                keys, addrs, sizes, *args, **kwargs
+            )
+
+    store = _RecordingStore()
+    token_dbs = []
+    for group_index, block_size in enumerate((4, 16)):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("m", 0, 0, 0, 0, group_id=group_index),
+            block_size=block_size,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([group_index * 10_000])
+        db.set_block_len([512])
+        token_dbs.append(db)
+
+    send = KVCacheStoreSendingThread(
+        store=store,
+        coord=coord,
+        token_databases=token_dbs,
+        block_size=16,
+        tp_rank=0,
+        group_put_steps=[1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+    hashes = [BlockHash(bytes([index + 1]) * 4) for index in range(4)]
+    handoff_block = 7
+    req = ReqMeta(
+        req_id="full-boundary",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3, 4], [5]),
+        block_hashes=hashes,
+        can_save=True,
+        num_prompt_tokens=16,
+        partial_tail_offloads=[(1, handoff_block, 16)],
+    )
+
+    assert send._maybe_offload_partial_tail(req)
+
+    mamba_key = token_dbs[1].key_for(hashes[-1])
+    assert store.puts[mamba_key] == [10_000 + handoff_block * 512]
+    assert store.puts[mamba_key] != [10_000 + req.block_ids[1][0] * 512]
+    assert all(len(keys) == len(set(keys)) for keys in store.put_key_batches)
+
+
+def test_checkpoint_handoff_is_keyed_by_semantic_not_physical_boundary():
+    """A sparse KDA checkpoint must never inherit its physical slot's key."""
+    full = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=1, dtype=None)
+    mamba = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    groups = [KVCacheGroupSpec(["L0"], full), KVCacheGroupSpec(["L1"], mamba)]
+    coord = MooncakeStoreCoordinator(groups, scheduler_block_size=16, hash_block_size=2)
+
+    class _RecordingStore(_DictStore):
+        def __init__(self):
+            super().__init__()
+            self.puts: dict[str, list[int]] = {}
+
+        def batch_put_from_multi_buffers(self, keys, addrs, sizes, *args, **kwargs):
+            for key, addr in zip(keys, addrs, strict=True):
+                self.puts[key] = addr
+            return super().batch_put_from_multi_buffers(
+                keys, addrs, sizes, *args, **kwargs
+            )
+
+    store = _RecordingStore()
+    token_dbs = []
+    for group_index, block_size in enumerate((2, 4)):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("m", 0, 0, 0, 0, group_id=group_index),
+            block_size=block_size,
+            hash_block_size=2,
+        )
+        db.set_kv_caches_base_addr([group_index * 10_000])
+        db.set_block_len([512])
+        token_dbs.append(db)
+
+    send = KVCacheStoreSendingThread(
+        store=store,
+        coord=coord,
+        token_databases=token_dbs,
+        block_size=16,
+        tp_rank=0,
+        group_put_steps=[1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+    hashes = [BlockHash(bytes([index + 1]) * 4) for index in range(7)]
+    checkpoint_block = 7
+    running_block = 8
+    req = ReqMeta(
+        req_id="checkpoint-boundary",
+        token_len_chunk=0,
+        block_ids=(
+            list(range(1, 8)),
+            [NULL_BLOCK_ID, NULL_BLOCK_ID, checkpoint_block, running_block],
+        ),
+        block_hashes=hashes,
+        can_save=True,
+        num_prompt_tokens=14,
+        partial_tail_offloads=[
+            (1, checkpoint_block, 8),
+            (1, running_block, 14),
+        ],
+    )
+
+    assert send._maybe_offload_partial_tail(req)
+
+    checkpoint_key = token_dbs[1].key_for(hashes[3])
+    running_key = token_dbs[1].key_for(hashes[6])
+    wrong_physical_key = token_dbs[1].key_for(hashes[5])
+    assert store.puts[checkpoint_key] == [10_000 + checkpoint_block * 512]
+    assert store.puts[running_key] == [10_000 + running_block * 512]
+    assert wrong_physical_key not in store.puts

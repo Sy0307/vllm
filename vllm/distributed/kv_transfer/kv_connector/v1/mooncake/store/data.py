@@ -111,6 +111,10 @@ class KeyMetadata:
     # share one Mooncake master without colliding on identical block hashes.
     # Empty (the default) keeps keys byte-identical to the unprefixed format.
     cache_prefix: str = ""
+    # Optional transport-neutral semantic region. Region objects deliberately
+    # use pp_rank=-1: the layer name encoded by this id, rather than the local
+    # PP owner, determines their identity across asymmetric P/D partitions.
+    region_id: str = ""
 
 
 @dataclass(order=True)
@@ -130,6 +134,7 @@ class PoolKey:
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
                 self.key_metadata.group_id,
+                self.key_metadata.region_id,
                 self.chunk_hash,
             )
         )
@@ -142,10 +147,11 @@ class PoolKey:
         pcp_rank: int | None = None,
         dcp_rank: int | None = None,
         pp_rank: int | None = None,
+        region_id: str | None = None,
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
         prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
-        return (
+        key_prefix = (
             f"{prefix}"
             f"{key_metadata.model_name}"
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
@@ -154,6 +160,10 @@ class PoolKey:
             f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
             f"@group:{key_metadata.group_id}"
         )
+        resolved_region_id = key_metadata.region_id if region_id is None else region_id
+        if resolved_region_id:
+            key_prefix += f"@region:{resolved_region_id}"
+        return key_prefix
 
     @staticmethod
     def build_key_string(key_prefix: str, chunk_hash: str) -> str:
@@ -184,6 +194,8 @@ class ChunkedTokenDatabase:
             )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self.block_stride: list[int] = []
+        self._block_stride_explicit = False
         self._key_prefix = PoolKey.build_prefix(metadata)
 
     def key_for(self, chunk_hash: BlockHash) -> str:
@@ -194,6 +206,14 @@ class ChunkedTokenDatabase:
 
     def set_block_len(self, block_len: list[int]):
         self.block_len = block_len
+        if not self._block_stride_explicit:
+            self.block_stride = list(block_len)
+
+    def set_block_stride(self, block_stride: list[int]):
+        if self.block_len and len(block_stride) != len(self.block_len):
+            raise ValueError("block stride and content length counts must match")
+        self.block_stride = block_stride
+        self._block_stride_explicit = True
 
     def prepare_value(
         self, start: int, end: int, block_ids: list[int]
@@ -226,6 +246,11 @@ class ChunkedTokenDatabase:
             [self.block_len[i % length] for i in range(base.shape[0])],
             dtype=np.int64,
         )
+        strides = self.block_stride or self.block_len
+        stride = np.asarray(
+            [strides[i % len(strides)] for i in range(base.shape[0])],
+            dtype=np.int64,
+        )
         n = len(chunks)
         starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
         spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
@@ -235,8 +260,12 @@ class ChunkedTokenDatabase:
             dtype=np.int64,
             count=n,
         )
-        addrs = base[None, :] + bids[:, None] * blen[None, :]
+        addrs = base[None, :] + bids[:, None] * stride[None, :]
         block_counts = (spans + self.block_size - 1) // self.block_size
+        if not np.array_equal(stride, blen) and (block_counts != 1).any():
+            raise ValueError(
+                "strided target-state regions cannot coalesce multiple blocks"
+            )
         sizes = blen[None, :] * block_counts[:, None]
         return addrs.tolist(), sizes.tolist(), bids.tolist()
 
@@ -245,8 +274,9 @@ class ChunkedTokenDatabase:
         addr_list = []
         size_list = []
         length = len(self.block_len)
+        strides = self.block_stride or self.block_len
         for index, base_addr in enumerate(self.kv_caches_base_addr):
-            addr = base_addr + block_id * self.block_len[index % length]
+            addr = base_addr + block_id * strides[index % len(strides)]
             addr_list.append(addr)
             size_list.append(self.block_len[index % length])
         return addr_list, size_list
@@ -447,6 +477,11 @@ class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
     """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
 
     completed_saves: dict[int, int] = field(default_factory=dict)
+    # Level-triggered completion identities. Counts alone are edge-triggered:
+    # if one PP worker's ModelRunnerOutput is not selected/merged on the step
+    # that drains it, the scheduler pins that job forever. Workers retain and
+    # repeat these rank ids until the scheduler explicitly acknowledges them.
+    completed_save_ranks: dict[int, tuple[int, ...]] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -455,6 +490,12 @@ class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
         for store_job_id, count in other.completed_saves.items():
             self.completed_saves[store_job_id] = (
                 self.completed_saves.get(store_job_id, 0) + count
+            )
+        for store_job_id, ranks in other.completed_save_ranks.items():
+            self.completed_save_ranks[store_job_id] = tuple(
+                sorted(
+                    set(self.completed_save_ranks.get(store_job_id, ())) | set(ranks)
+                )
             )
         return self
 
@@ -466,10 +507,12 @@ class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
         self,
         unfinished_request_ids: set[str],
         preempted_req_ids: set[str],
+        acknowledged_store_job_ids: set[int] | None = None,
     ):
         self.requests: list[ReqMeta] = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
+        self.acknowledged_store_job_ids = acknowledged_store_job_ids or set()
 
     def add_request(self, req_meta: ReqMeta) -> None:
         self.requests.append(req_meta)

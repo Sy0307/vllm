@@ -215,6 +215,10 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # Once an async external load fails, retrying the same connector lookup
+        # can rediscover the same incomplete object forever. Keep the request on
+        # the local recompute path for the rest of its lifetime.
+        self.bypass_external_kv_load_req_ids: set[str] = set()
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -253,6 +257,9 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size, vllm_config=vllm_config
         )
         speculative_config = vllm_config.speculative_config
+        self.uses_dspark = bool(
+            speculative_config is not None and speculative_config.use_dspark()
+        )
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
@@ -313,6 +320,9 @@ class Scheduler(SchedulerInterface):
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
         self.prefill_capacity_bound = False
+        # Set transiently by EngineCore's local PP batch-queue admission. The
+        # ordinary DP cadence retains its capacity-bound escape hatch.
+        self.force_prefill_throttle = False
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -437,8 +447,20 @@ class Scheduler(SchedulerInterface):
                 end = aligned_end
 
         next_block_boundary = (start // block_size + 1) * block_size
+        # Preserve the state immediately before the mandatory last prompt-token
+        # replay. Direct hybrid P/D has already removed that token from the
+        # producer request (``_p_side_truncated``), so its current prompt end is
+        # the consumer's prompt - 1. Ordinary requests still back off one token.
+        # With a one-token hash unit both cases select exactly consumer prompt - 1.
+        transfer_params = request.kv_transfer_params
+        direct_prefill_truncated = bool(
+            transfer_params and transfer_params.get("_p_side_truncated")
+        )
+        replay_boundary = request.num_prompt_tokens - int(
+            not direct_prefill_truncated
+        )
         tail_boundary = (
-            request.num_prompt_tokens // self.hash_block_size * self.hash_block_size
+            replay_boundary // self.hash_block_size * self.hash_block_size
             if self.mamba_partial_cache_hit
             else 0
         )
@@ -475,6 +497,38 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_manager.get_computed_blocks(request)
         )
         return blocks, num_local, shared_prefix_boundary, False
+
+    def _local_prefix_lacks_dspark_context(self, blocks: KVCacheBlocks) -> bool:
+        """Return whether an adopted local prefix lacks DSpark context KV."""
+        if not self.uses_dspark:
+            return False
+        return any(
+            not block.is_null and not block.draft_context_valid
+            for group_blocks in blocks.blocks
+            for block in group_blocks
+        )
+
+    def _mark_dspark_context_valid(self, request: Request) -> None:
+        """Publish provenance only after a successful DSpark execution step.
+
+        A block-level bit is sufficient because prefix hashes only expose a
+        boundary after every token up to that boundary has run. Rejected
+        lookahead positions are never published as a reusable prefix.
+        """
+        if not self.uses_dspark or request.disable_speculative_decoding:
+            return
+        for group, group_blocks in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.kv_cache_manager.get_blocks(request.request_id).blocks,
+            strict=True,
+        ):
+            block_size = group.kv_cache_spec.block_size
+            num_computed_blocks = (
+                request.num_computed_tokens + block_size - 1
+            ) // block_size
+            for block in group_blocks[:num_computed_blocks]:
+                if not block.is_null:
+                    block.draft_context_valid = True
 
     def _reserve_prefill_lookahead(
         self,
@@ -541,8 +595,10 @@ class Scheduler(SchedulerInterface):
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
-        ) and any(not r.is_prefill_chunk for r in self.running)
+            throttle_prefills
+            and (self.force_prefill_throttle or not self.prefill_capacity_bound)
+            and any(not r.is_prefill_chunk for r in self.running)
+        )
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -850,11 +906,17 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, block_aligned_local
+                        if (
+                            request_id in self.bypass_external_kv_load_req_ids
+                        ):
+                            ext_tokens = 0
+                            load_kv_async = False
+                        else:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, block_aligned_local
+                                )
                             )
-                        )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because
@@ -895,6 +957,19 @@ class Scheduler(SchedulerInterface):
                                 num_new_local_computed_tokens,
                                 request.shared_prefix_boundary,
                             ) = self.kv_cache_manager.get_computed_blocks(request)
+
+                        if (
+                            num_new_local_computed_tokens > 0
+                            and self._local_prefix_lacks_dspark_context(
+                                new_computed_blocks
+                            )
+                        ):
+                            request.disable_speculative_decoding = True
+                            logger.warning_once(
+                                "Disabling DSpark for a local APC hit whose "
+                                "target prefix originated from a target-only "
+                                "external load. Target-model decoding remains enabled."
+                            )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -962,6 +1037,13 @@ class Scheduler(SchedulerInterface):
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
+                        and not request.disable_speculative_decoding
+                        # A one-token remainder can still be the final prompt
+                        # token after an external N-1 KV hit. Padding that
+                        # prefill token with speculative placeholders makes the
+                        # worker treat prompt work as a verify step. Only pad a
+                        # request that has actually completed prefill.
+                        and num_computed_tokens >= request.num_prompt_tokens
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
@@ -1105,6 +1187,7 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.pop_request()
                 if load_kv_async:
+                    assert self.connector is not None
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -1124,9 +1207,13 @@ class Scheduler(SchedulerInterface):
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
-                    if self.needs_kv_cache_zeroing:
-                        # Skip zeroing of the blocks the async load will
-                        # overwrite; the zeroing could race the write.
+                    if (
+                        self.needs_kv_cache_zeroing
+                        and not self.connector.requires_block_zeroing_before_async_load
+                    ):
+                        # Skip zeroing only when the connector overwrites every
+                        # byte the model may consume. Partial-page loaders keep
+                        # normal zeroing ordered before start_load_kv().
                         self._skip_zero_block_ids.update(
                             self.kv_cache_manager.get_zeroing_block_ids_in_range(
                                 request.request_id,
@@ -1262,12 +1349,25 @@ class Scheduler(SchedulerInterface):
         pending_partial_tail_offloads = None
         if (
             self.connector is not None
-            and self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_producer
+            and self.connector.supports_partial_tail_offload
         ):
             pending_partial_tail_offloads = (
                 self.kv_cache_manager.take_partial_tail_offloads() or None
             )
+            if pending_partial_tail_offloads:
+                logger.info(
+                    "KDA partial-tail handoff produced: requests=%d, entries=%d, "
+                    "boundaries=%s",
+                    len(pending_partial_tail_offloads),
+                    sum(map(len, pending_partial_tail_offloads.values())),
+                    sorted(
+                        {
+                            boundary
+                            for entries in pending_partial_tail_offloads.values()
+                            for _group_id, _block_id, boundary in entries
+                        }
+                    ),
+                )
 
         kv_cache_block_copies, cow_retained_blocks = (
             self.kv_cache_manager.take_kv_cache_block_copies()
@@ -1897,6 +1997,9 @@ class Scheduler(SchedulerInterface):
                         detailed=self.spec_decode_metrics_level == "detailed",
                     )
 
+            if not output_is_stale:
+                self._mark_dspark_context_valid(request)
+
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
@@ -2289,6 +2392,12 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
+            if request.disable_speculative_decoding:
+                # A worker may still return a fixed-width proposal row. Never
+                # schedule it when the external prefix has no drafter state.
+                request.spec_token_ids = []
+                continue
+
             if request.is_prefill_chunk:
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
@@ -2425,6 +2534,7 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False
+            self.bypass_external_kv_load_req_ids.discard(request.request_id)
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 delay_free_blocks = (
                     request.request_id not in self.finished_recving_kv_req_ids
@@ -2920,56 +3030,64 @@ class Scheduler(SchedulerInterface):
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
         for request in requests:
-            is_affected = False
-            marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            req_block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
+            assert len(req_block_ids_by_group) == len(
+                self.kv_cache_config.kv_cache_groups
+            )
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
-
-            req_num_computed_blocks = (
-                req_num_computed_tokens + self.block_size - 1
-            ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
-                if block_id not in invalid_block_ids:
-                    continue
-
-                is_affected = True
-
-                if block_id in marked_invalid_block_ids:
-                    # This invalid block is shared with a previous request
-                    # and was already marked for recomputation.
-                    # This means this request can still consider this block
-                    # as computed when rescheduled.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
-                    continue
-
-                marked_invalid_block_ids.add(block_id)
-
-                if marked_invalid_block:
-                    # This request has already marked an invalid block for
-                    # recomputation and updated its num_computed_tokens.
-                    continue
-
-                marked_invalid_block = True
-                # Truncate the computed tokens at the first failed block
-                request.num_computed_tokens = idx * self.block_size
-                num_affected_tokens = (
-                    req_num_computed_tokens - request.num_computed_tokens
+            invalid_occurrences: list[tuple[int, int]] = []
+            for req_block_ids, group in zip(
+                req_block_ids_by_group,
+                self.kv_cache_config.kv_cache_groups,
+                strict=True,
+            ):
+                group_block_size = group.kv_cache_spec.block_size
+                req_num_computed_blocks = (
+                    req_num_computed_tokens + group_block_size - 1
+                ) // group_block_size
+                invalid_occurrences.extend(
+                    (idx * group_block_size, block_id)
+                    for idx, block_id in enumerate(
+                        req_block_ids[:req_num_computed_blocks]
+                    )
+                    if block_id in invalid_block_ids
                 )
-                total_affected_tokens += num_affected_tokens
 
-                # collect invalid block and all downstream dependent blocks
-                if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
+            if invalid_occurrences:
+                # Sort by token position so HMA groups with different block
+                # sizes truncate at the earliest failed semantic chunk.
+                invalid_occurrences.sort()
+                unshared_boundaries: list[int] = []
+                for boundary, block_id in invalid_occurrences:
+                    if block_id not in marked_invalid_block_ids:
+                        marked_invalid_block_ids.add(block_id)
+                        unshared_boundaries.append(boundary)
 
-            if is_affected:
-                if not marked_invalid_block:
+                if unshared_boundaries:
+                    request.num_computed_tokens = min(unshared_boundaries)
+                    total_affected_tokens += (
+                        req_num_computed_tokens - request.num_computed_tokens
+                    )
+
+                    # An HMA group may have a different tokens-per-block. Evict
+                    # every group from the failed token boundary onward.
+                    if evict_blocks:
+                        for req_block_ids, group in zip(
+                            req_block_ids_by_group,
+                            self.kv_cache_config.kv_cache_groups,
+                            strict=True,
+                        ):
+                            first_invalid_index = (
+                                request.num_computed_tokens
+                                // group.kv_cache_spec.block_size
+                            )
+                            blocks_to_evict.update(req_block_ids[first_invalid_index:])
+                else:
                     # All invalid blocks of this request are shared with
                     # previous requests and will be recomputed by them.
                     # Revert to considering only cached tokens as computed.
@@ -3052,5 +3170,10 @@ class Scheduler(SchedulerInterface):
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
+        # A recompute retry must not query the same external object again. A
+        # Store marker can outlive one of its data objects, so another lookup
+        # may report the identical hit and otherwise create a permanent
+        # load-fail-retry loop.
+        self.bypass_external_kv_load_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids

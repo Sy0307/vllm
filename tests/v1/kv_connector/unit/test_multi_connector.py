@@ -4,6 +4,7 @@ import filecmp
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -1077,6 +1078,45 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
 
     mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
     assert mixed.supports_divergent_local_hybrid_hits is False
+
+
+def test_partial_tail_offload_capability_is_additive():
+    multi = object.__new__(MultiConnector)
+    multi._connectors = [
+        SimpleNamespace(supports_partial_tail_offload=False),
+        SimpleNamespace(supports_partial_tail_offload=True),
+    ]
+    assert multi.supports_partial_tail_offload is True
+
+    multi._connectors[1].supports_partial_tail_offload = False
+    assert multi.supports_partial_tail_offload is False
+
+
+def test_dspark_context_capability_requires_every_multi_child():
+    policy = {"dspark_context_transport_policy": "dspark_context_kv_v1"}
+
+    def config(store_policy: bool) -> KVTransferConfig:
+        return KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "MooncakeConnector",
+                        "kv_role": "kv_producer",
+                        "kv_connector_extra_config": policy,
+                    },
+                    {
+                        "kv_connector": "MooncakeStoreConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": policy if store_policy else {},
+                    },
+                ]
+            },
+        )
+
+    assert KVConnectorFactory.supports_dspark_context_config(config(True))
+    assert not KVConnectorFactory.supports_dspark_context_config(config(False))
 
 
 @pytest.mark.skipif(

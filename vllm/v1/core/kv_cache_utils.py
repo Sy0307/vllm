@@ -173,6 +173,12 @@ class KVCacheBlock:
     # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
 
+    # Whether every cached token represented by this physical block has the
+    # DSpark draft-context KV needed to resume speculative decoding. External
+    # target-only loads deliberately leave this false; local DSpark execution
+    # promotes it only after the drafter has consumed the target hidden states.
+    draft_context_valid: bool = False
+
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: "KVCacheBlock | None" = None
@@ -215,6 +221,7 @@ class KVCacheBlock:
             f"ref_cnt={self.ref_cnt}, "
             f"_block_hash={self._block_hash!r}, "
             f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
+            f"draft_context_valid={self.draft_context_valid}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )

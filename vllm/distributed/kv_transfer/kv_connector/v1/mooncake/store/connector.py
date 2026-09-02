@@ -29,6 +29,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.dspark_context_transport import (
+    dspark_context_kv_transport_enabled,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.kda_recoverssm_transport import (
+    kda_target_state_transport_enabled,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
@@ -89,11 +95,32 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
+    @classmethod
+    def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
+        return kda_target_state_transport_enabled(extra_config)
+
+    @classmethod
+    def supports_dspark_context_transport(cls, extra_config: dict[str, Any]) -> bool:
+        return dspark_context_kv_transport_enabled(extra_config)
+
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        # Semantic HMA loads intentionally materialize only transferable fields
+        # and attention sub-regions, leaving D-local RecoverSSM records intact.
+        return (
+            self._kv_transfer_config.is_kv_consumer
+            and self._kv_cache_config.has_mamba_layers
+        )
+
     @staticmethod
     def _validate_kv_cache_config(
         vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
     ) -> None:
-        from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
+        from vllm.v1.kv_cache_interface import (
+            CrossAttentionSpec,
+            FullAttentionSpec,
+            MambaSpec,
+        )
 
         unsupported: list[str] = []
         cache_block_size = vllm_config.cache_config.block_size
@@ -110,7 +137,29 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
         dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
+        extra_config = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+            if vllm_config.kv_transfer_config is not None
+            else {}
+        )
+        supports_kda_dcp = (
+            pcp == 1
+            and dcp > 1
+            and kda_target_state_transport_enabled(extra_config)
+        )
+        if supports_kda_dcp:
+            for g_idx, group in enumerate(kv_cache_config.kv_cache_groups):
+                if not isinstance(group.kv_cache_spec, (FullAttentionSpec, MambaSpec)):
+                    unsupported.append(
+                        "target-state DCP only supports full-attention and Mamba "
+                        f"groups; group {g_idx} is "
+                        f"{type(group.kv_cache_spec).__name__}"
+                    )
+        if (
+            len(kv_cache_config.kv_cache_groups) > 1
+            and pcp * dcp > 1
+            and not supports_kda_dcp
+        ):
             unsupported.append(
                 f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
             )
@@ -135,6 +184,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         save_decode_cache = extra_config.get("save_decode_cache", False)
+        self._save_decode_cache = bool(save_decode_cache)
         # Capacity-only: contributes its segment to the store pool but transfers
         # no KV, so the KV-cache-shape invariants below cannot be reached.
         self._capacity_only = (
@@ -156,6 +206,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             )
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
+
+    @property
+    def supports_partial_tail_offload(self) -> bool:
+        """Store target-state tails whenever this endpoint can write them.
+
+        Decode endpoints normally have the consumer role, but
+        ``save_decode_cache`` deliberately turns the Store child into a writer
+        for locally extended conversations.  Those tails must be exported too;
+        otherwise a later Store restore silently falls back to the preceding
+        physical checkpoint (for K3, often 28672 tokens).
+        """
+        return self.kv_role in ("kv_producer", "kv_both") or self._save_decode_cache
 
     def shutdown(self):
         """Release connector resources on teardown.

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
+import dataclasses
 from collections.abc import Sequence
 from typing import cast
 
@@ -16,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -23,6 +25,49 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+def store_effective_kv_cache_groups(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    dcp_world_size: int,
+) -> list[KVCacheGroupSpec]:
+    """Return Store-facing specs in the scheduler block-table domain.
+
+    DCP shards an attention manager block across ranks, so one physical block
+    id in scheduler metadata covers ``spec.block_size * dcp_world_size``
+    logical tokens. Mamba state is replicated and keeps its original block
+    size. Mooncake keys and token-to-block indexing must use those effective
+    sizes even though each rank still transfers one local physical page.
+    """
+    groups = list(kv_cache_groups)
+    if dcp_world_size == 1:
+        return groups
+    if dcp_world_size <= 0:
+        raise ValueError("dcp_world_size must be positive")
+
+    effective: list[KVCacheGroupSpec] = []
+    for group in groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = tuple(spec.kv_cache_specs.values())
+            if inner_specs and all(isinstance(s, AttentionSpec) for s in inner_specs):
+                scaled_inner = {
+                    name: dataclasses.replace(
+                        inner, block_size=inner.block_size * dcp_world_size
+                    )
+                    for name, inner in spec.kv_cache_specs.items()
+                }
+                spec = dataclasses.replace(
+                    spec,
+                    block_size=spec.block_size * dcp_world_size,
+                    kv_cache_specs=scaled_inner,
+                )
+        elif isinstance(spec, AttentionSpec):
+            spec = dataclasses.replace(
+                spec, block_size=spec.block_size * dcp_world_size
+            )
+        effective.append(dataclasses.replace(group, kv_cache_spec=spec))
+    return effective
 
 
 class ExternalCachedBlockPool:
@@ -400,9 +445,10 @@ def _unwrap_spec(spec: KVCacheSpec) -> KVCacheSpec:
 def partial_hash_hits_enabled(
     kv_cache_groups: list[KVCacheGroupSpec], hash_block_size: int
 ) -> bool:
-    """Mirror of core's ``HybridKVCacheCoordinator.enable_partial_hash_hits``
-    (its dcp == 1 clause holds: the connector rejects hybrid + DCP/PCP > 1).
-    Single copy on purpose — scheduler and coordinator must not disagree.
+    """Mirror core's fine-grained HMA hit predicate for effective Store specs.
+
+    DCP full-attention specs have already been scaled into the scheduler block
+    table domain; replicated Mamba specs retain their original block size.
     """
     return any(
         isinstance(spec := _unwrap_spec(g.kv_cache_spec), MambaSpec)

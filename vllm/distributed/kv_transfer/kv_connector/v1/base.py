@@ -194,6 +194,23 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        """Whether untouched bytes in asynchronously loaded blocks need zeroing."""
+        return False
+
+    @property
+    def supports_partial_tail_offload(self) -> bool:
+        """Whether the scheduler should expose semantic partial-tail handoffs.
+
+        Producer connectors already receive these handoffs as part of the P/D
+        send path.  A connector which writes cache state from a consumer (for
+        example a Store connector with ``save_decode_cache``) must override
+        this property: the top-level KV role alone does not describe that
+        child connector's write capability.
+        """
+        return self._kv_transfer_config.is_kv_producer
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -621,6 +638,16 @@ class KVConnectorBase_V1(ABC):
             True if this connector requires PIECEWISE CUDA graph mode,
             False otherwise.
         """
+        return False
+
+    @classmethod
+    def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
+        """Whether this connector explicitly enables target-state KDA transport."""
+        return False
+
+    @classmethod
+    def supports_dspark_context_transport(cls, extra_config: dict[str, Any]) -> bool:
+        """Whether this connector transports DSpark prompt-context KV."""
         return False
 
     def get_finished_count(self) -> int | None:

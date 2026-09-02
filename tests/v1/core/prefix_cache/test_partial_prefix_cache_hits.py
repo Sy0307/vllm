@@ -515,6 +515,8 @@ def test_partial_hit_then_internal_checkpoint_uses_distinct_mamba_blocks():
     mamba_blocks = manager.get_blocks(replay.request_id).blocks[1]
     assert mamba_blocks[2].block_id == checkpoint_block_id
     assert mamba_blocks[3].block_id == running_block_id
+    handoffs = manager.take_partial_tail_offloads()[replay.request_id]
+    assert (1, checkpoint_block_id, 12) in handoffs
 
 
 def test_internal_checkpoint_requires_block_aligned_start():
@@ -544,6 +546,38 @@ def test_internal_checkpoint_requires_block_aligned_start():
     assert not mamba_blocks[-1].is_null
     checkpoint_hash = request.block_hashes[48 // hash_block_size - 1]
     assert manager.block_pool.get_cached_block(checkpoint_hash, [1]) is None
+
+
+def test_external_prefix_does_not_allocate_unwritable_internal_checkpoint():
+    """An N-1 external hit already lies past the internal checkpoint.
+
+    The KDA kernel cannot write that older checkpoint while recomputing only
+    the final prompt token, so the D-side table must contain only its running
+    state. Registering an unwritten checkpoint would publish stale memory into
+    the local prefix cache.
+    """
+    hash_block_size = 2
+    mamba_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_prefill_checkpoint_blocks=1,
+    )
+    request = make_request("consumer", list(range(14)), hash_block_size, sha256)
+
+    new_blocks = manager.allocate_slots(
+        request,
+        num_new_tokens=1,
+        num_external_computed_tokens=13,
+        delay_cache_blocks=True,
+    )
+
+    assert new_blocks is not None
+    mamba_blocks = manager.get_blocks(request.request_id).blocks[1]
+    assert sum(not block.is_null for block in mamba_blocks) == 1
+    assert not mamba_blocks[-1].is_null
 
 
 def test_external_mamba_hit_same_block_uses_running_cow_on_continue():
@@ -854,6 +888,57 @@ def test_take_partial_tail_offloads_empty_without_partial_tail():
     req0.append_output_token_ids([2])
     assert manager.allocate_slots(req0, 1) is not None
     assert manager.take_partial_tail_offloads() == {}
+
+
+def test_truncated_producer_hands_off_full_boundary_running_state():
+    """A Direct producer's N-1 can end exactly on a Mamba block boundary.
+
+    Store saves ordinary chunks only through the cross-group LCM floor, so the
+    final full Mamba page still needs an explicit running-state descriptor.
+    """
+    hash_block_size = 2
+    mamba_block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=24,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    request = make_request("producer", [0, 0, 1, 1], hash_block_size, sha256)
+    request.kv_transfer_params = {"_p_side_truncated": True}
+
+    assert manager.allocate_slots(request, 4) is not None
+
+    offloads = manager.take_partial_tail_offloads()
+    assert list(offloads) == [request.request_id]
+    ((group_id, block_id, boundary),) = offloads[request.request_id]
+    assert group_id == 1
+    assert boundary == 4
+    assert block_id == manager.get_blocks(request.request_id).get_block_ids()[1][-1]
 
 
 def test_truncate_computed_blocks_preserves_sparse_prefix_positions():

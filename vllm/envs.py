@@ -241,6 +241,7 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
+    VLLM_PP_ASYNC_PREFILL_MAX_INFLIGHT: int = 0
     VLLM_KV_CACHE_LAYOUT: (
         Literal["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"]
         | None
@@ -1741,6 +1742,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE": lambda: int(
         os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")
+    ),
+    # Experimental PP async queue admission. When positive, keep at most this
+    # many context/prefill batches in the local PP batch queue while runnable
+    # decode work exists. The queue depth itself remains unchanged.
+    "VLLM_PP_ASYNC_PREFILL_MAX_INFLIGHT": lambda: int(
+        os.getenv("VLLM_PP_ASYNC_PREFILL_MAX_INFLIGHT", "0")
     ),
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available

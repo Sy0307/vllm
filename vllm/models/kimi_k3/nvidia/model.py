@@ -1424,6 +1424,25 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             hidden_states = hidden_states + residual
 
+        # PP transports model-level SP shards between matching TP ranks.  Merge
+        # upstream and local auxiliary states before the collective so every
+        # DSpark feature is gathered to the same token dimension.  Gathering
+        # only local states first produces [local_tokens, H] for PP0 features
+        # and [full_tokens, H] for PP1 features, which cannot be concatenated.
+        # PP receive tensors use persistent max-token buffers during profiling
+        # and CUDA-graph capture.  Only the leading SP-local rows were written
+        # by the upstream stage, so discard the unused capacity before packing
+        # all features for the single all-gather.  Eager execution already
+        # supplies local-sized views and is therefore unchanged.
+        if self.use_sequence_parallel and remote_aux:
+            local_num_tokens = hidden_states.shape[0]
+            for remote_hidden_state in remote_aux:
+                assert remote_hidden_state.shape[0] >= local_num_tokens
+            remote_aux = [
+                remote_hidden_state[:local_num_tokens]
+                for remote_hidden_state in remote_aux
+            ]
+        aux_hidden_states = remote_aux + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -1441,7 +1460,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

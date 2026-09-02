@@ -9,6 +9,12 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.dspark_context_transport import (
+    dspark_context_kv_transport_enabled,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.kda_recoverssm_transport import (
+    kda_target_state_transport_enabled,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     partial_hash_hits_enabled,
 )
@@ -64,6 +70,19 @@ class MooncakeStoreScheduler:
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
+        spec_config = vllm_config.speculative_config
+        self._uses_dspark = spec_config is not None and spec_config.use_dspark()
+        self._dspark_context_transport_enabled = dspark_context_kv_transport_enabled(
+            kvc_extra_config
+        )
+        if self._dspark_context_transport_enabled and (
+            not self._uses_dspark
+            or not kda_target_state_transport_enabled(kvc_extra_config)
+        ):
+            raise ValueError(
+                "MooncakeStore DSpark context transport requires DSpark and "
+                "kda_transport_policy=target_state_v1."
+            )
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = bool(
             kv_event_config and kv_event_config.enable_kv_cache_events
@@ -87,8 +106,10 @@ class MooncakeStoreScheduler:
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
         self._next_store_job_id = 0
-        # store_job_id -> (referenced block ids, ranks yet to report completion)
-        self._pinned_saves: dict[int, tuple[list[int], int]] = {}
+        # store_job_id -> (referenced block ids, worker ranks yet to report).
+        # Rank sets make repeated level-triggered reports idempotent.
+        self._pinned_saves: dict[int, tuple[list[int], set[int]]] = {}
+        self._acknowledged_store_job_ids: set[int] = set()
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -158,6 +179,13 @@ class MooncakeStoreScheduler:
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
             local_block_ids = blocks.get_block_ids()
+            if self._uses_dspark and not self._dspark_context_transport_enabled:
+                request.disable_speculative_decoding = True
+                logger.warning_once(
+                    "Disabling DSpark for requests with a MooncakeStore-loaded "
+                    "prefix because Store does not bootstrap the DSpark context "
+                    "cache. Target-model decoding remains enabled."
+                )
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -207,7 +235,9 @@ class MooncakeStoreScheduler:
         meta = MooncakeStoreConnectorMetadata(
             self._unfinished_request_ids,
             preempted_ids,
+            self._acknowledged_store_job_ids,
         )
+        self._acknowledged_store_job_ids = set()
 
         # Handle new requests
         for request in scheduler_output.scheduled_new_reqs:
@@ -379,7 +409,13 @@ class MooncakeStoreScheduler:
         # emit an offload-only ReqMeta (token_len_chunk=0 skips the normal
         # save; can_save=True takes the normal enqueue path).
         step_partial_tails = getattr(scheduler_output, "partial_tail_offloads", None)
-        if step_partial_tails and not is_consumer:
+        if step_partial_tails and (not is_consumer or self.save_decode_cache):
+            logger.info(
+                "Mooncake Store received KDA partial-tail handoff: "
+                "requests=%d, entries=%d",
+                len(step_partial_tails),
+                sum(map(len, step_partial_tails.values())),
+            )
             pending = dict(step_partial_tails)
             for req_meta in meta.requests:
                 if req_meta.can_save:
@@ -444,7 +480,10 @@ class MooncakeStoreScheduler:
             block_ids += [bid for group in req_meta.block_ids for bid in group]
             if not block_ids:
                 continue
-            self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
+            self._pinned_saves[store_job_id] = (
+                block_ids,
+                set(range(self._num_workers)),
+            )
             pool.touch([pool.blocks[bid] for bid in block_ids])
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -454,20 +493,35 @@ class MooncakeStoreScheduler:
             return
         pool = self._gpu_block_pool
         assert pool is not None
-        for store_job_id, count in meta.completed_saves.items():
+        completed_job_ids = set(meta.completed_saves) | set(meta.completed_save_ranks)
+        for store_job_id in completed_job_ids:
             pinned = self._pinned_saves.get(store_job_id)
             if pinned is None:
-                # The job referenced no blocks, so nothing was recorded for it.
+                # The job referenced no blocks, or a repeated level-triggered
+                # report arrived after release. ACK either case so workers can
+                # retire their local completion ledger.
+                self._acknowledged_store_job_ids.add(store_job_id)
                 continue
-            block_ids, remaining = pinned
-            remaining -= count
-            if remaining > 0:
-                self._pinned_saves[store_job_id] = (block_ids, remaining)
+            block_ids, pending_ranks = pinned
+            reported_ranks = set(meta.completed_save_ranks.get(store_job_id, ()))
+            if reported_ranks:
+                invalid_ranks = reported_ranks - set(range(self._num_workers))
+                assert not invalid_ranks, (
+                    f"store job {store_job_id} reported invalid worker ranks "
+                    f"{sorted(invalid_ranks)} for world size {self._num_workers}"
+                )
+                pending_ranks.difference_update(reported_ranks)
+            else:
+                # Backward-compatible fallback for connectors/tests that only
+                # carry counts. New Mooncake workers always carry rank ids.
+                count = meta.completed_saves.get(store_job_id, 0)
+                for rank in sorted(pending_ranks)[:count]:
+                    pending_ranks.remove(rank)
+            if pending_ranks:
+                self._pinned_saves[store_job_id] = (block_ids, pending_ranks)
                 continue
-            assert remaining == 0, (
-                f"store job {store_job_id} reported by too many ranks"
-            )
             del self._pinned_saves[store_job_id]
+            self._acknowledged_store_job_ids.add(store_job_id)
             # Tail-first, as elsewhere, so the shared prefix is evicted last.
             pool.free_blocks(pool.blocks[bid] for bid in reversed(block_ids))
 

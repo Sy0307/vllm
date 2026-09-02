@@ -29,6 +29,11 @@ if TYPE_CHECKING:
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        """Whether async connector writes must wait for cache-page zeroing."""
+        return False
+
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
         pass
 
@@ -55,6 +60,17 @@ class ActiveKVConnector(KVConnector):
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._disabled = False
+
+    @property
+    def requires_block_zeroing_before_async_load(self) -> bool:
+        # GPUModelRunner owns this wrapper, while the transport capability is
+        # implemented by the underlying worker-side connector.  Keep the
+        # capability query on the wrapper interface so the no-op and disabled
+        # paths cannot accidentally schedule a needless CUDA/host fence.
+        return (
+            not self._disabled
+            and self.kv_connector.requires_block_zeroing_before_async_load
+        )
 
     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:

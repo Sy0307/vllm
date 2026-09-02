@@ -639,6 +639,9 @@ class BlockPool:
         """
         assert dst_block.block_hash is None
         assert dst_block.block_id not in self.cached_block_hashes_by_block
+        # The queued GPU CoW copies every cache layer, including DSpark's
+        # context pages, so provenance follows the bytes to the destination.
+        dst_block.draft_context_valid = src_block.draft_context_valid
         num_tokens = src_block.block_hash_num_tokens
         for block_hash in self._remove_cached_block_hashes(src_block):
             # `num_tokens` only applies to the first (primary) insertion.
@@ -665,12 +668,17 @@ class BlockPool:
             for block in ret:
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
+                # A recycled page contains unrelated bytes until this owner
+                # computes them locally or a capability-aware loader fills all
+                # DSpark context regions.
+                block.draft_context_valid = False
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
+                block.draft_context_valid = False
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)

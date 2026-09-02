@@ -144,6 +144,44 @@ class KVConnectorFactory:
 
         return MultiConnector.all_children_support_hma(kv_transfer_config)
 
+    @classmethod
+    def supports_kda_recoverssm_config(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connector_cls = cls.get_connector_class(kv_transfer_config)
+        if kv_transfer_config.kv_connector != "MultiConnector":
+            capability = getattr(
+                connector_cls, "supports_kda_recoverssm_transport", None
+            )
+            return bool(
+                capability and capability(kv_transfer_config.kv_connector_extra_config)
+            )
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+            MultiConnector,
+        )
+
+        return MultiConnector.all_children_support_kda_recoverssm(kv_transfer_config)
+
+    @classmethod
+    def supports_dspark_context_config(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connector_cls = cls.get_connector_class(kv_transfer_config)
+        if kv_transfer_config.kv_connector != "MultiConnector":
+            capability = getattr(
+                connector_cls, "supports_dspark_context_transport", None
+            )
+            return bool(
+                capability and capability(kv_transfer_config.kv_connector_extra_config)
+            )
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+            MultiConnector,
+        )
+
+        return MultiConnector.all_children_support_dspark_context(kv_transfer_config)
+
 
 # Register various connectors here.
 # The registration should not be done in each individual file, as we want to

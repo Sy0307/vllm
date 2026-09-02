@@ -43,7 +43,30 @@ def _make_bare_scheduler(
     scheduler._num_workers = 1
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
+    scheduler._uses_dspark = False
+    scheduler._dspark_context_transport_enabled = False
     return scheduler
+
+
+@pytest.mark.parametrize(
+    ("transport_enabled", "expected_disabled"),
+    [(False, True), (True, False)],
+)
+def test_external_dspark_guard_requires_context_transport(
+    transport_enabled: bool, expected_disabled: bool
+):
+    scheduler = _make_bare_scheduler()
+    scheduler._uses_dspark = True
+    scheduler._dspark_context_transport_enabled = transport_enabled
+    request = SimpleNamespace(
+        request_id="req-context-policy",
+        disable_speculative_decoding=False,
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda: ([7],))
+
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=16)
+
+    assert request.disable_speculative_decoding is expected_disabled
 
 
 def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
@@ -928,6 +951,35 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
     assert tracker.has_pending_offload is True
+
+
+@pytest.mark.parametrize(
+    ("save_decode_cache", "expected_requests"),
+    [(False, 0), (True, 1)],
+)
+def test_consumer_partial_tail_requires_decode_cache_save(
+    save_decode_cache: bool, expected_requests: int
+):
+    """A D-side Store writer must persist locally extended conversation tails."""
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        kv_role="kv_consumer",
+        save_decode_cache=save_decode_cache,
+    )
+    out = _add_pending_partial_tail_request(
+        scheduler,
+        num_tokens=12,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        block_ids=([0],),
+    )
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert len(meta.requests) == expected_requests
+    if save_decode_cache:
+        assert meta.requests[0].partial_tail_offloads == [(1, 7, 12)]
+        assert meta.requests[0].can_save is True
 
 
 def test_resumed_partial_tail_uses_handoff_boundary():
