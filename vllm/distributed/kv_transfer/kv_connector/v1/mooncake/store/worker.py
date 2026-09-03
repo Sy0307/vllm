@@ -571,6 +571,25 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
         self._skip_store_requests: set[str] = set()
+        self._store_pressure_retry_seconds = max(
+            0.0,
+            float(os.getenv("VLLM_MOONCAKE_STORE_PRESSURE_RETRY_SECONDS", "30")),
+        )
+        self._store_pressure_retry_interval_seconds = max(
+            0.01,
+            float(
+                os.getenv(
+                    "VLLM_MOONCAKE_STORE_PRESSURE_RETRY_INTERVAL_SECONDS",
+                    "0.5",
+                )
+            ),
+        )
+        logger.info(
+            "Mooncake Store pressure retry: deadline_seconds=%.1f "
+            "interval_seconds=%.2f",
+            self._store_pressure_retry_seconds,
+            self._store_pressure_retry_interval_seconds,
+        )
 
         # Per-request high-water mark of tokens actually persisted; the next
         # batch resumes here, so pressure-skipped or failed ranges are retried.
@@ -691,6 +710,82 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._store_pressure_active = False
             self._skip_store_requests.clear()
         return True
+
+    def _batch_put_with_pressure_retry(
+        self,
+        keys: Sequence[str],
+        addrs: Sequence[Sequence[int]],
+        sizes: Sequence[Sequence[int]],
+        group_ids: Sequence[str] | None = None,
+    ) -> list[int]:
+        """Retry only entries rejected while disk offload frees DRAM.
+
+        Mooncake returns ``NO_AVAILABLE_HANDLE`` when a memory segment reaches
+        its high watermark. With SSD offload enabled this is normally transient:
+        the master has queued eviction, but the owner has not released the DRAM
+        replica yet. A single-shot PUT turns that short backpressure window into
+        a permanent cache hole. Keep the request's already-pinned source blocks
+        stable and retry only the rejected subset for a bounded interval.
+        """
+        assert len(keys) == len(addrs) == len(sizes)
+        if group_ids is not None:
+            assert len(group_ids) == len(keys)
+        if not keys:
+            return []
+
+        pending = list(range(len(keys)))
+        final_results = [MOONCAKE_NO_AVAILABLE_HANDLE] * len(keys)
+        deadline = time.monotonic() + self._store_pressure_retry_seconds
+        attempts = 0
+        while pending:
+            attempts += 1
+            if group_ids is not None:
+                self.replicate_config.group_ids = [group_ids[i] for i in pending]
+            results = self.store.batch_put_from_multi_buffers(
+                [keys[i] for i in pending],
+                [addrs[i] for i in pending],
+                [sizes[i] for i in pending],
+                self.replicate_config,
+            )
+            if len(results) != len(pending):
+                raise RuntimeError(
+                    "Mooncake batch_put returned "
+                    f"{len(results)} results for {len(pending)} keys"
+                )
+
+            retry_indices: list[int] = []
+            for index, result in zip(pending, results, strict=True):
+                final_results[index] = result
+                if result == MOONCAKE_NO_AVAILABLE_HANDLE:
+                    retry_indices.append(index)
+            if not retry_indices:
+                break
+            if self._store_pressure_retry_seconds <= 0 or time.monotonic() >= deadline:
+                break
+            if attempts == 1:
+                logger.info(
+                    "Mooncake Store waiting for SSD offload capacity before "
+                    "retrying %d/%d PUT entries (deadline_seconds=%.1f)",
+                    len(retry_indices),
+                    len(keys),
+                    self._store_pressure_retry_seconds,
+                )
+            pending = retry_indices
+            time.sleep(self._store_pressure_retry_interval_seconds)
+
+        if attempts > 1:
+            remaining = sum(
+                result == MOONCAKE_NO_AVAILABLE_HANDLE for result in final_results
+            )
+            log = logger.warning if remaining else logger.info
+            log(
+                "Mooncake Store pressure retry completed after %d attempts "
+                "(remaining=%d/%d)",
+                attempts,
+                remaining,
+                len(keys),
+            )
+        return final_results
 
     def _put_semantic_entries(
         self,
@@ -861,17 +956,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
             missing_keys = [data_keys[i] for i in missing_data_indices]
             missing_addrs = [data_addrs[i] for i in missing_data_indices]
             missing_sizes = [data_sizes[i] for i in missing_data_indices]
-            if data_group_ids is not None:
-                self.replicate_config.group_ids = [
-                    data_group_ids[i] for i in missing_data_indices
-                ]
+            missing_group_ids = (
+                [data_group_ids[i] for i in missing_data_indices]
+                if data_group_ids is not None
+                else None
+            )
             put_start = time.perf_counter()
             try:
-                results = self.store.batch_put_from_multi_buffers(
+                results = self._batch_put_with_pressure_retry(
                     missing_keys,
                     missing_addrs,
                     missing_sizes,
-                    self.replicate_config,
+                    missing_group_ids,
                 )
                 log_entry_checksums("STORE_PUT_AFTER", missing_entry_indices)
             except Exception:
@@ -1013,16 +1109,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         chunk_hashes[i].hex(),
                     )
                 )
-        if marker_group_ids is not None:
-            self.replicate_config.group_ids = marker_group_ids
         committed_keys = [marker_keys[i] for i in marker_indices]
         marker_start = time.perf_counter()
         try:
-            marker_results = self.store.batch_put_from_multi_buffers(
+            marker_results = self._batch_put_with_pressure_retry(
                 committed_keys,
                 marker_addrs,
                 marker_sizes,
-                self.replicate_config,
+                marker_group_ids,
             )
         except Exception:
             self._record_operation(
@@ -1215,8 +1309,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         marker_addr, marker_size = marker_db.prepare_value_for_block(0)
         commit_addrs = [marker_addr] * len(commit_keys)
         commit_sizes = [marker_size] * len(commit_keys)
+        commit_group_ids = None
         if self.enable_group_semantics and self.supports_group_ids:
-            self.replicate_config.group_ids = [
+            commit_group_ids = [
                 _make_mooncake_group_id(
                     self.semantic_commit_metadata,
                     self._semantic_commit_candidates[hash_bytes].hex(),
@@ -1225,11 +1320,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ]
         put_start = time.perf_counter()
         try:
-            commit_results = self.store.batch_put_from_multi_buffers(
+            commit_results = self._batch_put_with_pressure_retry(
                 commit_keys,
                 commit_addrs,
                 commit_sizes,
-                self.replicate_config,
+                commit_group_ids,
             )
         except Exception as error:
             logger.warning(
@@ -1611,15 +1706,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ):
                 stage_blocks.setdefault(group_index, []).append(block_id)
             self.kda_transport.stage_group_blocks(stage_blocks)
-        if group_ids is not None:
-            assert len(group_ids) == len(keys)
-            self.replicate_config.group_ids = group_ids
         batch_bytes = _sum_batch_bytes(sizes)
         put_start = time.perf_counter()
         try:
-            res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, self.replicate_config
-            )
+            res = self._batch_put_with_pressure_retry(keys, addrs, sizes, group_ids)
         except Exception as e:
             self._record_operation(
                 "save_put",
@@ -1969,19 +2059,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     stage_blocks.setdefault(g_idx, []).append(block_id)
                 self.kda_transport.stage_group_blocks(stage_blocks)
 
-            if group_ids is not None:
-                assert len(group_ids) == len(keys)
-                self.replicate_config.group_ids = group_ids
-
             batch_bytes = _sum_batch_bytes(sizes)
             put_start = time.perf_counter()
             try:
-                res = self.store.batch_put_from_multi_buffers(
-                    keys,
-                    addrs,
-                    sizes,
-                    self.replicate_config,
-                )
+                res = self._batch_put_with_pressure_retry(keys, addrs, sizes, group_ids)
                 failed = [i for i, v in enumerate(res) if v < 0]
                 self._record_operation(
                     "save_put",

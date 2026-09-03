@@ -438,6 +438,7 @@ def test_store_sending_thread_skips_request_during_cpu_pressure():
         [256, 256],
     ]
     thread = _make_store_sending_thread(store)
+    thread._store_pressure_retry_seconds = 0
 
     _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
 
@@ -827,6 +828,7 @@ def test_partial_tail_put_failure_activates_pressure_gate():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, -200, 256]
     thread = _make_partial_tail_send_thread(store)
+    thread._store_pressure_retry_seconds = 0
 
     _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
 
@@ -836,6 +838,46 @@ def test_partial_tail_put_failure_activates_pressure_gate():
 
     _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
     assert store.batch_put_from_multi_buffers.call_count == 1
+
+
+def test_store_pressure_retry_resubmits_only_rejected_entries():
+    calls = []
+    responses = iter(([256, -200, -500], [512]))
+
+    def put(keys, addrs, sizes, config):
+        calls.append((list(keys), list(addrs), list(sizes), list(config.group_ids)))
+        return next(responses)
+
+    store = MagicMock()
+    store.batch_put_from_multi_buffers.side_effect = put
+    replicate_config = SimpleNamespace(group_ids=[])
+    thread = _make_store_sending_thread(
+        store,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+    thread._store_pressure_retry_seconds = 1
+    thread._store_pressure_retry_interval_seconds = 0.01
+
+    with patch.object(mooncake_store_worker.time, "sleep"):
+        results = thread._batch_put_with_pressure_retry(
+            ["k0", "k1", "k2"],
+            [[10], [20], [30]],
+            [[100], [200], [300]],
+            ["g0", "g1", "g2"],
+        )
+
+    assert results == [256, 512, -500]
+    assert calls == [
+        (
+            ["k0", "k1", "k2"],
+            [[10], [20], [30]],
+            [[100], [200], [300]],
+            ["g0", "g1", "g2"],
+        ),
+        (["k1"], [[20]], [[200]], ["g1"]),
+    ]
 
 
 def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
@@ -2100,9 +2142,11 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = (
-        lambda keys, addrs, sizes, *_args: ([256] * len(keys))
-    )
+
+    def put(keys, addrs, sizes, *_args):
+        return [256] * len(keys)
+
+    store.batch_put_from_multi_buffers.side_effect = put
 
     full_spec = FullAttentionSpec(
         block_size=32, num_kv_heads=8, head_size=64, dtype=None
