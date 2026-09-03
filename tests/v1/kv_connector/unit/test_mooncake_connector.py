@@ -939,12 +939,21 @@ async def test_kv_producer(monkeypatch):
             # Timeout
             mock_send_blocks.reset_mock()
             mock_socket.send_multipart.reset_mock()
-            prefill_worker.reqs_need_send[transfer_id] = send_meta
-            send_meta.sent = 0
-            send_meta.ready.clear()
+            timeout_send_meta = SendBlockMeta(
+                p_req_id="p-req-timeout",
+                transfer_id=transfer_id,
+                local_block_ids=[],
+                ready=asyncio.Event(),
+            )
+            prefill_worker.reqs_need_send[transfer_id] = timeout_send_meta
             xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20, 21]])
             # Worker processes the consumer's request
-            await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
+            with patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+                "mooncake_connector.asyncio.wait",
+                new=AsyncMock(return_value=(set(), set())),
+            ):
+                await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
             # This should not be called because timeout.
             mock_send_blocks.assert_not_called()
             mock_socket.send_multipart.assert_called_once()
@@ -952,6 +961,24 @@ async def test_kv_producer(monkeypatch):
             response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
             assert response.err_msg == "Timeout waiting for P side ready."
             assert response.err_reqs == ["d-req-1"]
+            # The timed-out consumer is terminal, but P's live running block
+            # remains pinned until the producer actually finishes its forward.
+            assert timeout_send_meta.need_send == 1
+            assert timeout_send_meta.completed == 1
+            assert transfer_id in prefill_worker.reqs_need_send
+            assert "p-req-timeout" not in prefill_worker.finished_sending_reqs
+
+            # If P finishes after the consumer deadline, publishing the late
+            # handoff releases it immediately rather than starting another
+            # full producer expiry window.
+            late_metadata = MooncakeConnectorMetadata()
+            late_metadata.reqs_to_send["p-req-timeout"] = (
+                transfer_id,
+                [[10, 11]],
+            )
+            await prefill_worker.record_send_reqs(late_metadata)
+            assert transfer_id not in prefill_worker.reqs_need_send
+            assert "p-req-timeout" in prefill_worker.finished_sending_reqs
 
         # Transfer error
         with patch.object(

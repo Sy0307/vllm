@@ -317,12 +317,15 @@ class KDATargetStateTransport:
         )
 
         def valid_ids(group_index: int) -> list[int]:
-            return sorted(
-                {
+            # Block IDs are allocator identities, not sequence positions. Keep
+            # the caller's block-table order so the last ID is the semantic
+            # tail; sorting selects an unrelated page after reuse.
+            return list(
+                dict.fromkeys(
                     block_id
                     for block_id in groups.get(group_index, ())
                     if block_id != NULL_BLOCK_ID and block_id >= 0
-                }
+                )
             )
 
         kda_digest = hashlib.blake2b(digest_size=16)
@@ -335,9 +338,9 @@ class KDATargetStateTransport:
         draft_attention_layers: dict[str, str] = {}
         selected_groups: dict[int, tuple[int, int]] = {}
         with self._lock:
-            devices = {
-                layer.cache.device for layer in self.layers.values()
-            } | {cache.device for _, cache, _ in self._attention_layers.values()}
+            devices = {layer.cache.device for layer in self.layers.values()} | {
+                cache.device for _, cache, _ in self._attention_layers.values()
+            }
             for device in devices:
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
@@ -452,9 +455,7 @@ class KDATargetStateTransport:
                 for region in layer.regions:
                     selected = region.tensor.index_select(0, indices).contiguous()
                     payload = selected.view(torch.uint8).cpu().numpy().tobytes()
-                    region_digest = hashlib.blake2b(
-                        payload, digest_size=16
-                    ).hexdigest()
+                    region_digest = hashlib.blake2b(payload, digest_size=16).hexdigest()
                     digest.update(layer.layer_name.encode())
                     digest.update(region.kind.encode())
                     digest.update(payload)

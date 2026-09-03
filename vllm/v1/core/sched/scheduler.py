@@ -53,7 +53,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
@@ -260,6 +260,41 @@ class Scheduler(SchedulerInterface):
         self.uses_dspark = bool(
             speculative_config is not None and speculative_config.use_dspark()
         )
+        # ``draft_context_valid`` describes DSpark's draft-attention KV, not
+        # every cache group owned by the request. In hybrid KDA models the
+        # Mamba groups use sparse NULL/checkpoint/running state slots; treating
+        # one of those slots as missing draft context spuriously disables
+        # speculation when a Direct request resumes from local APC.
+        #
+        # Prefer the cache planner's explicit draft-group annotation. Older
+        # model integrations may not annotate it, so conservatively fall back
+        # to attention groups. This still excludes Mamba state groups, which
+        # can never contain DSpark context KV.
+        self._dspark_context_group_indices: tuple[int, ...] = tuple(
+            group_index
+            for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
+            if group.is_eagle_group
+        )
+        if self.uses_dspark and not self._dspark_context_group_indices:
+            self._dspark_context_group_indices = tuple(
+                group_index
+                for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(group.kv_cache_spec, AttentionSpec)
+            )
+            logger.warning_once(
+                "DSpark KV cache groups have no explicit draft-context "
+                "annotation; provenance will track attention groups %s.",
+                self._dspark_context_group_indices,
+            )
+        if self.uses_dspark:
+            if not self._dspark_context_group_indices:
+                raise ValueError(
+                    "DSpark requires at least one draft-context attention group"
+                )
+            logger.info(
+                "DSpark draft-context provenance tracks KV cache groups %s",
+                self._dspark_context_group_indices,
+            )
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
@@ -456,9 +491,7 @@ class Scheduler(SchedulerInterface):
         direct_prefill_truncated = bool(
             transfer_params and transfer_params.get("_p_side_truncated")
         )
-        replay_boundary = request.num_prompt_tokens - int(
-            not direct_prefill_truncated
-        )
+        replay_boundary = request.num_prompt_tokens - int(not direct_prefill_truncated)
         tail_boundary = (
             replay_boundary // self.hash_block_size * self.hash_block_size
             if self.mamba_partial_cache_hit
@@ -504,8 +537,8 @@ class Scheduler(SchedulerInterface):
             return False
         return any(
             not block.is_null and not block.draft_context_valid
-            for group_blocks in blocks.blocks
-            for block in group_blocks
+            for group_index in self._dspark_context_group_indices
+            for block in blocks.blocks[group_index]
         )
 
     def _mark_dspark_context_valid(self, request: Request) -> None:
@@ -517,11 +550,10 @@ class Scheduler(SchedulerInterface):
         """
         if not self.uses_dspark or request.disable_speculative_decoding:
             return
-        for group, group_blocks in zip(
-            self.kv_cache_config.kv_cache_groups,
-            self.kv_cache_manager.get_blocks(request.request_id).blocks,
-            strict=True,
-        ):
+        request_blocks = self.kv_cache_manager.get_blocks(request.request_id).blocks
+        for group_index in self._dspark_context_group_indices:
+            group = self.kv_cache_config.kv_cache_groups[group_index]
+            group_blocks = request_blocks[group_index]
             block_size = group.kv_cache_spec.block_size
             num_computed_blocks = (
                 request.num_computed_tokens + block_size - 1
@@ -906,9 +938,7 @@ class Scheduler(SchedulerInterface):
                         block_aligned_local = (
                             num_new_local_computed_tokens - partial_tail
                         )
-                        if (
-                            request_id in self.bypass_external_kv_load_req_ids
-                        ):
+                        if request_id in self.bypass_external_kv_load_req_ids:
                             ext_tokens = 0
                             load_kv_async = False
                         else:
@@ -1347,10 +1377,7 @@ class Scheduler(SchedulerInterface):
         # pin); the manager drops stale entries when the request's blocks are
         # popped for free.
         pending_partial_tail_offloads = None
-        if (
-            self.connector is not None
-            and self.connector.supports_partial_tail_offload
-        ):
+        if self.connector is not None and self.connector.supports_partial_tail_offload:
             pending_partial_tail_offloads = (
                 self.kv_cache_manager.take_partial_tail_offloads() or None
             )
@@ -2979,17 +3006,39 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            req = self.requests.get(req_id)
+            if req is None:
+                # Connector completions are asynchronous and can race an
+                # abort or a prefix/connector-cache reset.  The connector was
+                # updated above so it has already retired any connector-owned
+                # resources (for example Mooncake Store save pins).  Treat a
+                # completion for a request the scheduler has since retired as
+                # an idempotent stale notification instead of taking down the
+                # whole EngineCore.
+                logger.warning(
+                    "Ignoring stale KV receive completion for retired request %s",
+                    req_id,
+                )
+                self.finished_recving_kv_req_ids.discard(req_id)
+                self.failed_recving_kv_req_ids.discard(req_id)
+                continue
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
             else:
                 assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                self._free_blocks(req)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            req = self.requests.get(req_id)
+            if req is None:
+                # A duplicate or delayed send completion after request
+                # retirement is harmless for the same reason as above.
+                logger.warning(
+                    "Ignoring stale KV send completion for retired request %s",
+                    req_id,
+                )
+                continue
+            self._free_blocks(req)
 
     def _update_requests_with_invalid_blocks(
         self,
@@ -3069,7 +3118,34 @@ class Scheduler(SchedulerInterface):
                         unshared_boundaries.append(boundary)
 
                 if unshared_boundaries:
-                    request.num_computed_tokens = min(unshared_boundaries)
+                    invalid_boundary = min(unshared_boundaries)
+                    # Re-zeroing after a failed async load operates on whole
+                    # physical attention blocks.  In an HMA layout, an
+                    # invalid semantic region can end at a fine-grained hash
+                    # boundary that is not aligned to every cache manager
+                    # (for example 29,051 tokens with a 7,168-token scheduler
+                    # block).  Keeping that exact boundary would either trip
+                    # record_blocks_for_zeroing() or, worse, wipe a partial
+                    # block whose prefix is still considered computed.
+                    # Roll back to the common scheduler boundary so all cache
+                    # groups agree on the valid prefix before caching and
+                    # whole-block zeroing.
+                    if self.needs_kv_cache_zeroing:
+                        safe_boundary = (
+                            invalid_boundary // self.block_size * self.block_size
+                        )
+                        if safe_boundary != invalid_boundary:
+                            logger.warning(
+                                "Aligning failed KV-load recompute boundary "
+                                "from %d to %d (scheduler block size %d) for "
+                                "request %s.",
+                                invalid_boundary,
+                                safe_boundary,
+                                self.block_size,
+                                request.request_id,
+                            )
+                        invalid_boundary = safe_boundary
+                    request.num_computed_tokens = invalid_boundary
                     total_affected_tokens += (
                         req_num_computed_tokens - request.num_computed_tokens
                     )

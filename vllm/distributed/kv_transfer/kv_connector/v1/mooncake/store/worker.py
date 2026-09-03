@@ -36,15 +36,15 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
-from vllm.distributed.kv_transfer.kv_connector.v1.kda_recoverssm_transport import (
-    KDA_TARGET_STATE_TRANSPORT,
-    KDATargetStateTransport,
-    kda_target_state_transport_enabled,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.dspark_context_transport import (
     DSPARK_CONTEXT_KV_TRANSPORT,
     DSPARK_CONTEXT_REGION_KIND,
     dspark_context_kv_transport_enabled,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.kda_recoverssm_transport import (
+    KDA_TARGET_STATE_TRANSPORT,
+    KDATargetStateTransport,
+    kda_target_state_transport_enabled,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
@@ -856,9 +856,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             }
             if debug_entries and existing_entry_indices:
                 stage_entry_indices(existing_entry_indices)
-                log_entry_checksums(
-                    "STORE_PUT_EXISTING_SOURCE", existing_entry_indices
-                )
+                log_entry_checksums("STORE_PUT_EXISTING_SOURCE", existing_entry_indices)
 
             missing_keys = [data_keys[i] for i in missing_data_indices]
             missing_addrs = [data_addrs[i] for i in missing_data_indices]
@@ -1458,9 +1456,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             # covers both the final running h(N-1) slot (including an exactly
             # block-aligned boundary) and internal Prefill checkpoints whose
             # physical slot index is intentionally unrelated to the key.
-            for handoff_boundary, block_id in sorted(
-                explicit_group_handoffs.items()
-            ):
+            for handoff_boundary, block_id in sorted(explicit_group_handoffs.items()):
                 if handoff_boundary <= 0:
                     continue
                 hash_index = handoff_boundary // hash_block_size - 1
@@ -1553,9 +1549,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         exact_blocks.setdefault(group_index, []).append(block_id)
                 self.kda_transport.stage_group_blocks(exact_blocks)
                 for group_index, block_ids in exact_blocks.items():
-                    key_hash = req_meta.block_hashes[
-                        boundary // hash_block_size - 1
-                    ]
+                    key_hash = req_meta.block_hashes[boundary // hash_block_size - 1]
                     for block_id in dict.fromkeys(block_ids):
                         self.kda_transport.debug_entry_checksums(
                             "STORE_SAVE",
@@ -1688,6 +1682,23 @@ class KVCacheStoreSendingThread(KVTransferThread):
             current_event = req_meta.current_event
 
             if not self.is_live_store_job(req_meta):
+                return
+
+            # Scheduler and worker cache groups are a wire contract. Never
+            # partially persist a request when that contract is broken: a
+            # missing group would make a later marker advertise an incomplete
+            # logical cache entry. This guard also keeps the background thread
+            # alive and releases the job's pinned blocks via ``finally``.
+            if len(block_ids_per_group) != len(self.token_databases):
+                logger.error(
+                    "Rejecting Mooncake store job with cache-group mismatch "
+                    "(req=%s, store_job_id=%s, metadata_groups=%d, "
+                    "worker_groups=%d)",
+                    req_id,
+                    req_meta.store_job_id,
+                    len(block_ids_per_group),
+                    len(self.token_databases),
+                )
                 return
 
             if self.enable_kv_event:

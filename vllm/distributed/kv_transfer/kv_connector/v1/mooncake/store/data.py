@@ -462,7 +462,11 @@ class ReqMeta:
         return ReqMeta(
             req_id=tracker.req_id,
             token_len_chunk=num_tokens_to_save,
-            block_ids=tracker.allocated_block_ids,
+            # The worker consumes this metadata asynchronously while the
+            # scheduler keeps extending the request tracker.  Own a stable
+            # per-job block-table snapshot so a queued job can neither observe
+            # future, unpinned blocks nor depend on the tracker's lifetime.
+            block_ids=tuple(group.copy() for group in tracker.allocated_block_ids),
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,

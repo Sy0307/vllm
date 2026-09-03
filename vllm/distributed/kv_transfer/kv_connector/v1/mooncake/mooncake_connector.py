@@ -555,9 +555,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     @property
     def requires_block_zeroing_before_async_load(self) -> bool:
-        dcp_size = (
-            self._vllm_config.parallel_config.decode_context_parallel_size or 1
-        )
+        dcp_size = self._vllm_config.parallel_config.decode_context_parallel_size or 1
         return (
             self._kv_transfer_config.is_kv_consumer
             and dcp_size > 1
@@ -985,9 +983,7 @@ class MooncakeConnectorScheduler:
             for req_id, (req, block_ids) in self._reqs_need_send.items():
                 assert req.kv_transfer_params is not None
                 if block_ids:
-                    block_ids = self._apply_partial_tail_send_overrides(
-                        req, block_ids
-                    )
+                    block_ids = self._apply_partial_tail_send_overrides(req, block_ids)
                 meta.add_new_req(
                     request_id=req_id,
                     local_block_ids=block_ids,
@@ -1168,6 +1164,10 @@ class MooncakeConnectorWorker:
             kv_transfer_config.kv_connector_extra_config.get(
                 "max_transfer_batch_bytes", DEFAULT_MAX_TRANSFER_BATCH_BYTES
             )
+        )
+        logger.info(
+            "Mooncake Direct producer-ready timeout is %d seconds.",
+            envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
         )
         if (
             self.max_transfer_batch_descriptors <= 0
@@ -1531,8 +1531,7 @@ class MooncakeConnectorWorker:
         )
         if (
             align_err is None
-            and meta.dspark_context_transport
-            != self._dspark_context_transport_enabled
+            and meta.dspark_context_transport != self._dspark_context_transport_enabled
         ):
             align_err = (
                 "Mooncake DSpark context transport capability mismatch: "
@@ -1594,6 +1593,18 @@ class MooncakeConnectorWorker:
                 # Timeout, abort all pending requests.
                 for task in wait_tasks:
                     task.cancel()
+                await asyncio.gather(*wait_tasks, return_exceptions=True)
+                # A consumer that has timed out and received a terminal error
+                # can no longer access this producer's blocks.  Account for it
+                # even when P has not finished its forward yet.  The request is
+                # deliberately kept pinned until record_send_reqs() publishes
+                # the real blocks; that late publication can then release them
+                # immediately instead of waiting for a second expiry window.
+                for send_meta in pending_reqs.values():
+                    if not send_meta.need_send:
+                        self.resolve_need_send(send_meta, remote_tp_ranks)
+                    send_meta.completed += 1
+                    self._try_finish_send_meta(send_meta)
                 logger.warning(
                     "Timeout waiting for P side ready: %s", list(pending_reqs)
                 )
@@ -1699,13 +1710,28 @@ class MooncakeConnectorWorker:
                 for _, send_meta in ready_reqs:
                     send_meta.sending -= 1
                     send_meta.completed += 1
-                    if (
-                        send_meta.completed >= send_meta.need_send
-                        and send_meta.sending == 0
-                        and self.reqs_need_send.pop(send_meta.transfer_id, None)
-                        is not None
-                    ):
-                        self.finished_sending_reqs.add(send_meta.p_req_id)
+                    self._try_finish_send_meta(send_meta)
+
+    def _try_finish_send_meta(self, send_meta: SendBlockMeta) -> bool:
+        """Release a producer request after every consumer is terminal.
+
+        ``completed`` includes successful transfers, transfer failures, and
+        consumers that gave up while waiting for P.  A pre-ready timeout must
+        not free a running producer block, so readiness is an explicit part of
+        the lifetime gate.
+        """
+        if (
+            not send_meta.ready.is_set()
+            or not send_meta.need_send
+            or send_meta.completed < send_meta.need_send
+            or send_meta.sending != 0
+            or self.reqs_need_send.get(send_meta.transfer_id) is not send_meta
+        ):
+            return False
+        assert send_meta.p_req_id
+        del self.reqs_need_send[send_meta.transfer_id]
+        self.finished_sending_reqs.add(send_meta.p_req_id)
+        return True
 
     def resolve_need_send(
         self,
@@ -2651,13 +2677,33 @@ class MooncakeConnectorWorker:
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
             if block_ids:
                 # Already gone through request_finished()
-                send_meta = self.reqs_need_send[transfer_id]
+                send_meta = self.reqs_need_send.get(transfer_id)
+                if send_meta is None:
+                    # Normally update_state_after_alloc() or the D pull creates
+                    # this placeholder first.  Preserve correctness if worker
+                    # metadata arrives without it: publish the ready handoff so
+                    # a later D pull can still consume the pinned blocks.
+                    send_meta = SendBlockMeta(
+                        p_req_id=p_req_id,
+                        transfer_id=transfer_id,
+                        local_block_ids=[],
+                        ready=asyncio.Event(),
+                    )
+                    self.reqs_need_send[transfer_id] = send_meta
                 send_meta.p_req_id = p_req_id
                 send_meta.local_block_ids = block_ids
                 send_meta.expire_time = (
                     time.perf_counter() + envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT
                 )
                 send_meta.ready.set()
+                if self._try_finish_send_meta(send_meta):
+                    logger.info(
+                        "Released late Mooncake Direct producer handoff %s "
+                        "immediately after all %d consumer attempts had "
+                        "already reached a terminal response.",
+                        transfer_id,
+                        send_meta.completed,
+                    )
             else:
                 # From update_state_after_alloc(),
                 # but not reach request_finished() yet
@@ -2671,7 +2717,7 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
+            send_meta = self.reqs_need_send.pop(transfer_id, None)
             if send_meta:
                 assert not send_meta.ready.is_set()
 

@@ -1307,6 +1307,28 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
     assert scheduler.reset_prefix_cache(reset_connector=True) is True
 
 
+def test_stale_kv_transfer_completions_after_request_retirement_are_ignored():
+    """Late connector completions must be idempotent.
+
+    Async Direct/Store work can finish after an abort or connector-cache
+    reset has retired the request.  Such a completion has no live blocks left
+    for the scheduler to release and must not crash EngineCore.
+    """
+    scheduler = create_scheduler()
+    scheduler.finished_recving_kv_req_ids.add("stale-recv")
+    scheduler.failed_recving_kv_req_ids.add("stale-recv")
+
+    scheduler._update_from_kv_xfer_finished(
+        KVConnectorOutput(
+            finished_recving={"stale-recv"},
+            finished_sending={"stale-send"},
+        )
+    )
+
+    assert "stale-recv" not in scheduler.finished_recving_kv_req_ids
+    assert "stale-recv" not in scheduler.failed_recving_kv_req_ids
+
+
 def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     (tmp_path / "config.json").write_text(
@@ -1784,16 +1806,24 @@ def test_dspark_draft_context_block_provenance_helpers():
 
     scheduler = object.__new__(Scheduler)
     scheduler.uses_dspark = True
-    block = KVCacheBlock(7)
-    blocks = KVCacheBlocks(([block],))
+    scheduler._dspark_context_group_indices = (1,)
+    mamba_block = KVCacheBlock(6)
+    draft_context_block = KVCacheBlock(7)
+    blocks = KVCacheBlocks(([mamba_block], [draft_context_block]))
 
     assert scheduler._local_prefix_lacks_dspark_context(blocks)
-    block.draft_context_valid = True
+    draft_context_block.draft_context_valid = True
     assert not scheduler._local_prefix_lacks_dspark_context(blocks)
+    # KDA/Mamba groups do not contain draft attention KV and must not affect
+    # DSpark provenance.
+    assert not mamba_block.draft_context_valid
 
-    block.draft_context_valid = False
+    draft_context_block.draft_context_valid = False
     scheduler.kv_cache_config = Mock(
-        kv_cache_groups=[Mock(kv_cache_spec=Mock(block_size=16))]
+        kv_cache_groups=[
+            Mock(kv_cache_spec=Mock(block_size=16)),
+            Mock(kv_cache_spec=Mock(block_size=16)),
+        ]
     )
     scheduler.kv_cache_manager = Mock()
     scheduler.kv_cache_manager.get_blocks.return_value = blocks
@@ -1803,12 +1833,13 @@ def test_dspark_draft_context_block_provenance_helpers():
         disable_speculative_decoding=False,
     )
     scheduler._mark_dspark_context_valid(request)
-    assert block.draft_context_valid
+    assert draft_context_block.draft_context_valid
+    assert not mamba_block.draft_context_valid
 
-    block.draft_context_valid = False
+    draft_context_block.draft_context_valid = False
     request.disable_speculative_decoding = True
     scheduler._mark_dspark_context_valid(request)
-    assert not block.draft_context_valid
+    assert not draft_context_block.draft_context_valid
 
 
 def test_spec_decode_padding_skipped_for_diffusion():

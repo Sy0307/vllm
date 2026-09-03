@@ -12,6 +12,7 @@ These tests verify correct behavior in three scenarios:
 """
 
 from collections.abc import Callable
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -27,6 +28,45 @@ from .utils import (
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_async_hma_failure_rolls_back_to_common_zeroing_boundary():
+    """A fine-grained failed region must not leave a partial page marked valid.
+
+    Reproduces the formal P-island failure where the first invalid semantic
+    region was at token 29,051 while the heterogeneous scheduler block was
+    7,168 tokens.  The subsequent whole-block zeroing used to assert because
+    29,051 was not aligned to every attention manager.
+    """
+    scheduler = object.__new__(Scheduler)
+    scheduler.needs_kv_cache_zeroing = True
+    scheduler.block_size = 7168
+    scheduler.kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=1)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=1792)),
+        ]
+    )
+    scheduler.kv_cache_manager = Mock()
+    # Group 0's fine-grained logical block 29,051 is invalid.  The Mamba
+    # group has enough entries to cover the externally reported prefix.
+    scheduler.kv_cache_manager.get_block_ids.return_value = (
+        [*range(29051), 999_999],
+        [*range(100_000, 100_017)],
+    )
+    request = Mock(request_id="req-hma-partial", num_computed_tokens=30_000)
+
+    affected, recomputed, evicted = scheduler._update_requests_with_invalid_blocks(
+        [request],
+        {999_999},
+        {},
+        evict_blocks=False,
+    )
+
+    assert affected == {request.request_id}
+    assert request.num_computed_tokens == 28_672
+    assert recomputed == 30_000 - 28_672
+    assert not evicted
 
 
 def _make_get_num_new_matched_tokens(

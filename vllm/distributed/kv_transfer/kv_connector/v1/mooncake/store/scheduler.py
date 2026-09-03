@@ -383,7 +383,14 @@ class MooncakeStoreScheduler:
         ) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
-                if not load_spec:
+                # MultiConnector queries every child before choosing the first
+                # hit. An unchosen Store child is notified with zero external
+                # tokens, which leaves its speculative lookup rejected
+                # (can_load=False). Such a request is parked for the selected
+                # child's async load and has not run a forward pass, so it must
+                # not be converted into a Store save job. In particular, its
+                # endpoint-local block tuple may intentionally be empty.
+                if load_spec is None or not load_spec.can_load:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
                 request_tracker = RequestTracker(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import logging
 
 import pytest
@@ -160,6 +161,23 @@ def test_checksum_splits_target_and_draft_attention(monkeypatch, caplog):
     message = caplog.messages[-1]
     assert "target_attention_layers={'model.layers.1.self_attn':" in message
     assert "draft_attention_layers={'model.layers.2.self_attn':" in message
+
+
+@pytest.mark.cpu_test
+def test_checksum_uses_block_table_order_for_attention_tail(monkeypatch, caplog):
+    monkeypatch.setenv("VLLM_KDA_TRANSPORT_CHECKSUM", "1")
+    pages = torch.tensor([[1] * 8, [2] * 8], dtype=torch.uint8)
+    transport = KDATargetStateTransport(
+        {}, {"model.layers.1.self_attn": (0, pages, 1)}, target_num_layers=2
+    )
+
+    with caplog.at_level(logging.INFO):
+        transport.debug_checksums("D_STORE", "req", {0: [1, 0]})
+
+    message = caplog.messages[-1]
+    expected = hashlib.blake2b(pages[0].numpy().tobytes(), digest_size=16).hexdigest()
+    assert "groups={0: (2, 0)}" in message
+    assert f"'model.layers.1.self_attn': '{expected}'" in message
 
 
 @pytest.mark.cpu_test
