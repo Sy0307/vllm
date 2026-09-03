@@ -5,6 +5,8 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -751,3 +753,10 @@ def test_shutdown_scheduler_role_is_noop():
     # Scheduler role holds no store handle, so shutdown must be a safe no-op.
     assert connector.connector_worker is None
     connector.shutdown()
+
+
+@pytest.mark.skip_global_cleanup
+def test_store_ignores_sibling_pp_aware_handshake():
+    connector = object.__new__(mooncake_store_connector.MooncakeStoreConnector)
+
+    connector.set_xfer_handshake_metadata_pp_aware({(1, 0): MagicMock()})

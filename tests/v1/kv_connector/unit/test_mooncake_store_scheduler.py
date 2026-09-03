@@ -43,6 +43,7 @@ def _make_bare_scheduler(
     scheduler._num_workers = 1
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
+    scheduler._acknowledged_store_job_ids = set()
     scheduler._uses_dspark = False
     scheduler._dspark_context_transport_enabled = False
     return scheduler

@@ -24,6 +24,7 @@ from vllm.distributed.kv_events import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     KVConnectorWorkerMetadata,
@@ -95,6 +96,18 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
 class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Accept PP-aware metadata broadcast by a sibling direct connector.
+
+        MooncakeStore discovers storage owners through its metadata service and
+        has no direct-transfer side channel to configure. MultiConnector
+        broadcasts the direct connector's handshake to every child, so Store
+        deliberately consumes that metadata as a no-op.
+        """
+        del metadata
+
     @classmethod
     def supports_kda_recoverssm_transport(cls, extra_config: dict[str, Any]) -> bool:
         return kda_target_state_transport_enabled(extra_config)
@@ -143,9 +156,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             else {}
         )
         supports_kda_dcp = (
-            pcp == 1
-            and dcp > 1
-            and kda_target_state_transport_enabled(extra_config)
+            pcp == 1 and dcp > 1 and kda_target_state_transport_enabled(extra_config)
         )
         if supports_kda_dcp:
             for g_idx, group in enumerate(kv_cache_config.kv_cache_groups):
