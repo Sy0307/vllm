@@ -1,0 +1,15 @@
+{
+ "deployment": "k3-unified-spec55-v1",
+ "release_dir": "/gpfs/mszn/data/k3-benchmarks/k3-ops-unified-spec55-20260927",
+ "overlay_manifest_sha256": "38906276662dbc03c61e4ca1bd1747825ae97a033d598736b7510d91499546bf",
+ "nodes": [
+  {
+   "hostname": "xb01-gpu-200b-0025",
+   "ip": "10.18.1.25"
+  },
+  {
+   "hostname": "xb01-gpu-200b-0024",
+   "ip": "10.18.1.24"
+  }
+ ]
+}
