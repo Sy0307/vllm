@@ -169,7 +169,7 @@ python3 $R/gate_mooncake.py /tmp/k3-gate.json 11 http://10.18.1.25:18984   # ran
 - 两台 `verify.py --full` 全部 PASS：命令行、环境变量、27 个 `VLLM_K3_*` 开关、5159 个 overlay 文件哈希全部一致；
 - `gate_mooncake.py` 输出 GATE PASS。冷算的 64 个 token 和 logprob 在三种长度上都与测试期各臂的门禁逐位相同，Mooncake 命中与冷算完全一致。
 - 按第 8 节停机，32 秒内 GPU 全部释放；
-- 用本发布包加 `--synthetic-acceptance 0.80,0.60,0.45,0.35` 复现受控 55% 的 1h 性能：进行中，结果出来后更新本节。
+- 用本发布包加 `--synthetic-acceptance 0.80,0.60,0.45,0.35` 复现受控 55% 的 1h 性能（19:34 就绪，两台 verify PASS）：官方分 **1903.48 tok/s**。与测试时的 1900.96 相差 +0.13%；300 / 900 / 1800 / 3600 s 各时点完成量差 +0.4 / +0.7 / +0.2 / +0.5%；AL 3.202；ITL 37.66 ms；全程两台零报错。
 
 ## 8. 停止
 
