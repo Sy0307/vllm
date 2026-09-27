@@ -194,6 +194,22 @@ def compute_nixl_compatibility_hash(
         # push (WRITE) and pull (READ) connectors are protocol-incompatible
         "transfer_mode": transfer_mode,
     }
+    if (
+        vllm_config.kv_transfer_config is not None
+        and vllm_config.kv_transfer_config.get_from_extra_config(
+            "experimental_homogeneous_pp", False
+        )
+        is True
+    ):
+        factors["experimental_homogeneous_pp"] = "non-spec-stage-paired-v1"
+        if (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "experimental_recoverssm", False
+            )
+            is True
+        ):
+            factors["experimental_homogeneous_pp"] = "recoverssm-stage-paired-v1"
+            factors["recover_query_len"] = vllm_config.uniform_decode_query_len
 
     compat_hash = hash_factors(factors)
     logger.debug(

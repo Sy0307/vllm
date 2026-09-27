@@ -752,12 +752,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
+        *,
+        projected_qkvgfab: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        num_tokens = hidden_states.size(0)
+        num_tokens = (
+            hidden_states.size(0)
+            if projected_qkvgfab is None
+            else projected_qkvgfab.size(0)
+        )
         projection_events = self._projection_events
         projection_aux_stream = self._projection_aux_stream
         if (
-            0 < num_tokens <= self._projection_overlap_max_tokens
+            projected_qkvgfab is None
+            and 0 < num_tokens <= self._projection_overlap_max_tokens
             and hidden_states.stride() == (self.hidden_size, 1)
             and projection_events is not None
             and projection_aux_stream is not None
@@ -779,7 +786,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 dim=-1,
             )
         else:
-            projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
+            if projected_qkvgfab is None:
+                projected_qkvgfab = self.in_proj_qkvgfab(hidden_states)[0]
             split_sizes = [
                 3 * self.local_projection_size,
                 self.local_projection_size,

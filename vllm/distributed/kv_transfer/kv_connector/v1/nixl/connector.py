@@ -374,7 +374,39 @@ class NixlPushConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
-        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+        assert vllm_config.kv_transfer_config is not None
+        homogeneous_pp = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "experimental_homogeneous_pp", False
+            )
+            is True
+        )
+        if homogeneous_pp:
+            from vllm.distributed.kv_transfer.kv_connector.v1 import (
+                kda_recoverssm_transport,
+            )
+
+            parallel = vllm_config.parallel_config
+            if (
+                (
+                    vllm_config.speculative_config is not None
+                    and not kda_recoverssm_transport.supports_homogeneous_recoverssm(
+                        vllm_config
+                    )
+                )
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size
+                not in (1, parallel.tensor_parallel_size)
+            ):
+                raise ValueError(
+                    "Experimental homogeneous PP requires no speculation or "
+                    "the explicit homogeneous RecoverSSM path, "
+                    "PCP1, and DCP1 or DCP equal to TP."
+                )
+        if (
+            vllm_config.parallel_config.decode_context_parallel_size > 1
+            and not homogeneous_pp
+        ):
             raise ValueError(
                 "NixlPushConnector does not support decode_context_parallel_size > 1."
             )

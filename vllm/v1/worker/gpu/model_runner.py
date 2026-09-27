@@ -55,7 +55,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
 )
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -315,6 +315,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                async_scheduling=self.scheduler_config.async_scheduling,
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -1645,7 +1646,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     scheduler_output.aux_output_connector_metadata
                 )
             if scheduler_output.total_num_scheduled_tokens == 0:
-                # No need to run the model.
+                # No model work follows, so post any receive selected above.
+                if self.pp_handler is not None:
+                    self.pp_handler.launch_post_model_receive()
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
@@ -1699,6 +1702,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
+            if not dummy_run and self.pp_handler is not None:
+                self.pp_handler.launch_post_model_receive()
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
@@ -1869,10 +1874,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            received_num_tokens = n
+            if not dummy_run:
+                received_num_tokens = get_intermediate_tensor_num_tokens(
+                    intermediate_tensors
+                )
+                assert received_num_tokens <= n
             new_tensors = {
-                k: v[:n]
+                k: v[:received_num_tokens]
                 if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                else v[:received_num_tokens].copy_(intermediate_tensors.tensors[k])
                 for k, v in self.intermediate_tensors.tensors.items()
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
@@ -1976,6 +1987,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_stats=cudagraph_stats,
         )
 
+        if not dummy_run and self.pp_handler is not None:
+            # Place the sampled-result receive after this rank's model kernels.
+            self.pp_handler.launch_post_model_receive()
+
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
@@ -2010,7 +2025,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
             assert self.pp_handler is not None
-            all_decode_next = self.pp_handler.receive(input_batch)
+            all_decode_next = self.pp_handler.receive(
+                input_batch, self.model_state.defer_postprocess_state()
+            )
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
@@ -2230,6 +2247,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.pp_handler is not None:
+            self.pp_handler.flush_pending_collectives()
         torch.accelerator.synchronize()
         if self.aux_output_connector is not None:
             self.aux_output_connector.close()

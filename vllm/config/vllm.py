@@ -3368,10 +3368,11 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "RecoverSSM currently requires pipeline_parallel_size=1"
-                )
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                and not self.use_v2_model_runner
+            ):
+                raise ValueError("RecoverSSM with PP requires Model Runner V2")
             if self.mamba_config.backend != MambaBackendEnum.TRITON:
                 raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif self.cache_config.mamba_cache_mode == "all":
@@ -3398,10 +3399,15 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
         ):
-            raise ValueError(
-                "--use-replayssm is incompatible with KV connectors "
-                "(P/D disaggregation, KV cache offload)"
+            from vllm.distributed.kv_transfer.kv_connector.v1 import (
+                kda_recoverssm_transport,
             )
+
+            if not kda_recoverssm_transport.supports_homogeneous_recoverssm(self):
+                raise ValueError(
+                    "--use-replayssm with KV connectors requires the experimental "
+                    "homogeneous NIXL push RecoverSSM path on Model Runner V2."
+                )
         return self
 
 

@@ -69,6 +69,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_pcp_group,
+    get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -95,6 +96,7 @@ from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1 import kda_recoverssm_transport
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -168,6 +170,8 @@ class NixlBaseConnectorWorker:
     # Layer-name routing is supported only by NixlPushConnector for HMA KV
     # caches under PP.
     _supports_pp_hma = False
+    _homogeneous_pp = False
+    pp_rank = 0
 
     def _compute_desc_ids(
         self,
@@ -544,6 +548,9 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
+        self._recoverssm_transport: (
+            kda_recoverssm_transport.KDATargetStateTransport | None
+        ) = None
         transfer_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
@@ -753,8 +760,22 @@ class NixlBaseConnectorWorker:
         # PP>1 (push mode): this worker holds a contiguous layer slice and
         # transfers into the matching sub-range of a PP=1 remote's regions.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pp_rank = get_pp_group().rank_in_group if self.pp_size > 1 else 0
+        self._homogeneous_pp = (
+            self._TRANSFER_MODE == "push"
+            and vllm_config.kv_transfer_config.get_from_extra_config(
+                "experimental_homogeneous_pp", False
+            )
+            is True
+        )
+        if self._homogeneous_pp and (
+            not self._has_mamba
+            or not vllm_config.model_config.use_mla
+            or self._is_csa_linear
+        ):
+            raise ValueError("Experimental homogeneous PP requires MLA+SSM caches.")
         self._remote_region_offset = 0
-        if self.pp_size > 1:
+        if self.pp_size > 1 and not self._homogeneous_pp:
             if self._is_hma_required and not self._supports_pp_hma:
                 raise NotImplementedError(
                     "NixlConnector (pull) does not support pipeline_parallel_size "
@@ -969,6 +990,39 @@ class NixlBaseConnectorWorker:
                 f"got local TP {self.world_size}, remote TP {remote_tp_size}."
             )
 
+    def _remote_pp_ranks_for_handshake(
+        self, remote_tp_size: int, remote_dcp_size: int, remote_pp_size: int
+    ) -> tuple[int, ...]:
+        if self._homogeneous_pp:
+            if (remote_tp_size, remote_dcp_size, remote_pp_size) != (
+                self.world_size,
+                self.dcp_size,
+                self.pp_size,
+            ):
+                raise NotImplementedError(
+                    "Experimental homogeneous PP requires matching P/D TP, DCP, PP."
+                )
+            return (self.pp_rank,)
+        return tuple(range(remote_pp_size))
+
+    def _validate_homogeneous_regions(self, metadata: NixlAgentMetadata) -> None:
+        if not self._homogeneous_pp:
+            return
+        if (
+            not self.region_members
+            or metadata.region_members != self.region_members
+            or metadata.region_group_ids != self.region_group_ids
+            or metadata.block_size != self.block_size
+            or metadata.physical_blocks_per_logical_kv_block
+            != self._physical_blocks_per_logical_kv_block
+            or metadata.block_lens != self.block_len_per_layer
+            or metadata.block_strides != self.block_stride_per_layer
+            or metadata.ssm_sizes != self._mamba_ssm_size
+        ):
+            raise ValueError(
+                "Homogeneous PP cache partition or physical state layout mismatch."
+            )
+
     def _nixl_handshake(
         self,
         host: str,
@@ -980,6 +1034,9 @@ class NixlBaseConnectorWorker:
         notif_agents_only: bool = False,
     ) -> tuple[dict[tuple[int, int], str], float]:
         """Do a NIXL handshake with a remote instance."""
+        remote_pp_ranks = self._remote_pp_ranks_for_handshake(
+            remote_tp_size, remote_dcp_size, remote_pp_size
+        )
         if self._is_csa_linear:
             self._validate_csa_linear_tp_layout(remote_tp_size)
 
@@ -1014,7 +1071,7 @@ class NixlBaseConnectorWorker:
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
-                range(remote_pp_size), p_remote_ranks
+                remote_pp_ranks, p_remote_ranks
             ):
                 logger.debug(
                     "Querying metadata on path: %s at remote pp rank %s, tp rank %s",
@@ -1088,6 +1145,7 @@ class NixlBaseConnectorWorker:
                     metadata = metadata_decoder.decode(
                         handshake_payload.agent_metadata_bytes
                     )
+                    self._validate_homogeneous_regions(metadata)
                 except (msgspec.DecodeError, msgspec.ValidationError) as e:
                     # This should not happen if hash matched
                     raise RuntimeError(
@@ -1349,6 +1407,25 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        if self.vllm_config.cache_config.use_kda_recoverssm is True:
+            from vllm.distributed.kv_transfer.kv_connector.v1 import (
+                kda_recoverssm_transport,
+            )
+
+            if not kda_recoverssm_transport.supports_homogeneous_recoverssm(
+                self.vllm_config
+            ):
+                raise ValueError("RecoverSSM requires homogeneous NIXL push transport")
+            self._recoverssm_transport = (
+                kda_recoverssm_transport.KDATargetStateTransport.create(
+                    kv_caches, self.kv_cache_config
+                )
+            )
+            if not self._recoverssm_transport.layers or any(
+                len(layer.states) != 4
+                for layer in self._recoverssm_transport.layers.values()
+            ):
+                raise ValueError("Expected RecoverSSM target state and local records")
         self.transfer_topo = TransferTopology(
             tp_rank=self.transfer_tp_rank,
             tp_size=self.transfer_tp_size,
@@ -1438,7 +1515,7 @@ class NixlBaseConnectorWorker:
 
         track_region_layers = (
             self._supports_pp_hma and self._is_hma_required and not self._has_mamba
-        )
+        ) or self._homogeneous_pp
         region_layers: list[list[str]] = []
 
         # K and V are packed into the content dim, so each attention layer is a
@@ -2883,6 +2960,11 @@ class NixlBaseConnectorWorker:
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
+
+            if (transport := getattr(self, "_recoverssm_transport", None)) is not None:
+                transport.reset_received_groups(
+                    [list(group) for group in meta.local_block_ids]
+                )
 
             direct_device_recving.add(req_id)
 

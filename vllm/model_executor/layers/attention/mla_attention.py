@@ -2692,6 +2692,23 @@ def reorg_kvcache(
         toks: the number of tokens for local gather cache.
 
     """
+    # With one request and no per-rank padding, rank-major order is already
+    # request-major order. Consumers read these views before reusing the gather
+    # workspace; materializing two concatenations would only copy the context.
+    if (
+        len(padded_local_chunk_seq_lens_lst) == 1
+        and padded_local_chunk_seq_lens_lst[0] == toks
+        and all(
+            length - local_starts[0] >= toks
+            for length in local_context_lens_allranks[0]
+        )
+    ):
+        assert sum_seq_len == toks * len(local_context_lens_allranks[0])
+        assert max_seq_len == sum_seq_len
+        assert allgatered_kv_c_normed.shape[0] == sum_seq_len
+        assert allgatered_k_pe.shape[0] == sum_seq_len
+        return allgatered_kv_c_normed, allgatered_k_pe
+
     kv_c_segments = []
     k_pe_segments = []
     src_token_idx = 0
@@ -3020,7 +3037,22 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         dcp_world_size: int,
+        kv_pack: Callable[
+            [torch.Tensor, torch.Tensor, bool], tuple[torch.Tensor, torch.Tensor]
+        ]
+        | None = None,
     ):
+        """Chunked-context prefill under decode context parallelism.
+
+        ``kv_pack``, when given, replaces the per-chunk cast + split + concat
+        tail that turns the ``kv_b_proj`` output into the prefill backend's
+        ``(k, v)``. It receives the bf16 ``kv_nope`` view
+        ``[tokens, heads, qk_nope_head_dim + v_head_dim]``, the gathered
+        ``k_pe`` as-is and ``use_fp8_prefill``, and must return the same
+        ``(k, v)`` the default tail produces (fp8 when ``use_fp8_prefill``).
+        Layers that own a fused kernel for that pack (Kimi-K3) pass one;
+        ``None`` keeps the stock tail.
+        """
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
@@ -3114,11 +3146,17 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            if use_fp8_prefill:
-                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
-                k_pe = k_pe.to(prefill_metadata.q_data_type)
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k = self._concat_k_nope_k_pe(k_nope, k_pe)
+            if kv_pack is not None:
+                k, v = kv_pack(kv_nope, k_pe, use_fp8_prefill)
+                del kv_nope
+            else:
+                if use_fp8_prefill:
+                    kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                    k_pe = k_pe.to(prefill_metadata.q_data_type)
+                k_nope, v = kv_nope.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
+                k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = (
                 prefill_metadata.prefill_backend.run_prefill_context_chunk(

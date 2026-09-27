@@ -4,7 +4,7 @@
 
 import math
 from collections.abc import Hashable, Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -94,6 +94,9 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+
+if TYPE_CHECKING:
+    from vllm.models.kimi_k3.nvidia.sp_input_projection import KimiK3SPInputProjection
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4MegaMoEExperts,
     DeepseekV4MLP,
@@ -133,6 +136,29 @@ logger = init_logger(__name__)
 # it the GEMMs saturate the device and the cross-stream sync is pure overhead,
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
+
+
+def use_kimi_k3_sequence_parallel(vllm_config: VllmConfig) -> bool:
+    """Select Kimi K3's model-level sequence parallel path.
+
+    DeepGEMM MegaMoE requires distinct token shards on the TP/EP ranks, so it
+    keeps sequence parallelism enabled across pipeline stages. Other MoE
+    backends retain the existing DP-only behavior and do not change when PP is
+    enabled.
+    """
+    parallel_config = vllm_config.parallel_config
+    use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    return (
+        parallel_config.enable_expert_parallel
+        and parallel_config.tensor_parallel_size > 1
+        and (
+            use_mega_moe
+            or (
+                parallel_config.pipeline_parallel_size == 1
+                and parallel_config.data_parallel_size > 1
+            )
+        )
+    )
 
 
 def shard_sequence_parallel_mlp(
@@ -212,6 +238,7 @@ class KimiMLP(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.sp_input_projection: KimiK3SPInputProjection | None = None
         self.shard_sequence_parallel = shard_sequence_parallel_mlp(
             hidden_size,
             intermediate_size,
@@ -268,13 +295,22 @@ class KimiMLP(nn.Module):
             )
 
     def forward(self, x):
+        gate_up = None
         if self.shard_sequence_parallel:
             # Each rank holds a weight shard but only its own tokens, so it
             # cannot finish those tokens alone: gather the full token set,
             # compute this rank's partial for all of them, then reduce-scatter,
             # which sums across TP and restores the sequence sharding.
-            x = sp_all_gather(x)
-        gate_up, _ = self.gate_up_proj(x)
+            if self.sp_input_projection is not None:
+                gate_up = self.sp_input_projection.try_apply(
+                    x,
+                    self.gate_up_proj,
+                    x.shape[0] * get_tensor_model_parallel_world_size(),
+                )
+            if gate_up is None:
+                x = sp_all_gather(x)
+        if gate_up is None:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
@@ -854,6 +890,7 @@ class KimiDecoderLayer(nn.Module):
         prefix: str = "",
         aux_stream: torch.cuda.Stream | None = None,
         run_gemm_rs_ar: bool = False,
+        sp_input_projection: "KimiK3SPInputProjection | None" = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -863,7 +900,6 @@ class KimiDecoderLayer(nn.Module):
         layer_idx = self.layer_idx
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
         self.is_moe_layer = (
             self.is_moe
             and config.num_experts is not None
@@ -871,13 +907,7 @@ class KimiDecoderLayer(nn.Module):
             and layer_idx % config.moe_layer_freq == 0
         )
 
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
         if config.is_kda_layer(layer_idx):
             kda_config = config.linear_attn_config
             assert kda_config is not None
@@ -927,6 +957,11 @@ class KimiDecoderLayer(nn.Module):
                 run_gemm_rs_ar=run_gemm_rs_ar,
             )
 
+        self.sp_input_projection = (
+            sp_input_projection
+            if isinstance(self.self_attn, KimiK3DeltaAttention)
+            else None
+        )
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
 
@@ -1074,14 +1109,27 @@ class KimiDecoderLayer(nn.Module):
         assert hidden_states is not None
 
         M = None
+        projected_qkvgfab = None
         if self.use_sequence_parallel:
-            hidden_states = sp_all_gather(hidden_states)
-            # Remove SP padding before attention.
-            hidden_states = hidden_states[: positions.shape[0]]
-            M = hidden_states.shape[0]
+            M = positions.shape[0]
+            if self.sp_input_projection is not None:
+                projected_qkvgfab = self.sp_input_projection.try_apply(
+                    hidden_states, self.self_attn.in_proj_qkvgfab, M
+                )
+            if projected_qkvgfab is None:
+                hidden_states = sp_all_gather(hidden_states)
+                # Remove SP padding before attention.
+                hidden_states = hidden_states[:M]
 
         # Attention.
-        hidden_states = self._run_self_attn(positions, hidden_states)
+        if projected_qkvgfab is None:
+            hidden_states = self._run_self_attn(positions, hidden_states)
+        else:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                positions=positions,
+                projected_qkvgfab=projected_qkvgfab,
+            )
 
         # GEMM-RS returns the local sequence shard; standard O-proj preserves M.
         if self.use_sequence_parallel and hidden_states.shape[0] == M:
@@ -1115,14 +1163,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.config = config
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
-        parallel_config = vllm_config.parallel_config
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
+        if self.use_sequence_parallel:
+            logger.info_once(
+                "Kimi K3 model-level sequence parallelism is enabled.",
+                scope="global",
+            )
 
         self.vocab_size = config.vocab_size
 
@@ -1146,6 +1192,20 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         # level and threaded into each attention layer).
         aux_stream = torch.cuda.Stream()
 
+        from vllm.models.kimi_k3.nvidia.sp_input_projection import (
+            maybe_init_kda_sp_input_projection,
+            maybe_init_shared_mlp_sp_input_projection,
+        )
+
+        # Reserve the larger shared-MLP workspace first. KDA then reuses it,
+        # and neither helper can grow the group workspace after graph capture.
+        shared_mlp_projection = maybe_init_shared_mlp_sp_input_projection(
+            vllm_config, self.use_sequence_parallel
+        )
+        sp_input_projection = maybe_init_kda_sp_input_projection(
+            vllm_config, self.use_sequence_parallel
+        )
+
         def get_layer(prefix: str):
             return KimiDecoderLayer(
                 config,
@@ -1153,6 +1213,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 prefix,
                 aux_stream=aux_stream,
                 run_gemm_rs_ar=self.run_gemm_rs_ar,
+                sp_input_projection=sp_input_projection,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -1160,6 +1221,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+        if shared_mlp_projection is not None:
+            for module in self.layers.modules():
+                if isinstance(module, KimiMLP) and module.shard_sequence_parallel:
+                    module.sp_input_projection = shared_mlp_projection
         self.num_attn_res_blocks = (
             cdiv(self.end_layer, self.attn_res_block_size)
             if self.attn_res_block_size is not None
@@ -1300,12 +1365,28 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
-                    forward_context.is_padding, hidden_states
+                    forward_context.is_padding, positions
                 )
-            hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Currently, SP is not supported with PP"
+            if get_pp_group().is_first_rank:
+                hidden_states = sp_shard(hidden_states)
+                assert residual is None
+            else:
+                # PP communication transports SP-local rows directly between
+                # matching TP ranks. During profiling/capture the persistent
+                # input buffers are full-sized, so narrow both cases to the
+                # local token count here.
+                local_num_tokens = cdiv(
+                    full_num_tokens, get_tensor_model_parallel_world_size()
+                )
+                assert hidden_states.shape[0] >= local_num_tokens
+                hidden_states = hidden_states[:local_num_tokens]
+                assert residual is not None
+                assert residual.shape[0] >= local_num_tokens
+                residual = residual[:local_num_tokens]
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        if self.use_sequence_parallel:
+            remote_aux = [t[: hidden_states.shape[0]] for t in remote_aux]
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1357,9 +1438,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert hidden_states is not None
         assert residual is not None
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
             return IntermediateTensors(
@@ -1387,6 +1465,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             hidden_states = hidden_states + residual
 
+        aux_hidden_states = remote_aux + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -1404,7 +1483,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1588,6 +1666,9 @@ class KimiLinearForCausalLM(
         self.quant_config = quant_config
         self.model = KimiLinearModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.model.use_sequence_parallel
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -1834,6 +1915,9 @@ class KimiK3ForConditionalGeneration(
             )
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
+        )
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.language_model.pp_intermediate_tensors_are_sequence_sharded
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
 

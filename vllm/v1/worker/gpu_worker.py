@@ -539,6 +539,19 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        self.pp_intermediate_tensors_are_sequence_sharded = getattr(
+            self.get_model(), "pp_intermediate_tensors_are_sequence_sharded", False
+        )
+        if (
+            self.vllm_config.parallel_config.pipeline_parallel_size > 1
+            and self.pp_intermediate_tensors_are_sequence_sharded
+            and not self.use_v2_model_runner
+        ):
+            raise ValueError(
+                "Sequence-sharded pipeline transport requires the V2 model runner. "
+                "Set VLLM_USE_V2_MODEL_RUNNER=1."
+            )
+
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
@@ -983,6 +996,11 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
+        if self.use_v2_model_runner:
+            pp_handler = self.model_runner.pp_handler  # type: ignore[attr-defined]
+            if pp_handler is not None:
+                pp_handler.enable_deferred_collectives()
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
@@ -1194,6 +1212,10 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if not forward_pass and self.use_v2_model_runner:
+            pp_handler = self.model_runner.pp_handler  # type: ignore[attr-defined]
+            if pp_handler is not None:
+                pp_handler.flush_pending_collectives()
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         all_gather_tensors = {}
         compilation_config = self.vllm_config.compilation_config
@@ -1228,10 +1250,16 @@ class Worker(WorkerBase):
                 )
             }
 
+        all_gather_group = (
+            None
+            if self.pp_intermediate_tensors_are_sequence_sharded
+            else get_tp_group()
+        )
+
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
-                    all_gather_group=get_tp_group(),
+                    all_gather_group=all_gather_group,
                     all_gather_tensors=all_gather_tensors,
                 )
             )
@@ -1269,7 +1297,7 @@ class Worker(WorkerBase):
         # waited at the top of the next step.
         handles = get_pp_group().isend_tensor_dict(
             output.tensors,
-            all_gather_group=get_tp_group(),
+            all_gather_group=all_gather_group,
             all_gather_tensors=all_gather_tensors,
         )
         self._pp_send_work = handles[1:]
