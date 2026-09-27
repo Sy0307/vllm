@@ -76,6 +76,10 @@ from vllm.v1.utils import record_function_or_nullcontext
 logger = init_logger(__name__)
 
 
+import os as _k3_os
+_K3_COHORT_BALANCE = _k3_os.environ.get("VLLM_K3_COHORT_BALANCE", "0") == "1"
+
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -608,6 +612,14 @@ class Scheduler(SchedulerInterface):
             else 0
         )
 
+        _k3_cohort_load = None
+        if _K3_COHORT_BALANCE and self.use_pp and self.use_v2_model_runner and \
+                self.parallel_config.pipeline_parallel_size == 2:
+            _k3_cohort_load = [0.0, 0.0]
+            for _r in self.running:
+                if not _r.is_prefill_chunk:
+                    _k3_cohort_load[_r.next_decode_eligible_step % 2] += 1.0 + _r.num_computed_tokens / 73000.0
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -703,6 +715,23 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = self._reserve_prefill_lookahead(
                 request, request.num_computed_tokens, num_new_tokens
             )
+
+            if (
+                _k3_cohort_load is not None
+                and num_new_tokens > 0
+                and request.is_prefill_chunk
+                and request.num_output_placeholders == 0
+                and request.num_computed_tokens + num_new_tokens >= request.num_tokens
+                and not getattr(request, "_k3_cohort_deferred", False)
+                and _k3_cohort_load[self.current_step % 2]
+                > _k3_cohort_load[(self.current_step + 1) % 2]
+            ):
+                # Final prompt chunk would join the heavier cohort: run it next
+                # step (other parity) instead. Chunk boundaries are unchanged.
+                request._k3_cohort_deferred = True
+                self._k3_cohort_deferrals = getattr(self, "_k3_cohort_deferrals", 0) + 1
+                req_index += 1
+                continue
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
