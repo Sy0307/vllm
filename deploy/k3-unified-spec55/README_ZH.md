@@ -139,25 +139,35 @@ rank0 会先启动 Mooncake master，然后启动 vLLM。日志在 `run/<deploym
 
 首次启动要编译 CUDA graph 和 Triton 缓存，耗时明显长于后续启动；超时时间是 `VLLM_ENGINE_READY_TIMEOUT_S=3600`。
 
-## 7. 验收（rank0 上执行，接流量之前）
+## 7. 验收（接流量之前）
+
+两台都执行 `verify.py`；`gate_mooncake.py` 只在 rank0 上执行。
 
 ```bash
-curl -fsS --max-time 10 http://10.18.1.25:18984/health
-python3 $R/verify.py --site /tmp/k3-site.json --full
-python3 $R/gate_mooncake.py /tmp/k3-gate.json 11 http://10.18.1.25:18984   # 输出 GATE PASS
+curl -fsS --max-time 10 http://10.18.1.25:18984/health          # rank0
+python3 $R/verify.py --site /tmp/k3-site.json --full               # 两台都跑，输出 VERIFY <host> PASS
+python3 $R/gate_mooncake.py /tmp/k3-gate.json 11 http://10.18.1.25:18984   # rank0，输出 GATE PASS
 ```
 
 **`verify.py` 核对**：
 
-- 实际配置：TP8 / PP2 / DCP8、EP、MegaMoE、DSpark K4、`rejection_sample_method=block`、调度参数、FP8 KV、MooncakeStore + RecoverSSM store；
-- 日志：模型级 SP 已启用，两台都没有 Traceback；
-- 运行中进程的全部 `VLLM_K3_*` 变量；
-- 全量 overlay 重算哈希；
-- 一个 16 token 的贪心请求。
+- 运行中进程的实际命令行和环境变量（读 `/proc/<pid>`），逐项与 `launch.json` 对照，包括全部 `VLLM_K3_*` 变量；
+- 关键参数：TP8 / PP2 / DCP8 a2a、EP + deepep_v2、MegaMoE、DSpark K4、`rejection_sample_method=block`、MooncakeStore + RecoverSSM store、192 / 8768 / 0.88 / FP8 KV；
+- 日志：启动阶段没有 Traceback，没有 EngineDeadError，rank0 上模型级 SP 已启用；
+- overlay 清单校验和，加 `--full` 时全量重算哈希；
+- rank0 额外发一个 16 token 的贪心请求，并确认投机解码计数器在增长。
+
+不使用 `/server_info`：这套运行环境里它收集系统信息会失败，返回 500，与部署本身无关。
 
 **`gate_mooncake.py`**：会清空 GPU 前缀缓存，并请求 top-5 logprobs，**只能在未接流量的新部署上运行**。它用 30K / 90K / 150K 三个长度，比较冷算、本地命中和 Mooncake 命中。
 
 交付时如果还没跑门禁，状态必须写"基础验收通过，Mooncake 门禁待执行"。
+
+**已做的验证**（2026-09-27，prod24 / prod25，按本手册步骤执行）：
+
+- 19:03 启动，19:15 `/health` 通过，首次启动约 12 分钟；
+- 两台 `verify.py --full` 全部 PASS：命令行、环境变量、27 个 `VLLM_K3_*` 开关、5159 个 overlay 文件哈希全部一致；
+- `gate_mooncake.py` 输出 GATE PASS。冷算的 64 个 token 和 logprob 在三种长度上都与测试期各臂的门禁逐位相同，Mooncake 命中与冷算完全一致。
 
 ## 8. 停止
 
