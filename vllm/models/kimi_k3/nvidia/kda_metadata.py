@@ -11,6 +11,7 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
+import os
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
@@ -46,6 +47,11 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
         KDARecoverSSMCommitContext,
     )
+
+
+# K3: share group-independent KDA metadata across the KDA KV-cache groups of one
+# build_attn_metadata call (the runner hands every builder the same per-call dict).
+_K3_KDA_META_DEDUP = os.environ.get("VLLM_K3_KDA_META_DEDUP", "0") == "1"
 
 
 @cache
@@ -401,6 +407,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         assert isinstance(self.kv_cache_spec, MambaSpec)
+        _k3c = getattr(self, "_k3_step_cache", None) if _K3_KDA_META_DEDUP else None
         # Equivalent PyTorch "align" path:
         #   start = ((seq_lens - 1) // block_size).clamp_(min=0)
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)
@@ -558,83 +565,128 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_query_start_loc_cpu = None
                 num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
             else:
-                query_lens = query_start_loc.diff()
-                spec_sequence_masks_gpu = async_tensor_h2d(
-                    spec_sequence_masks_cpu, device=query_start_loc.device
+                _k3k = (
+                    "kda_general",
+                    id(query_start_loc),
+                    m.num_reqs,
+                    m.num_actual_tokens,
+                    num_spec_decodes,
+                    num_prefills,
+                    num_prefill_tokens,
+                    num_decodes,
+                    num_decode_tokens,
+                    num_query_tokens,
                 )
-                if self.use_recoverssm:
-                    spec_request_indices = async_tensor_h2d(
-                        spec_sequence_masks_cpu.nonzero(as_tuple=True)[0],
+                _k3v = _k3c.get(_k3k) if _k3c is not None else None
+                if _k3v is not None:
+                    (
+                        query_lens,
+                        spec_request_indices,
+                        non_spec_token_indx,
+                        spec_token_indx,
+                        spec_token_start,
+                        non_spec_token_start,
+                        spec_query_start_loc,
+                        non_spec_query_start_loc,
+                        non_spec_query_start_loc_cpu,
+                        num_accepted_tokens,
+                    ) = _k3v
+                else:
+                    query_lens = query_start_loc.diff()
+                    spec_sequence_masks_gpu = async_tensor_h2d(
+                        spec_sequence_masks_cpu, device=query_start_loc.device
+                    )
+                    if self.use_recoverssm:
+                        spec_request_indices = async_tensor_h2d(
+                            spec_sequence_masks_cpu.nonzero(as_tuple=True)[0],
+                            dtype=torch.int32,
+                            device=query_start_loc.device,
+                        )
+                    spec_token_masks = torch.repeat_interleave(
+                        spec_sequence_masks_gpu,
+                        query_lens,
+                        output_size=num_query_tokens,
+                    )
+                    # Stable partitioning preserves request-local token order in
+                    # both subgroup tensors.
+                    index = torch.argsort(spec_token_masks, stable=True)
+                    num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+                    non_spec_token_indx = index[:num_non_spec_tokens]
+                    spec_token_indx = index[num_non_spec_tokens:]
+
+                    active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                    # check if spec / non spec tokens are continuous
+                    if (
+                        active_spec_mask[1:] != active_spec_mask[:-1]
+                    ).sum().item() == 1:
+                        spec_first = active_spec_mask[0].item()
+                        spec_token_start = 0 if spec_first else num_non_spec_tokens
+                        non_spec_token_start = (
+                            num_spec_decode_tokens if spec_first else 0
+                        )
+
+                    # Native spec uses one state slot per step. RecoverSSM keeps
+                    # only the current checkpoint slot.
+
+                    spec_query_lens = query_lens[spec_sequence_masks_cpu]
+                    spec_query_start_loc = torch.zeros(
+                        num_spec_decodes + 1,
                         dtype=torch.int32,
                         device=query_start_loc.device,
                     )
-                spec_token_masks = torch.repeat_interleave(
-                    spec_sequence_masks_gpu,
-                    query_lens,
-                    output_size=num_query_tokens,
-                )
-                # Stable partitioning preserves request-local token order in
-                # both subgroup tensors.
-                index = torch.argsort(spec_token_masks, stable=True)
-                num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
-                non_spec_token_indx = index[:num_non_spec_tokens]
-                spec_token_indx = index[num_non_spec_tokens:]
+                    torch.cumsum(
+                        spec_query_lens,
+                        dim=0,
+                        out=spec_query_start_loc[1:],
+                    )
+                    if num_prefills > 0:
+                        non_spec_query_lens = query_lens[active_non_spec_mask_cpu]
+                        non_spec_query_start_loc = torch.zeros(
+                            non_spec_query_lens.size(0) + 1,
+                            dtype=torch.int32,
+                            device=query_start_loc.device,
+                        )
+                        torch.cumsum(
+                            non_spec_query_lens,
+                            dim=0,
+                            out=non_spec_query_start_loc[1:],
+                        )
+                        non_spec_query_start_loc_cpu = torch.zeros(
+                            non_spec_query_lens_cpu.size(0) + 1,
+                            dtype=torch.int32,
+                        )
+                        torch.cumsum(
+                            non_spec_query_lens_cpu,
+                            dim=0,
+                            out=non_spec_query_start_loc_cpu[1:],
+                        )
+                    else:
+                        # Packed decode consumes one row per request and does not
+                        # use cumulative sequence lengths.
+                        non_spec_query_start_loc = None
+                        non_spec_query_start_loc_cpu = None
 
-                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
-                # check if spec / non spec tokens are continuous
-                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum().item() == 1:
-                    spec_first = active_spec_mask[0].item()
-                    spec_token_start = 0 if spec_first else num_non_spec_tokens
-                    non_spec_token_start = num_spec_decode_tokens if spec_first else 0
-
-                # Native spec uses one state slot per step. RecoverSSM keeps
-                # only the current checkpoint slot.
+                    num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+                    if _k3c is not None:
+                        _k3c[_k3k] = (
+                            query_lens,
+                            spec_request_indices,
+                            non_spec_token_indx,
+                            spec_token_indx,
+                            spec_token_start,
+                            non_spec_token_start,
+                            spec_query_start_loc,
+                            non_spec_query_start_loc,
+                            non_spec_query_start_loc_cpu,
+                            num_accepted_tokens,
+                        )
+                # Group-specific: state slots come from this group's block table.
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks_cpu, : self.spec_state_slots
                 ]
                 non_spec_state_indices_tensor = block_table_tensor[
                     active_non_spec_mask_cpu, 0
                 ]
-
-                spec_query_lens = query_lens[spec_sequence_masks_cpu]
-                spec_query_start_loc = torch.zeros(
-                    num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                torch.cumsum(
-                    spec_query_lens,
-                    dim=0,
-                    out=spec_query_start_loc[1:],
-                )
-                if num_prefills > 0:
-                    non_spec_query_lens = query_lens[active_non_spec_mask_cpu]
-                    non_spec_query_start_loc = torch.zeros(
-                        non_spec_query_lens.size(0) + 1,
-                        dtype=torch.int32,
-                        device=query_start_loc.device,
-                    )
-                    torch.cumsum(
-                        non_spec_query_lens,
-                        dim=0,
-                        out=non_spec_query_start_loc[1:],
-                    )
-                    non_spec_query_start_loc_cpu = torch.zeros(
-                        non_spec_query_lens_cpu.size(0) + 1,
-                        dtype=torch.int32,
-                    )
-                    torch.cumsum(
-                        non_spec_query_lens_cpu,
-                        dim=0,
-                        out=non_spec_query_start_loc_cpu[1:],
-                    )
-                else:
-                    # Packed decode consumes one row per request and does not
-                    # use cumulative sequence lengths.
-                    non_spec_query_start_loc = None
-                    non_spec_query_start_loc_cpu = None
-
-                num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
             if self.use_recoverssm:
                 assert self.recoverssm_num_accepted_tokens is not None
@@ -646,16 +698,36 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         # its own chunk indices. Only causal-convolution metadata is needed here.
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         if num_prefills > 0:
-            has_initial_state = m.compute_num_computed_tokens() > 0
-            if num_spec_decodes > 0:
-                has_initial_state = has_initial_state[active_non_spec_mask_cpu]
-                assert non_spec_query_start_loc_cpu is not None
-            nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                compute_causal_conv1d_metadata(
-                    non_spec_query_start_loc_cpu,
-                    device=query_start_loc.device,
-                )
+            _k3k2 = (
+                "kda_prefill",
+                id(query_start_loc),
+                m.num_reqs,
+                m.num_actual_tokens,
+                num_spec_decodes,
+                num_prefills,
+                num_prefill_tokens,
             )
+            _k3v2 = _k3c.get(_k3k2) if _k3c is not None else None
+            if _k3v2 is not None:
+                has_initial_state, nums_dict, batch_ptr, token_chunk_offset_ptr = _k3v2
+            else:
+                has_initial_state = m.compute_num_computed_tokens() > 0
+                if num_spec_decodes > 0:
+                    has_initial_state = has_initial_state[active_non_spec_mask_cpu]
+                    assert non_spec_query_start_loc_cpu is not None
+                nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                    compute_causal_conv1d_metadata(
+                        non_spec_query_start_loc_cpu,
+                        device=query_start_loc.device,
+                    )
+                )
+                if _k3c is not None:
+                    _k3c[_k3k2] = (
+                        has_initial_state,
+                        nums_dict,
+                        batch_ptr,
+                        token_chunk_offset_ptr,
+                    )
         else:
             has_initial_state = None
 
