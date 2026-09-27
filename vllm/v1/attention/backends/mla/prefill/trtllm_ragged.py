@@ -22,6 +22,69 @@ if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 
+import os as _os
+
+_K3_SPLIT_KV = _os.environ.get("VLLM_K3_CONTEXT_SPLIT_KV", "0") == "1"
+_K3_SPLIT_MEMO = _os.environ.get("VLLM_K3_SPLIT_MEMO", "0") == "1"
+
+
+def _k3_split_kv_factor(max_query_len: int, num_requests: int, max_seq_len: int) -> int:
+    """Segments per request; 1 disables. Tuned on B200 (148 SMs, 12 heads)."""
+    if not _K3_SPLIT_KV or max_seq_len < 16384:
+        return 1
+    # Measured: two ~1K queries already fill enough CTAs; splitting regressed.
+    if max_query_len > 512 and num_requests > 1:
+        return 1
+    if max_query_len <= 256:
+        s = 8
+    elif max_query_len <= 512:
+        s = 4
+    elif max_query_len <= 1024:
+        s = 2
+    else:
+        return 1
+    # Several requests already add CTAs; keep total virtual requests modest.
+    while s > 1 and num_requests * s > 32:
+        s //= 2
+    # Keep segments long enough to amortize per-CTA setup.
+    while s > 1 and max_seq_len // s < 8192:
+        s //= 2
+    return s
+
+
+def _k3_split_kv_indices(query_start_loc, cu_seq_lens, num_tokens, splits):
+    """GPU-built index tensors for the request-major split layout."""
+    qsl = query_start_loc.long()
+    qlen = qsl[1:] - qsl[:-1]
+    kvlen = (cu_seq_lens[1:] - cu_seq_lens[:-1]).long()
+    num_req = qlen.shape[0]
+    seg = torch.arange(splits, device=qsl.device)
+    base = torch.div(kvlen, splits, rounding_mode="floor")
+    rem = kvlen - base * splits
+    seg_len = base[:, None] + (seg[None, :] < rem[:, None]).long()  # [R, S]
+    vq = qlen.repeat_interleave(splits)
+    zero = torch.zeros(1, dtype=torch.long, device=qsl.device)
+    vqsl = torch.cat([zero, vq.cumsum(0)])
+    vkv = torch.cat([zero, seg_len.flatten().cumsum(0)])
+    # Row t of the original chunk -> its row in each segment's partial.
+    t = torch.arange(num_tokens, device=qsl.device)
+    r = torch.searchsorted(qsl[1:], t, right=True).clamp_(max=num_req - 1)
+    off = t - qsl[r]
+    part_rows = vqsl[(r * splits)[None, :] + seg[:, None]] + off[None, :]  # [S, Tq]
+    # Replicated-query gather: output row j -> source row.
+    j = torch.arange(num_tokens * splits, device=qsl.device)
+    v = torch.searchsorted(vqsl[1:], j, right=True)
+    src = qsl[torch.div(v, splits, rounding_mode="floor")] + (j - vqsl[v])
+    return (
+        src,
+        part_rows,
+        vq.to(torch.int32),
+        seg_len.flatten().to(torch.int32),
+        vqsl.to(torch.int32),
+        vkv.to(torch.int32),
+    )
+
+
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     """TRT-LLM Ragged backend for MLA prefill."""
 
@@ -199,6 +262,12 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
                 dtype=self._prefill_metadata.output_dtype,
             )
 
+        splits = _k3_split_kv_factor(
+            chunk.max_query_len, chunk.num_requests, chunk.max_seq_len
+        )
+        if splits > 1:
+            return self._k3_split_context(chunk, q, k, v, out, splits)
+
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -223,3 +292,59 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, log2_lse_to_ln(lse.transpose(0, 1))
+
+
+    def _k3_split_context(self, chunk, q, k, v, out, splits):
+        from flashinfer.prefill import trtllm_ragged_attention_deepseek
+
+        num_tokens = q.shape[0]
+        memo = chunk.__dict__.setdefault("_k3_split_memo", {}) if _K3_SPLIT_MEMO else None
+        idx = memo.get((splits, num_tokens)) if memo is not None else None
+        if idx is None:
+            idx = _k3_split_kv_indices(
+                chunk.query_start_loc, chunk.cu_seq_lens, num_tokens, splits
+            )
+            if memo is not None:
+                memo[(splits, num_tokens)] = idx
+        src, part_rows, _vq, vkv_len, vqsl, vkv = idx
+        q_rep = q.index_select(0, src)
+        o_rep = torch.empty(
+            q_rep.shape[0], q.shape[1], v.shape[2],
+            device=q.device, dtype=self._prefill_metadata.output_dtype,
+        )
+        o_rep, lse_rep = trtllm_ragged_attention_deepseek(
+            query=q_rep,
+            key=k,
+            value=v,
+            workspace_buffer=self._workspace_buffer,
+            seq_lens=vkv_len,
+            max_q_len=chunk.max_query_len,
+            max_kv_len=-(-chunk.max_seq_len // splits),
+            bmm1_scale=self.scale,
+            bmm2_scale=1.0,
+            o_sf_scale=1.0,
+            batch_size=chunk.num_requests * splits,
+            window_left=-1,
+            cum_seq_lens_q=vqsl,
+            cum_seq_lens_kv=vkv,
+            enable_pdl=False,
+            is_causal=False,
+            return_lse=True,
+            out=o_rep,
+            skip_all_rows_active_check=True,
+        )
+        # LSE merge (base-2 LSE from the kernel) over the S partials.
+        lse_s = lse_rep.float()[part_rows]  # [S, Tq, H]
+        m = lse_s.amax(0)
+        w = torch.exp2(lse_s - m)  # [S, Tq, H]
+        denom = w.sum(0)
+        o_s = o_rep[part_rows].float()  # [S, Tq, H, D]
+        merged = (o_s * w[..., None]).sum(0) / denom[..., None]
+        if out is None:
+            out = torch.empty(
+                num_tokens, q.shape[1], v.shape[2],
+                device=q.device, dtype=self._prefill_metadata.output_dtype,
+            )
+        out.copy_(merged)
+        lse = m + torch.log2(denom)
+        return out, log2_lse_to_ln(lse.transpose(0, 1))
