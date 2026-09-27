@@ -13,6 +13,9 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
+import os as _k3_os
+_K3_PP_DRAFT_NOSYNC = _k3_os.environ.get("VLLM_K3_PP_DRAFT_NOSYNC", "0") == "1"
+_K3_PP_EARLY_COMMIT = __import__('os').environ.get('VLLM_K3_PP_EARLY_COMMIT', '0') == '1'  # k3_early_commit
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -39,6 +42,7 @@ class PendingRecv:
     # `record_event()` returns None for the CPU stream placeholder, so event
     # presence cannot be used to determine whether collectives were posted.
     launched: bool = False
+    event_sampled: torch.cuda.Event | None = None  # k3_early_commit
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -171,6 +175,8 @@ class PPHandler:
                 src=self.last_rank,
                 group=self.broadcast_group,
             )
+            if _K3_PP_EARLY_COMMIT:
+                slot.event_sampled = self.broadcast_stream.record_event()
             if slot.draft_tokens is not None:
                 torch.distributed.broadcast(
                     slot.draft_tokens,
@@ -241,7 +247,7 @@ class PPHandler:
                 self._launch_receive(queued_slot)
 
     def get_prev_sampled_outputs(
-        self, draft_tokens_to_update: torch.Tensor | None = None
+        self, draft_tokens_to_update: torch.Tensor | None = None, defer_drafts: bool = False
     ) -> dict[str, torch.Tensor] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
@@ -271,14 +277,31 @@ class PPHandler:
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
             idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
 
-        if slot.event is not None:
-            self.main_stream.wait_event(slot.event)
+        _k3_early = (_K3_PP_EARLY_COMMIT and defer_drafts and slot.event_sampled is not None
+                     and slot.draft_tokens is not None and draft_tokens_to_update is not None)
+        _k3_ev = slot.event_sampled if _k3_early else slot.event
+        if _k3_ev is not None:
+            self.main_stream.wait_event(_k3_ev)
         if slot.restore_model_state is not None:
             slot.restore_model_state()
+        if _k3_early:
+            # Drafts are applied after postprocess (apply_deferred_drafts).
+            self._k3_deferred_drafts = (slot, draft_tokens_to_update, exclude_mask, idx_mapping)
+            draft_tokens_to_update = None
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
-            if exclude_mask.any():
+            if exclude_mask.any() and _K3_PP_DRAFT_NOSYNC:
+                # Rows map to distinct request slots: excluded rows are written
+                # back with their current value (no-op) instead of being
+                # compacted, which needed a blocking mask copy + boolean gather.
+                current = draft_tokens_to_update[draft_idx_mapping]
+                draft_tokens = torch.where(
+                    (idx_mapping >= 0).unsqueeze(1),
+                    draft_tokens.to(current.dtype),
+                    current,
+                )
+            elif exclude_mask.any():
                 keep = ~exclude_mask
                 keep_t = torch.as_tensor(keep, device=self.device)
                 draft_tokens = draft_tokens[keep_t]
@@ -292,6 +315,33 @@ class PPHandler:
             num_rejected=slot.num_rejected,
             idx_mapping=idx_mapping,
         )
+
+    def apply_deferred_drafts(self) -> None:
+        """k3_early_commit: wait the full receive event, then write the drafts (same code as inline)."""
+        pend = getattr(self, '_k3_deferred_drafts', None)
+        if pend is None:
+            return
+        self._k3_deferred_drafts = None
+        slot, draft_tokens_to_update, exclude_mask, idx_mapping = pend
+        if slot.event is not None:
+            self.main_stream.wait_event(slot.event)
+        draft_tokens = slot.draft_tokens
+        draft_idx_mapping = slot.idx_mapping
+        if exclude_mask.any() and _K3_PP_DRAFT_NOSYNC:
+            current = draft_tokens_to_update[draft_idx_mapping]
+            draft_tokens = torch.where(
+                (idx_mapping >= 0).unsqueeze(1),
+                draft_tokens.to(current.dtype),
+                current,
+            )
+        elif exclude_mask.any():
+            keep = ~exclude_mask
+            keep_t = torch.as_tensor(keep, device=self.device)
+            draft_tokens = draft_tokens[keep_t]
+            draft_idx_mapping = async_tensor_h2d(
+                slot.idx_mapping_np[keep], device=self.device
+            )
+        draft_tokens_to_update[draft_idx_mapping] = draft_tokens
 
     def broadcast_drafts(
         self, draft_tokens: torch.Tensor, input_batch: InputBatch

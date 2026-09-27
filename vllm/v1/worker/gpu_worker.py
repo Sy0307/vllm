@@ -148,6 +148,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+_K3_PP_SEND_DBUF = __import__('os').environ.get('VLLM_K3_PP_SEND_DBUF', '0') == '1'  # k3_send_dbuf
+
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -229,6 +231,7 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        self._k3_send_ring = __import__('collections').deque()  # k3_send_dbuf
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1205,6 +1208,11 @@ class Worker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # Wait for the previous step's sends so this forward pass cannot
         # overwrite buffers they are still reading.
+        if _K3_PP_SEND_DBUF:
+            # k3_send_dbuf: sends read private copies; keep at most one step in flight.
+            while len(self._k3_send_ring) > 1:
+                for handle in self._k3_send_ring.popleft():
+                    handle.wait()
         if self._pp_send_work:
             for handle in self._pp_send_work:
                 handle.wait()
@@ -1295,12 +1303,18 @@ class Worker(WorkerBase):
         # Non-blocking send of the intermediate tensors. The metadata handle
         # is reaped lazily by the GroupCoordinator; the device handles are
         # waited at the top of the next step.
+        _k3_src = output.tensors
+        if _K3_PP_SEND_DBUF:
+            _k3_src = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in output.tensors.items()}
         handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
+            _k3_src,
             all_gather_group=all_gather_group,
             all_gather_tensors=all_gather_tensors,
         )
-        self._pp_send_work = handles[1:]
+        if _K3_PP_SEND_DBUF:
+            self._k3_send_ring.append(handles[1:])
+        else:
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore

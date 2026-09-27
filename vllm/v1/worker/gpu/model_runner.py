@@ -1103,10 +1103,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the prior step in which they were scheduled (pp_size steps ago).
         if self.pp_handler is not None:
             outputs = self.pp_handler.get_prev_sampled_outputs(
-                self.req_states.draft_tokens
+                self.req_states.draft_tokens, defer_drafts=True
             )
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
+            self.pp_handler.apply_deferred_drafts()  # k3_early_commit
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1608,6 +1609,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
+        if (__import__('os').environ.get('VLLM_K3_LAST_LATE_COMMIT', '0') == '1'  # k3_late_commit
+                and self.is_last_pp_rank and self.pp_handler is not None):
+            self._k3_late_ps = (idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu)
+            return
         self.model_state.postprocess_state(
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
@@ -1632,6 +1637,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        _k3_done = getattr(self.model_state, "_k3_commit_done", None)
+        if _k3_done is not None:
+            torch.cuda.current_stream().wait_event(_k3_done)
+            self.model_state._k3_commit_done = None
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -2182,7 +2191,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.req_states.draft_tokens, input_batch
                 )
 
+        _k3_lp = getattr(self, "_k3_late_ps", None)  # k3_late_commit
+        if _k3_lp is not None:
+            self._k3_late_ps = None
+            self.model_state.postprocess_state(*_k3_lp)
         # Post-step KV connector related operations.
+        # K3: the KV connector may read KDA state; order it after a side-stream commit.
+        _k3_done2 = getattr(self.model_state, "_k3_commit_done", None)
+        if _k3_done2 is not None:
+            torch.cuda.current_stream().wait_event(_k3_done2)
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output

@@ -6,6 +6,14 @@ from typing import Any
 
 import numpy as np
 import torch
+import os as _k3cs_os
+from contextlib import nullcontext as _k3_nullctx
+_K3_COMMIT_SIDE = _k3cs_os.environ.get("VLLM_K3_COMMIT_SIDESTREAM", "0") == "1"
+
+
+def _k3_is_last_pp():
+    from vllm.distributed import get_pp_group
+    return get_pp_group().is_last_rank
 import torch.nn as nn
 
 from vllm.config import VllmConfig
@@ -368,13 +376,44 @@ class MambaHybridModelState(DefaultModelState):
                     max(num_sampled, 1),
                 )
 
-        if self.recoverssm is not None:
-            self.recoverssm.commit_step(
-                num_sampled,
-                idx_mapping,
-                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
-                num_accepted_tokens=self.num_accepted_tokens_gpu,
-            )
+        _k3_side = None
+        if (_K3_COMMIT_SIDE and self.recoverssm is not None and not isinstance(num_sampled, int)
+                and not getattr(self.recoverssm, "_deferred", False) and _k3_is_last_pp()):
+            main = torch.cuda.current_stream()
+            _k3_side = getattr(self, "_k3_commit_stream", None)
+            if _k3_side is None:
+                _k3_side = self._k3_commit_stream = torch.cuda.Stream()
+            ready = torch.cuda.Event()
+            ready.record(main)
+            _k3_side.wait_event(ready)
+            for _t in (num_sampled, idx_mapping, num_computed_tokens):
+                if isinstance(_t, torch.Tensor):
+                    _t.record_stream(_k3_side)
+        with (torch.cuda.stream(_k3_side) if _k3_side is not None else _k3_nullctx()):
+            if self.recoverssm is not None:
+                self.recoverssm.commit_step(
+                    num_sampled,
+                    idx_mapping,
+                    state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
+                    num_accepted_tokens=self.num_accepted_tokens_gpu,
+                )
+            if num_reqs and (
+                self._align_mode
+                and num_computed_tokens is not None
+                and self._mamba_ctx is not None
+            ):
+                self._mamba_ctx.run_fused_postprocess_align(
+                    num_reqs,
+                    self.num_accepted_tokens_gpu,
+                    self._mamba_state_idx_gpu,
+                    num_computed_tokens,
+                    idx_mapping,
+                )
+        if _k3_side is not None:
+            done = torch.cuda.Event()
+            done.record(_k3_side)
+            self._k3_commit_done = done
+        return
 
         if not num_reqs:
             return
