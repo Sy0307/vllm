@@ -42,7 +42,7 @@
 
 `overlay-SHA256SUMS` 的 sha256：`38906276662dbc03c61e4ca1bd1747825ae97a033d598736b7510d91499546bf`
 
-**代码分支** `k3/unified-spec55-opt-20260927`，基线为 vLLM `c9611215195e`：
+**代码分支** `k3/unified-spec55-opt-20260927`（<https://github.com/Sy0307/vllm/tree/k3/unified-spec55-opt-20260927>），基线为 vLLM `c9611215195e`：
 
 | commit | 内容 |
 | --- | --- |
@@ -168,6 +168,8 @@ python3 $R/gate_mooncake.py /tmp/k3-gate.json 11 http://10.18.1.25:18984   # ran
 - 19:03 启动，19:15 `/health` 通过，首次启动约 12 分钟；
 - 两台 `verify.py --full` 全部 PASS：命令行、环境变量、27 个 `VLLM_K3_*` 开关、5159 个 overlay 文件哈希全部一致；
 - `gate_mooncake.py` 输出 GATE PASS。冷算的 64 个 token 和 logprob 在三种长度上都与测试期各臂的门禁逐位相同，Mooncake 命中与冷算完全一致。
+- 按第 8 节停机，32 秒内 GPU 全部释放；
+- 用本发布包加 `--synthetic-acceptance 0.80,0.60,0.45,0.35` 复现受控 55% 的 1h 性能：进行中，结果出来后更新本节。
 
 ## 8. 停止
 
