@@ -82,11 +82,11 @@ class KimiK3SPInputProjection:
 
 
 class KimiK3ExtendedSPInputProjection(KimiK3SPInputProjection):
-    token_shapes = (1536, 3072, 4096, 6144, 7680, 7744, 7808, 8192)
+    token_shapes = tuple(int(_x) for _x in (__import__('os').environ.get('VLLM_K3_KDA_SP_SHAPES') or '1536,3072,4096,6144,7680,7744,7808,8192').split(','))
 
 
 class KimiK3SharedMLPInputProjection(KimiK3SPInputProjection):
-    token_shapes = (4096, 6144, 7680, 7744, 7808, 8192)
+    token_shapes = tuple(int(_x) for _x in (__import__('os').environ.get('VLLM_K3_SMLP_SP_SHAPES') or '4096,6144,7680,7744,7808,8192').split(','))
     weight_shape = (1536, 7168)
     multicast_shapes = (4096,)
 
