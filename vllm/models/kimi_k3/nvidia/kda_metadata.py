@@ -11,7 +11,6 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
-import os
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
@@ -47,11 +46,6 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
         KDARecoverSSMCommitContext,
     )
-
-
-# K3: share group-independent KDA metadata across the KDA KV-cache groups of one
-# build_attn_metadata call (the runner hands every builder the same per-call dict).
-_K3_KDA_META_DEDUP = os.environ.get("VLLM_K3_KDA_META_DEDUP", "0") == "1"
 
 
 @cache
@@ -407,7 +401,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        _k3c = getattr(self, "_k3_step_cache", None) if _K3_KDA_META_DEDUP else None
+        # Per-call dict shared by the KDA KV-cache groups of one build_attn_metadata
+        # call: group-independent work is computed once, state slots per group.
+        _k3c = getattr(self, "_k3_step_cache", None)
         # Equivalent PyTorch "align" path:
         #   start = ((seq_lens - 1) // block_size).clamp_(min=0)
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)

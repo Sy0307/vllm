@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -67,9 +66,6 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 _KDA_GATE_LOGBOUND_MIN = -5.0
-
-
-_K3_KDA_INDEX_COPY = os.environ.get("VLLM_K3_KDA_INDEX_COPY", "0") == "1"
 
 
 def a_log_weight_loader(
@@ -1203,18 +1199,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cu_seqlens=non_spec_query_start_loc,
                         out=non_spec_out,
                     )
-                if _K3_KDA_INDEX_COPY:
-                    # Same rows and values as the advanced-index assignment below,
-                    # through the cheaper index_copy_ dispatch path.
-                    recurrent_state.index_copy_(
-                        0,
-                        non_spec_state_indices_tensor.to(torch.int64),
-                        last_recurrent_state.to(recurrent_state.dtype),
-                    )
-                else:
-                    recurrent_state[non_spec_state_indices_tensor] = (
-                        last_recurrent_state.to(recurrent_state.dtype)
-                    )
+                recurrent_state.index_copy_(
+                    0,
+                    non_spec_state_indices_tensor.to(torch.int64),
+                    last_recurrent_state.to(recurrent_state.dtype),
+                )
             else:
                 # Pure non-speculative decode.
                 assert non_spec_state_indices_tensor is not None

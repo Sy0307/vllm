@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -127,9 +126,6 @@ class FastPrefillHelper:
             # Largest per-request logits count, known on the host.
             max_logits_per_req=int(np.diff(cu_num_logits_np).max()),
         )
-
-
-_K3_KDA_META_DEDUP = os.environ.get("VLLM_K3_KDA_META_DEDUP", "0") == "1"
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -432,11 +428,9 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     token_to_req_indices: torch.Tensor | None = None
-    # K3: one dict per call, shared by the builders of this call only (KDA metadata
+    # One dict per call, shared by the builders of this call only (KDA metadata
     # dedup across KV-cache groups); never reused across steps or capture.
-    k3_step_cache: dict | None = (
-        {} if _K3_KDA_META_DEDUP and not for_cudagraph_capture else None
-    )
+    k3_step_cache: dict | None = None if for_cudagraph_capture else {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
         if not attn_groups[i]:
@@ -503,7 +497,7 @@ def build_attn_metadata(
                     else {}
                 )
                 if k3_step_cache is not None:
-                    attn_metadata_builder._k3_step_cache = k3_step_cache
+                    attn_metadata_builder._k3_step_cache = k3_step_cache  # type: ignore[attr-defined]
                 try:
                     metadata = attn_metadata_builder.build(
                         common_prefix_len=0,
@@ -512,7 +506,7 @@ def build_attn_metadata(
                     )
                 finally:
                     if k3_step_cache is not None:
-                        attn_metadata_builder._k3_step_cache = None
+                        attn_metadata_builder._k3_step_cache = None  # type: ignore[attr-defined]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
         token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
