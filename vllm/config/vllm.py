@@ -3399,11 +3399,22 @@ class VllmConfig:
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance
         ):
-            from vllm.distributed.kv_transfer.kv_connector.v1 import (
-                kda_recoverssm_transport,
-            )
+            try:
+                from vllm.distributed.kv_transfer.kv_connector.v1 import (
+                    kda_recoverssm_transport,
+                )
+            except ImportError:
+                kda_recoverssm_transport = None
 
-            if not kda_recoverssm_transport.supports_homogeneous_recoverssm(self):
+            same_engine_store = (
+                self.kv_transfer_config.kv_connector == "MooncakeStoreConnector"
+                and self.kv_transfer_config.get_from_extra_config(
+                    "experimental_recoverssm_store", False) is True
+                and self.use_v2_model_runner
+                and self.speculative_config is not None
+                and self.speculative_config.method == "dspark"
+            )
+            if not same_engine_store and (kda_recoverssm_transport is None or not kda_recoverssm_transport.supports_homogeneous_recoverssm(self)):
                 raise ValueError(
                     "--use-replayssm with KV connectors requires the experimental "
                     "homogeneous NIXL push RecoverSSM path on Model Runner V2."

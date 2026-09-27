@@ -11,6 +11,11 @@ import torch
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+import os as _k3t_os
+_K3_KDA_TILE = {
+    _n: tuple(int(_x) for _x in _v.split("x"))
+    for _n, _v in (_e.split("=") for _e in _k3t_os.environ.get("VLLM_K3_KDA_TILE", "").split(",") if _e)
+}
 
 
 @triton.jit
@@ -678,7 +683,8 @@ def kda_recoverssm_verify(
         return out
 
     block_k = triton.next_power_of_2(key_dim)
-    block_v = min(triton.next_power_of_2(value_dim), 32)
+    block_v, _k3_vw = _K3_KDA_TILE.get("verify", (32, 4))
+    block_v = min(triton.next_power_of_2(value_dim), block_v)
     grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
@@ -722,7 +728,7 @@ def kda_recoverssm_verify(
         BV=block_v,
         SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
+        num_warps=_k3_vw,
         num_stages=2,
     )
     return out
@@ -1012,7 +1018,8 @@ class KDARecoverSSMCommitContext:
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), 32)
+        block_v, _k3_cw = _K3_KDA_TILE.get("commit", (32, 4))
+        block_v = min(triton.next_power_of_2(value_dim), block_v)
         grid = (
             triton.cdiv(value_dim, block_v),
             batch,
@@ -1059,7 +1066,7 @@ class KDARecoverSSMCommitContext:
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            num_warps=_k3_cw,
             num_stages=2,
         )
 

@@ -343,6 +343,7 @@ class CudaGraphManager:
             if mixed_mode and (
                 not self.vllm_config.cache_config.use_kda_recoverssm
                 or num_tokens <= max_decode_tokens
+                or __import__('os').environ.get('VLLM_K3_RECOVERSSM_WIDE_PW') == '1'
             ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
