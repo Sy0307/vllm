@@ -54,7 +54,14 @@
 | `6eb6879f2` | 融合 all-gather + GEMM 的形状清单（按真实权重逐形状实测） |
 | `8407050f2` | cohort 平衡（仅 no-spec 用，本版关闭） |
 
-冻结 overlay 中这 29 个源文件的 sha256，与分支 `8407050f2` 逐一核对一致。
+冻结 overlay 中这 29 个源文件的 sha256，与分支 `8407050f2` 逐一核对一致。`8407050f2` 之后的提交只改 `deploy/` 下的启动器和手册，`vllm/` 源码与冻结 overlay 相同。
+
+另有两个分支，**都不在冻结 overlay 里，运维部署不要用**：
+
+| 分支 | 内容 | 状态 |
+| --- | --- | --- |
+| `k3/unified-spec55-frozen-mm57368-20260928`（<https://github.com/Sy0307/vllm/tree/k3/unified-spec55-frozen-mm57368-20260928>） | 在 `8407050f2` 上叠加 PR 57368（图片 CPU 输入用完即释放 + 共享存储），针对多图 CPU OOM | CPU 单测通过；尚未做 GPU 验证，也没打进 overlay |
+| `k3/unified-spec55-cpudisp-20260928`（<https://github.com/Sy0307/vllm/tree/k3/unified-spec55-cpudisp-20260928>） | 混批 KDA metadata 去重 + state 回写改 `index_copy_`，减少 CPU 下发时间，与图片无关 | 门禁逐位一致；端到端 +0.31%，在噪声内 |
 
 **共享依赖**（GPFS 上现有目录，不要修改）：
 
@@ -190,5 +197,5 @@ python3 $R/gate_mooncake.py /tmp/k3-gate.json 11 http://10.18.1.25:18984   # ran
 - `VLLM_SERVER_DEV_MODE=1` 与测试时一致，`/server_info`、`/reset_prefix_cache` 等开发端点处于开放状态，需要在网络层限制访问。
 - 同一个服务进程只能做一次 Kineto profile，第二次会段错误。
 - `--synthetic-acceptance` 仅用于压测：它会用随机接受代替真实验证，输出不是模型的真实结果，**生产严禁使用**。
-- 本版不含 PR 57368（图片 CPU 输入用完即释放 + 共享存储）。多图、长输出的高并发负载下，PP 第0级的 8 个 worker 各保留一份图片张量直到请求结束，可能 CPU OOM；9-16/17 distill 事故就是这个根因。
+- 本版不含 PR 57368（图片 CPU 输入用完即释放 + 共享存储）。多图、长输出的高并发负载下，PP 第0级的 8 个 worker 各保留一份图片张量直到请求结束，可能 CPU OOM；9-16/17 distill 事故就是这个根因。修复已叠在冻结代码上，见第 2 节的 `k3/unified-spec55-frozen-mm57368-20260928`；要用它需要重建 overlay，并做带图片的 GPU 验证。
 - MooncakeStore 每节点固定占用 8 ×（200 + 4）= 1632 GiB 主机内存，启动即全额记账，只适用于本手册的裸机环境。放进 1700 / 1725 GiB 上限的容器里放不下，需要重新定段大小。另外，第 5 节的 MemAvailable 检查读的是 `/proc/meminfo`，在容器里拿到的是宿主机的内存，不能代替容器上限检查。
