@@ -71,8 +71,7 @@
   "--speculative-config",
   "{\"method\": \"dspark\", \"model\": \"/gpfs/mszn/models/Inferact/Kimi-K3-DSpark\", \"num_speculative_tokens\": 4, \"attention_backend\": \"TOKENSPEED_MLA\", \"draft_sample_method\": \"greedy\", \"draft_tensor_parallel_size\": 8, \"enable_adaptive_verification\": false, \"rejection_sample_method\": \"block\"}",
   "--compilation-config",
-  "{\"cudagraph_mode\": \"FULL_AND_PIECEWISE\", \"cudagraph_capture_sizes\": [5, 10, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360, 380, 400, 420, 440, 460, 480, 560, 640, 720, 800, 880, 960, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 6656, 7168, 7680, 8192]}",
-  "--language-model-only"
+  "{\"cudagraph_mode\": \"FULL_AND_PIECEWISE\", \"cudagraph_capture_sizes\": [5, 10, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360, 380, 400, 420, 440, 460, 480, 560, 640, 720, 800, 880, 960, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 6656, 7168, 7680, 8192]}"
  ],
  "rank_args": {
   "0": [

@@ -1,9 +1,10 @@
 # Kimi K3 Unified + DSpark 投机解码：运维部署手册
 
-版本：`k3-unified-spec55-20260927`（2026-09-27）。面向运维与运维 Agent。
+版本：`k3-unified-spec55-20260927`（2026-09-27；2026-09-28 修订：去掉 `--language-model-only`）。面向运维与运维 Agent。
 
 ## 0. 部署前必读
 
+- **本版保持 ViT 开启，不要添加 `--language-model-only`**（2026-09-28 修改）。9-27 版的 `runtime.json` 原本带有这个参数。实测它不影响 ViT 加载：worker 日志里视觉编码器照常构建，并因注意力头数不能被 TP8 整除，自动改为数据并行。但它会把每个请求的图片数上限设为 0，API 日志为 `running in text-only mode`，按代码带图片的请求会被拒绝。现已从 `runtime.json` 删除（见第 3 节第 5 条）。
 - 这是一个两节点实例：TP8 × PP2 × direct DCP8 + EP + 模型级 SP，开启 DSpark K4 投机解码和 MooncakeStore。每个请求的 prefill 和 decode 都由两台一起完成，不是 P/D 两座岛。
 - 交付物分三部分：
   1. **冻结的 vLLM overlay**：GPFS 上的只读目录，带逐文件校验和；
@@ -89,14 +90,15 @@
 - `VLLM_K3_HF_VALIDATE=0`、`VLLM_K3_HF_VALIDATE_CTRL=0`：仅用于校验，开启后 decode 每步慢约 18 ms。
 - `VLLM_K3_COHORT_BALANCE=0`。
 
-**与测试时的运行配置相比，本版做了四处删改**：
+**与测试时的运行配置相比，本版做了五处删改**：
 
 1. 去掉测量探针 `--worker-extension-cls`。
 2. 去掉 `--profiler-config` 和 `K3_SCALING_OUTPUT`。
 3. `PYTHONPATH` 只保留冻结 overlay（测试时多出的两个目录只放探针模块）。
 4. 编译缓存改到发布目录下，首次启动需要重新编译。
+5. 去掉 `--language-model-only`（2026-09-28），让图片输入可用。
 
-其余参数和环境变量与 1h 测试完全一致。
+其余参数和环境变量与 1h 测试完全一致。注意：第 4 节的性能数字和门禁都是带着 `--language-model-only`、只有文本输入时测的。
 
 ## 4. 性能与正确性依据
 
@@ -105,6 +107,7 @@
 - **测法校准**：用 synthetic 采样喂入真实运行实测的逐位接受率，1h 分数比真实运行高 1.07%（按步定价对比为 1.19%）。因此真实接受率 55% 时，预期约 1880 tok/s（推算）。
 - 附注：InferenceX 数据集的 prompt 是随机哈希拼接的，草稿模型几乎猜不中，这份数据上实测 AL 只有 1.71，1h 为 1302.73。这是测试集本身的特点，不代表生产接受率。
 - **正确性**：各项优化的核对方式和结果见第 3 节。block 模式门禁的做法是：同一 prompt 分别冷算、本地命中、Mooncake 命中，比较 64 个贪心 token 和 logprob。优化期间每个组合都跑过这个门禁并 PASS。本版的新部署需要按第 7 节重新执行一次。
+- **图片输入尚未验证**：去掉 `--language-model-only` 后，预期文本路径不变：ViT 本来就会加载；K3 的 config 没有 mm_prefix，注意力后端的选择也不变。但有两点没测过：启动时会多做视觉编码器的显存 profile，KV 容量可能略有变化；图片与 DSpark、PP2、DCP8、RecoverSSM、Mooncake 同时开的组合没在本栈跑过。接图片流量前，需要补一次带图片的门禁，并重新确认启动日志里的 KV 容量。
 
 ## 5. 预检（两台都要执行）
 
@@ -187,3 +190,5 @@ python3 $R/gate_mooncake.py /tmp/k3-gate.json 11 http://10.18.1.25:18984   # ran
 - `VLLM_SERVER_DEV_MODE=1` 与测试时一致，`/server_info`、`/reset_prefix_cache` 等开发端点处于开放状态，需要在网络层限制访问。
 - 同一个服务进程只能做一次 Kineto profile，第二次会段错误。
 - `--synthetic-acceptance` 仅用于压测：它会用随机接受代替真实验证，输出不是模型的真实结果，**生产严禁使用**。
+- 本版不含 PR 57368（图片 CPU 输入用完即释放 + 共享存储）。多图、长输出的高并发负载下，PP 第0级的 8 个 worker 各保留一份图片张量直到请求结束，可能 CPU OOM；9-16/17 distill 事故就是这个根因。
+- MooncakeStore 每节点固定占用 8 ×（200 + 4）= 1632 GiB 主机内存，启动即全额记账，只适用于本手册的裸机环境。放进 1700 / 1725 GiB 上限的容器里放不下，需要重新定段大小。另外，第 5 节的 MemAvailable 检查读的是 `/proc/meminfo`，在容器里拿到的是宿主机的内存，不能代替容器上限检查。
