@@ -1501,7 +1501,7 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     checkpoint_state_indices = torch.tensor(
         [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
     )
-    FlashKDAPrefillCheckpointExporter().export(
+    FlashKDAPrefillCheckpointExporter(state_len=3).export(
         MambaPrefillCheckpointMetadata(checkpoint_offsets, checkpoint_state_indices),
         raw_qkv=conv_input,
         conv_state=conv_state,
@@ -1511,3 +1511,50 @@ def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: fl
     )
     torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
     torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
+
+
+@pytest.mark.parametrize("num_spec", [0, 1, 4])
+@pytest.mark.parametrize("dim_first", [True, False])
+@torch.inference_mode()
+def test_checkpoint_conv_history_excludes_speculative_scratch(num_spec, dim_first):
+    """A cached checkpoint resumes convolution from its logical token boundary."""
+    dim, width, boundary = 12, 4, 16
+    history_len = width - 1
+    capacity = history_len + num_spec
+    raw = torch.arange(20, dtype=torch.float32, device=DEVICE)
+    raw = raw[:, None].expand(-1, dim).contiguous()
+    shape = (2, dim, capacity) if dim_first else (2, capacity, dim)
+    conv_state = torch.full(shape, -73.0, device=DEVICE)
+    if not dim_first:
+        conv_state = conv_state.transpose(1, 2)
+    recurrent_state = torch.zeros(2, 1, 4, 4, device=DEVICE)
+    checkpoint_state = torch.ones(1, 1, 4, 4, device=DEVICE)
+    indices = torch.tensor([1], dtype=torch.int32, device=DEVICE)
+    FlashKDAPrefillCheckpointExporter(state_len=history_len).export(
+        MambaPrefillCheckpointMetadata(
+            torch.tensor([boundary], dtype=torch.int32, device=DEVICE), indices
+        ),
+        raw_qkv=raw,
+        conv_state=conv_state,
+        recurrent_checkpoint=checkpoint_state,
+        recurrent_state=recurrent_state,
+        cu_seqlens=torch.tensor([0, len(raw)], dtype=torch.int32, device=DEVICE),
+    )
+    torch.testing.assert_close(
+        conv_state[1, :, :history_len], raw[boundary - history_len : boundary].T
+    )
+    assert torch.all(conv_state[1, :, history_len:] == -73)
+    assert torch.all(conv_state[0] == -73)
+    torch.testing.assert_close(recurrent_state[1], checkpoint_state[0])
+
+    weight = torch.ones(dim, width, device=DEVICE)
+    actual = causal_conv1d_update(
+        raw[boundary].view(1, dim, 1).clone(),
+        conv_state,
+        weight,
+        None,
+        conv_state_indices=indices,
+        activation=None,
+    )
+    expected = raw[boundary - history_len : boundary + 1].sum(0).view(1, dim, 1)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
