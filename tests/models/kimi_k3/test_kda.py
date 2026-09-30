@@ -622,6 +622,7 @@ def test_kda_spec_decode_correctness(
         pytest.param(True, False, None, True, id="aligned"),
     ],
 )
+@pytest.mark.parametrize("accepted", [[2, 8], [4, 8]])
 @torch.inference_mode()
 def test_kda_recoverssm_verify_and_group_commit(
     monkeypatch: pytest.MonkeyPatch,
@@ -629,6 +630,7 @@ def test_kda_recoverssm_verify_and_group_commit(
     use_request_indices: bool,
     conv_state_dim_first: bool,
     align_mode: bool,
+    accepted: list[int],
 ):
     monkeypatch.setattr(
         recoverssm_ops,
@@ -668,7 +670,6 @@ def test_kda_recoverssm_verify_and_group_commit(
     state_indices = torch.tensor(
         [5, 6] if align_mode else [1, 2], dtype=torch.int32, device=DEVICE
     )
-    accepted = [2, 8]
     if use_request_indices:
         global_num_accepted = torch.tensor(
             [0, accepted[0], 0, accepted[1]],
@@ -821,7 +822,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                final_block = block_table[row, (4 + commit_len) // 8]
+                final_block = block_table[row, (4 + commit_len - 1) // 8]
             committed_states[final_block] = committed_state.transpose(-1, -2)
             if align_mode and 4 + commit_len >= 8:
                 _, boundary_state = naive_recurrent_kda(
@@ -874,7 +875,7 @@ def test_kda_recoverssm_verify_and_group_commit(
             if align_mode:
                 assert block_table is not None
                 row = request_indices[seq_idx] if use_request_indices else seq_idx
-                block = block_table[row, (4 + commit_len) // 8]
+                block = block_table[row, (4 + commit_len - 1) // 8]
             source_block = state_indices[seq_idx] if align_mode else block
             if conv_state_dim_first:
                 actual_conv = layer.kv_cache[0][block, :, :history_len]
@@ -908,6 +909,67 @@ def test_kda_recoverssm_verify_and_group_commit(
                         state_indices[seq_idx], 3 : 3 + history_len
                     ]
                 torch.testing.assert_close(actual_boundary_conv, expected_boundary_conv)
+
+
+@pytest.mark.parametrize("unallocated_tail", [0, 3])
+@pytest.mark.parametrize("accepted_len", [0, 1, 5])
+@torch.inference_mode()
+def test_recoverssm_exact_boundary_preserves_unowned_blocks(
+    monkeypatch: pytest.MonkeyPatch, unallocated_tail: int, accepted_len: int
+):
+    """An aligned commit must match in-place recovery without touching a tail ID."""
+    monkeypatch.setattr(recoverssm_ops, "is_conv_state_dim_first", lambda: True)
+    torch.manual_seed(731)
+    q, k, v, g = [
+        torch.randn((1, 5, 2, 128), device=DEVICE, dtype=torch.bfloat16)
+        for _ in range(4)
+    ]
+    beta = torch.randn((1, 5, 2), device=DEVICE, dtype=torch.bfloat16)
+    conv = torch.randn((4, 768, 7), device=DEVICE, dtype=torch.bfloat16)
+    checkpoint = torch.randn((4, 2, 128, 128), device=DEVICE) * 0.01
+    correction = torch.zeros((4, 2, 5, 128), device=DEVICE)
+    kg = torch.zeros((4, 2, 5, 256), device=DEVICE, dtype=torch.bfloat16)
+    A = torch.zeros(2, device=DEVICE)
+    dt = torch.zeros((2, 128), device=DEVICE)
+    cu = torch.tensor([0, 5], device=DEVICE, dtype=torch.int32)
+    src = torch.tensor([1], device=DEVICE, dtype=torch.int32)
+    accepted = torch.tensor([accepted_len], device=DEVICE, dtype=torch.int32)
+    computed = torch.tensor(
+        [1664 - accepted_len if accepted_len else 0], device=DEVICE, dtype=torch.int32
+    )
+    kda_recoverssm_verify(
+        q, k, v, g, beta, A, dt, None, checkpoint, correction, kg, cu, src, 5
+    )
+
+    def make_context():
+        layer = SimpleNamespace(
+            kv_cache=tuple(t.clone() for t in (conv, checkpoint, correction, kg)),
+            A_log=A,
+            dt_bias=dt,
+            local_num_heads=2,
+            head_dim=128,
+            gate_lower_bound=None,
+        )
+        context = KDARecoverSSMCommitContext.create(
+            [layer], spec_query_len=5, max_num_reqs=1
+        )
+        return layer, context
+
+    expected, reference = make_context()
+    reference.commit(accepted, src, cu)
+    actual, aligned = make_context()
+    aligned.commit(
+        accepted,
+        src,
+        cu,
+        block_table=torch.tensor(
+            [[1, unallocated_tail, 0]], device=DEVICE, dtype=torch.int32
+        ),
+        num_computed_tokens=computed,
+        mamba_block_size=1664,
+    )
+    torch.testing.assert_close(actual.kv_cache[1], expected.kv_cache[1])
+    torch.testing.assert_close(actual.kv_cache[0], expected.kv_cache[0])
 
 
 @pytest.mark.parametrize(

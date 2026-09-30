@@ -32,6 +32,44 @@ from vllm.v1.kv_cache_interface import (
 pytestmark = pytest.mark.cpu_test
 
 
+@pytest.mark.parametrize("cache_mode", ["align", "all"])
+@pytest.mark.parametrize("num_speculative_blocks", [0, 2])
+@pytest.mark.parametrize("needs_zeroing", [False, True])
+def test_mamba_reallocated_blocks_are_reported_for_zeroing(
+    cache_mode, num_speculative_blocks, needs_zeroing
+):
+    """Reuse after cancellation must enqueue each fresh physical Mamba block."""
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((2, 3), (2, 4)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_cache_mode=cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+    pool = BlockPool(
+        num_gpu_blocks=num_speculative_blocks + 2,
+        enable_caching=False,
+        hash_block_size=4,
+    )
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        needs_kv_cache_zeroing=needs_zeroing,
+    )
+    first = manager.allocate_new_blocks("cancelled", 1, 1)
+    first_ids = {b.block_id for b in first}
+    assert len(first_ids) == num_speculative_blocks + 1
+    assert set(manager.take_new_block_ids()) == (first_ids if needs_zeroing else set())
+    assert manager.take_new_block_ids() == []
+    manager.free("cancelled")
+    recycled = manager.allocate_new_blocks("replacement", 1, 1)
+    assert {b.block_id for b in recycled} == first_ids
+    assert set(manager.take_new_block_ids()) == (first_ids if needs_zeroing else set())
+
+
 def test_external_computed_blocks_do_not_corrupt_free_pool():
     block_size = 4
     spec = FullAttentionSpec(

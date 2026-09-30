@@ -156,6 +156,31 @@ def _sum_batch_bytes(sizes: list[list[int]]) -> int:
     return sum(sum(size) for size in sizes)
 
 
+def _batch_get_into_multi_buffers(
+    store: Any,
+    keys: list[str],
+    addrs: list[list[int]],
+    sizes: list[list[int]],
+) -> list[int]:
+    """Keep each native GET free of repeated keys that can alias destinations."""
+    results: list[int] = []
+    start = 0
+    seen: set[str] = set()
+    for end in range(len(keys) + 1):
+        if end == len(keys) or keys[end] in seen:
+            if start < end:
+                batch = store.batch_get_into_multi_buffers(
+                    keys[start:end], addrs[start:end], sizes[start:end]
+                )
+                for _, result in zip(keys[start:end], batch, strict=True):
+                    results.append(result)
+            start = end
+            seen.clear()
+        if end < len(keys):
+            seen.add(keys[end])
+    return results
+
+
 def _get_usable_disk_offload_buffer_budget_bytes(raw_budget_bytes: int) -> int:
     return max(1, int(raw_budget_bytes * envs.VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO))
 
@@ -1352,8 +1377,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
                 # Reset so the recorded RPC duration excludes tier lookup.
                 load_get_start = time.perf_counter()
-                res = self.store.batch_get_into_multi_buffers(
-                    batch_keys, batch_addrs, batch_sizes
+                res = _batch_get_into_multi_buffers(
+                    self.store, batch_keys, batch_addrs, batch_sizes
                 )
                 if tiers_by_key is not None:
                     _log_mooncake_load_tier_summary(

@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheLayout,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.worker import utils as worker_utils
@@ -20,6 +21,37 @@ from vllm.v1.worker.utils import (
     KVBlockZeroer,
     _zero_kv_blocks_kernel,
 )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("binding_type", [tuple, list])
+def test_mamba_state_segments_are_zeroed_without_touching_shared_prefix(binding_type):
+    """Clear recycled conv/SSM/record views while preserving other blocks."""
+    device = torch.device("cuda")
+    storage = torch.full((4, 128), 0x7F, dtype=torch.uint8, device=device)
+    conv = storage[:, :12].view(torch.bfloat16).view(4, 2, 3)
+    ssm = storage[:, 16:48].view(torch.float32).view(4, 2, 4)
+    record = storage[:, 48:80].view(torch.bfloat16).view(4, 2, 8)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((2, 3), (2, 4), (2, 8)),
+        dtypes=(torch.bfloat16, torch.float32, torch.bfloat16),
+        mamba_cache_mode="align",
+    )
+    zeroer = KVBlockZeroer(
+        device,
+        [AttentionGroup(None, ["kda"], spec, 0)],
+        [16],
+        {"kda": SimpleNamespace(kv_cache=binding_type((conv, ssm, record)))},
+        num_blocks=4,
+    )
+    zeroer.zero_block_ids([1, 3])
+    torch.accelerator.synchronize()
+    expected = torch.full_like(storage, 0x7F)
+    for block in (1, 3):
+        expected[block, :12] = 0
+        expected[block, 16:80] = 0
+    assert torch.equal(storage, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

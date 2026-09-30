@@ -1519,6 +1519,50 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
 
 
+@pytest.mark.parametrize(
+    "hashes",
+    [(b"a", b"a"), (b"a", b"b", b"a"), (b"a", b"a", b"a"), (b"a", b"b", b"c")],
+)
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("fail_second", [False, True])
+def test_store_recving_thread_writes_every_duplicate_destination(
+    hashes, tp_rank, fail_second
+):
+    """A native key map must not leave earlier successful destinations stale."""
+    store = MagicMock()
+    written = {}
+    failed_address = 0x1100 if fail_second else None
+
+    def get(keys, addrs, sizes):
+        # Reproduce the native map keyed by string, which keeps only the last
+        # destination for a repeated key but reports success for every index.
+        destinations = dict(zip(keys, addrs, strict=True))
+        for key, pointers in destinations.items():
+            for pointer in pointers:
+                if pointer != failed_address:
+                    written[pointer] = key
+        return [
+            -5 if failed_address in pointers else sum(size)
+            for pointers, size in zip(addrs, sizes, strict=True)
+        ]
+
+    store.batch_get_into_multi_buffers.side_effect = get
+    thread = _make_store_recving_thread(store, tp_rank=tp_rank)
+    thread._handle_request(
+        _make_load_req("req-a", list(hashes), token_len=16 * len(hashes))
+    )
+
+    expected_addresses = {0x1000 + 256 * i for i in range(len(hashes))}
+    if fail_second:
+        assert failed_address is not None
+        expected_addresses.remove(failed_address)
+    assert set(written) == expected_addresses
+    assert thread.get_and_clear_block_ids_with_load_errors() == (
+        {1} if fail_second else set()
+    )
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+
+
 def test_store_recving_thread_reports_failed_block_ids():
     store = MagicMock()
     store.batch_get_into_multi_buffers.return_value = [256, -5, -7]

@@ -1742,9 +1742,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # boundaries before the forward. Runs only on real batches, and
             # before model_state.prepare_attn gathers num_accepted_tokens so the
             # boundary reset is visible to the attention metadata.
+            # Deferred PP copies need persistent request-slot tables; gathered
+            # batch-order tables may already describe a subsequent step.
             self.model_state.preprocess_state(
                 input_batch,
-                block_tables,
+                tuple(bt.gpu for bt in self.block_tables.block_tables),
                 self.kv_cache_config,
                 self.req_states.num_computed_tokens.gpu,
             )

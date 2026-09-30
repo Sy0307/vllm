@@ -279,6 +279,7 @@ def _prepare_commit_plan_kernel(
     query_len = (eos - bos).to(tl.int32)
     commit_len = tl.minimum(tl.maximum(num_accepted, 0), query_len)
     commit_len = tl.minimum(commit_len, SPEC_QUERY_LEN)
+    valid = (source_state_idx > null_block_id) & (commit_len > 0)
 
     final_state_idx = source_state_idx
     boundary_state_idx = null_block_id
@@ -288,13 +289,17 @@ def _prepare_commit_plan_kernel(
             tl.int32
         )
         final_num_computed = num_computed + commit_len
+        # The final state belongs to the last accepted token's allocated block.
         final_state_col = tl.minimum(
-            final_num_computed // mamba_block_size, block_table_width - 1
+            tl.maximum(final_num_computed - 1, 0) // mamba_block_size,
+            block_table_width - 1,
         )
         final_state_idx = tl.load(
             block_table_ptr
             + request_idx * stride_block_table_row
-            + final_state_col * stride_block_table_col
+            + final_state_col * stride_block_table_col,
+            mask=valid,
+            other=null_block_id,
         ).to(tl.int64)
         next_boundary = (num_computed // mamba_block_size + 1) * mamba_block_size
         crosses_boundary = final_num_computed >= next_boundary
@@ -303,10 +308,9 @@ def _prepare_commit_plan_kernel(
             block_table_ptr
             + request_idx * stride_block_table_row
             + (next_boundary // mamba_block_size - 1) * stride_block_table_col,
-            mask=crosses_boundary,
+            mask=valid & crosses_boundary,
             other=null_block_id,
         ).to(tl.int64)
-    valid = (source_state_idx > null_block_id) & (commit_len > 0)
     tl.store(commit_lens_ptr + spec_idx, tl.where(valid, commit_len, 0))
     tl.store(
         final_state_indices_ptr + spec_idx,

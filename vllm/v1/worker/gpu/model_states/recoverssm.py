@@ -112,11 +112,13 @@ def _postprocess_recoverssm_align_kernel(
     if req_state_idx < 0:
         return
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
+    if num_sampled <= 0:
+        return
     num_computed = tl.load(num_computed_ptr + batch_idx)
     tl.store(
         state_idx_ptr + req_state_idx,
         tl.minimum(
-            (num_computed + num_sampled) // MAMBA_BLOCK_SIZE,
+            (num_computed + num_sampled - 1) // MAMBA_BLOCK_SIZE,
             BLOCK_TABLE_WIDTH - 1,
         ),
     )

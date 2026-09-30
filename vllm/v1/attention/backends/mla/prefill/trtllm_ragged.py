@@ -265,6 +265,9 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         splits = _k3_split_kv_factor(
             chunk.max_query_len, chunk.num_requests, chunk.max_seq_len
         )
+        if splits > 1 and int(chunk.seq_lens.min().item()) < splits:
+            # Empty segments leave output rows unwritten; NaN * zero is NaN.
+            splits = 1
         if splits > 1:
             return self._k3_split_context(chunk, q, k, v, out, splits)
 
