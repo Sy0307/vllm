@@ -154,11 +154,11 @@ class PPHandler:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
             if exclude_mask.any():
-                keep = ~exclude_mask
-                keep_t = torch.as_tensor(keep, device=self.device)
-                draft_tokens = draft_tokens[keep_t]
-                draft_idx_mapping = async_tensor_h2d(
-                    slot.idx_mapping_np[keep], device=self.device
+                current = draft_tokens_to_update[draft_idx_mapping]
+                draft_tokens = torch.where(
+                    (idx_mapping >= 0).unsqueeze(1),
+                    draft_tokens.to(current.dtype),
+                    current,
                 )
             draft_tokens_to_update[draft_idx_mapping] = draft_tokens
 
