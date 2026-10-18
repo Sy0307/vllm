@@ -1,3 +1,4 @@
 overlay/
 state/
 __pycache__/
+vendor/**/._*
