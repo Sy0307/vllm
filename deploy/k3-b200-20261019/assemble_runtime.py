@@ -32,6 +32,8 @@ shutil.copytree(
 for name, item in lock["runtime_files"].items():
     target = destination / name
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        os.chmod(target, target.stat().st_mode | 0o200)
     shutil.copy2(REPO / item["repository_path"], target)
 verify(destination)
 for root, _, files in os.walk(destination):
