@@ -135,7 +135,8 @@ def _maybe_init_sp_input_projection(
         or not current_platform.is_device_capability((10, 0))
         or envs.VLLM_BATCH_INVARIANT
         or "TORCH_SYMM_MEM_ENABLE_NATIVE_ASYNC_TP" in os.environ
-        or vllm_config.compilation_config.pass_config.fuse_gemm_comms
+        # fuse_gemm_comms was removed with the torch.compile SP pass (#60517).
+        or getattr(vllm_config.compilation_config.pass_config, "fuse_gemm_comms", False)
         # K3 defaults to breakable CUDA graphs. Dynamic Dynamo fallback through
         # the existing custom AG is not supported by this experimental path.
         or vllm_config.compilation_config.mode != CompilationMode.NONE

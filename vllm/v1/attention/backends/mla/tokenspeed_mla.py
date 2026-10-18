@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -91,13 +92,37 @@ _g_workspace: dict[torch.device, torch.Tensor] = {}
 
 
 def _get_workspace(
-    device: torch.device, num_heads: int, kv_lora_rank: int
+    device: torch.device,
+    num_heads: int,
+    kv_lora_rank: int,
+    min_split_kv: int = 1,
+    max_decode_tokens: int = 0,
 ) -> torch.Tensor:
     from tokenspeed_mla import get_num_sm
 
+    # TokenSpeed reduction scratch: B * H * Q * split_kv * (D + 1) * 4 bytes,
+    # using the effective query layout and FP32 partial outputs plus LSE.
+    # Automatic splitting lowers split_kv as the batch grows; split_kv=1
+    # needs no reduction scratch, so an SM-based bound covers all batch sizes.
     needed = (
         get_num_sm(device) * num_heads * _TOKENSPEED_MAX_Q_LEN * (kv_lora_rank + 1) * 4
     )
+    if min_split_kv > 1:
+        # A forced floor breaks that bound: reserve for the maximum batch.
+        # Packed queries pad head rows to 128; reserve one tile per query token.
+        needed = max(
+            needed,
+            max_decode_tokens
+            * max(num_heads, 128)
+            * min_split_kv
+            * (kv_lora_rank + 1)
+            * 4,
+        )
+        logger.info_once(
+            "TokenSpeed MLA decode workspace: %.2f GiB", needed / (1 << 30)
+        )
+    # K3: one lazily grown buffer per device, shared by all layers (and the
+    # small-q warmup); upstream moved this to current_workspace_manager().
     existing = _g_workspace.get(device)
     if existing is None or existing.numel() < needed:
         _g_workspace[device] = torch.empty(needed, dtype=torch.int8, device=device)
@@ -256,7 +281,7 @@ class TokenspeedMLABackend(MLACommonBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [32, 64]
 
     @staticmethod
@@ -324,6 +349,7 @@ class TokenspeedMLABackend(MLACommonBackend):
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
     # tokenspeed_mla_decode returns LSE in log2 units; its own DCP test merges
     # partial outputs with exp2(lse).
     lse_base_on_e: bool = False
@@ -379,12 +405,29 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 f"got kv_cache_dtype={self.kv_cache_dtype!r}."
             )
 
+        config = get_current_vllm_config()
+        self._min_split_kv = config.attention_config.tokenspeed_mla_min_split_kv
+        self._max_decode_tokens = 0
+        if self._min_split_kv > 1:
+            spec = config.speculative_config
+            query_len = 1 + (spec.num_speculative_tokens if spec else 0)
+            self._max_decode_tokens = max(
+                min(
+                    config.scheduler_config.max_num_batched_tokens,
+                    config.scheduler_config.max_num_seqs * query_len,
+                ),
+                config.compilation_config.max_cudagraph_capture_size or 0,
+            )
+
         # Allocate (or fetch the cached) workspace lazily on first forward —
         # __init__ runs before the device is necessarily set on the worker;
         # we know it for sure at forward time when we see the input tensor.
         self._workspace_buffer: torch.Tensor | None = None
         self.softmax_scale: float | None = None
         self.output_scale: float | None = None
+        # NIXL resolves interleaving after model construction; retain the config
+        # rather than caching its initial interleave size.
+        self._parallel_config = config.parallel_config
 
         # Pre-JIT BF16 and FP8 prefill kernels here too — decode impl always
         # runs when tokenspeed is selected, prefill backend may not (user can
@@ -398,6 +441,19 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 d_v=self.v_head_dim,
                 enable_pdl=False,
             )
+
+    def _k3_split_kwargs(self) -> dict:
+        """Upstream (#59462/#60345) decode kwargs, passed only when they differ
+        from the kernel defaults so the 0.1.x kernel and the K3 var-split
+        wrapper keep working; a non-default value on an older kernel fails
+        loudly instead of being silently ignored."""
+        kw: dict = {}
+        interleave = self._parallel_config.cp_kv_cache_interleave_size
+        if self.dcp_world_size > 1 and interleave != 1:
+            kw["cp_interleave_size"] = interleave
+        if self._min_split_kv > 1:
+            kw["min_split_kv"] = self._min_split_kv
+        return kw
 
     def forward_mqa(
         self,
@@ -463,7 +519,11 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if self._workspace_buffer is None:
             # Parallelism can change the runtime query head count.
             self._workspace_buffer = _get_workspace(
-                q.device, q.shape[-2], self.kv_lora_rank
+                q.device,
+                q.shape[-2],
+                self.kv_lora_rank,
+                self._min_split_kv,
+                self._max_decode_tokens,
             )
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
@@ -474,6 +534,8 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             return self._k3_forward_mqa_pieces(q, kv_c_and_k_pe_cache, attn_metadata, tokenspeed_mla_decode,
                                                return_lse, k3_pieces)
         _hf_G = _K3_HF_MAP.get(q.shape[1], 0) if (_K3_HEAD_FOLD and q.dim() == 4 and attn_metadata.causal) else 0
+        if _hf_G and self._k3_split_kwargs():
+            _hf_G = 0  # fold path predates the split floor / KV interleave kwargs
         # Validated batch range only (B=36..64 sweep vs production path: <=6e-4 abs; small B
         # with split-KV folded batches was inexact, see mla_fold_bench2).
         if _hf_G and 36 <= q.shape[0] <= 64 and q.shape[2] % _hf_G == 0 and (q.shape[2] // _hf_G) * q.shape[1] <= 128:
@@ -565,9 +627,13 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **({'k3_memo': attn_metadata.decode.__dict__.setdefault('_k3_vs_memo', {})}
                if _os.environ.get('VLLM_K3_TS_VS_MEMO', '0') == '1'
                and _os.environ.get('VLLM_K3_TS_VAR_SPLIT', '0') == '1' else {}),
+            **self._k3_split_kwargs(),
         )
         if return_lse:
             o, lse = kernel_out
+            # DCP ranks with no local KV may return undefined outputs (e.g.,
+            # NaNs). The downstream DCP combine path must mask empty
+            # shards and ignore their outputs when merging partial attention.
             lse = lse.view(-1, lse.shape[-1])
         else:
             o, lse = kernel_out, None
@@ -586,7 +652,8 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                       qk_rope_head_dim=self.qk_rope_head_dim, max_seq_len=attn_metadata.max_seq_len,
                       softmax_scale=self.softmax_scale, output_scale=self.output_scale, enable_pdl=False,
                       return_lse=return_lse, causal_mask=attn_metadata.causal,
-                      cp_world=self.dcp_world_size, cp_rank=self.dcp_rank)
+                      cp_world=self.dcp_world_size, cp_rank=self.dcp_rank,
+                      **self._k3_split_kwargs())
         for off, B, n, P, bt, loc, glob in calls:
             cs = glob if self.dcp_world_size > 1 else None
             if P == n:
