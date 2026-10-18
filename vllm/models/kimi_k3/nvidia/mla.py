@@ -55,11 +55,14 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
     should_load_quant_weights,
 )
+from vllm.model_executor.layers.attention import mla_attention as _mla_common
 from vllm.model_executor.layers.attention.mla_attention import (
+    _dequant_fp8_rows,
     _get_kv_b_proj_input_dtype,
     accumulate_mla_context_chunk,
     init_mla_context_partial,
     neutralize_empty_context_partials,
+    reorg_kvcache,
     split_kv_b_proj,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -79,6 +82,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.kimi_k3.nvidia import mla_hist_cache as _hc
 from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
@@ -138,6 +142,15 @@ _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
+def get_dcp_local_seq_lens_cached(context_len: int, dcp: int, local_block: int):
+    """Per-rank local row count of one context (same rule as the impl)."""
+    from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+
+    return get_dcp_local_seq_lens(
+        torch.tensor([context_len], dtype=torch.int32), dcp, None, local_block
+    ).tolist()[0]
+
+
 def _gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """Apply the sigmoid output gate to a precomputed gate projection."""
     return attn_out * gate.sigmoid()
@@ -412,6 +425,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 use_pcp=False,
             )
         self._dcp_fused_kv_pack = self._resolve_dcp_fused_kv_pack()
+        if _hc.ENABLED and self.dcp_world_size > 1:
+            # Reserve the cross-step context cache now so the memory profile
+            # (and hence the KV cache size) accounts for it.
+            _hc.init_pool(torch.device("cuda", torch.cuda.current_device()))
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
             scale=self.scale,
@@ -861,6 +878,302 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             return fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
         return fused_mla_kv_concat(k_nope, k_pe), v
 
+    # ---- Cross-step chunked-context reuse (VLLM_K3_MLA_HIST_CACHE) ----
+    #
+    # Mirrors ``impl._context_parallel_compute_prefill_context`` for the
+    # production config (plain fp8 cache, fp8 gather, fused K/V pack, fp8
+    # prefill query) and lets a multi-chunk prompt reuse the packed context K/V
+    # its previous chunk computed; see mla_hist_cache.py.
+
+    def _hist_supported(self, attn_metadata, q: torch.Tensor) -> bool:
+        cc = attn_metadata.prefill.chunked_context
+        return (
+            self._dcp_fused_kv_pack
+            and cc is not None
+            and cc.workspace.dtype == torch.float8_e4m3fn
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "fp8_ds_mla"
+            and q.dtype == current_platform.fp8_dtype()
+            and getattr(cc, "k3_chunk_alignment", None) is not None
+        )
+
+    def _hist_kpe_passthrough(self) -> bool:
+        # Same decision as the impl loop: unit k_scale makes fp8 -> bf16 -> fp8 an
+        # identity, so the gathered fp8 k_pe is packed as-is.
+        if not _mla_common._K3_KPE_FP8_PASSTHROUGH:
+            return False
+        unit = getattr(self, "_k3_hist_unit_k_scale", None)
+        if unit is None:
+            ks = self._k_scale
+            unit = self._k3_hist_unit_k_scale = bool(
+                ks.numel() == 1 and float(ks.item()) == 1.0
+            )
+        return unit
+
+    def _dcp_chunk_kv(self, chunk, block_table, cc, kv_cache, kpe_passthrough):
+        """One context chunk's packed (k, v), exactly as the impl loop builds it."""
+        workspace = cc.workspace
+        toks = chunk.num_local_context_tokens
+        ops.cp_gather_cache(
+            src_cache=kv_cache,
+            dst=workspace[:toks].view(kv_cache.dtype),
+            block_table=block_table,
+            cu_seq_lens=chunk.padded_local_cu_seq_lens,
+            batch_size=chunk.num_requests,
+            seq_starts=chunk.starts,
+        )
+        dcp = self.dcp_world_size
+        allgather_offset = workspace.shape[0] // (dcp + 1)
+        assert allgather_offset * (dcp + 1) == workspace.shape[0]
+        assert toks <= allgather_offset
+        local_gathered = workspace[:toks]
+        allgather_ws = workspace[allgather_offset : allgather_offset * (1 + dcp)]
+        gathered = allgather_ws[: toks * dcp]
+        cc.dcp_manager.kv_gather(gathered, local_gathered)
+        kv_c, k_pe = gathered.unsqueeze(1).split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        kv_c, k_pe = reorg_kvcache(
+            kv_c,
+            k_pe,
+            padded_local_chunk_seq_lens_lst=chunk.padded_local_seq_lens,
+            local_context_lens_allranks=chunk.local_context_lens_allranks,
+            local_starts=chunk.local_starts,
+            sum_seq_len=chunk.num_context_tokens,
+            max_seq_len=chunk.max_seq_len,
+            toks=toks,
+        )
+        out_dtype = _mla_common._K3_DCP_FP8_GATHER_OUT_DTYPE
+        kv_c = _dequant_fp8_rows(kv_c, self._k_scale, out_dtype)
+        if not kpe_passthrough:
+            k_pe = _dequant_fp8_rows(k_pe, self._k_scale, out_dtype)
+        kv_b_dtype = _get_kv_b_proj_input_dtype(self.kv_b_proj, True)
+        if kv_b_dtype is not None:
+            kv_c = kv_c.to(kv_b_dtype)
+        kv_nope = self.kv_b_proj(kv_c)[0].view(
+            -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        return self._dcp_kv_pack(kv_nope, k_pe, True)
+
+    @staticmethod
+    def _hist_segments(chunk):
+        """(request offset in chunk, rank, local start, rows) in reorg order."""
+        segs = []
+        for m, (padded, lens, start) in enumerate(
+            zip(
+                chunk.padded_local_seq_lens,
+                chunk.local_context_lens_allranks,
+                chunk.local_starts,
+            )
+        ):
+            for rank, local_len in enumerate(lens):
+                rows = min(max(0, local_len - start), padded)
+                if rows:
+                    segs.append((m, rank, start, rows))
+        return segs
+
+    def _hist_scatter(self, chunk, entries, k, v) -> None:
+        off = 0
+        for m, rank, start, rows in self._hist_segments(chunk):
+            e = entries[m]
+            if e is not None:
+                e.k[rank, start : start + rows].copy_(k[off : off + rows])
+                e.v[rank, start : start + rows].copy_(v[off : off + rows])
+                e.local_valid[rank] = max(e.local_valid[rank], start + rows)
+            off += rows
+        assert off == k.shape[0]
+
+    def _hist_covers(self, chunk, entries) -> bool:
+        for m, rank, start, rows in self._hist_segments(chunk):
+            e = entries[m]
+            if e is None or e.local_valid[rank] < start + rows:
+                return False
+        return True
+
+    def _hist_assemble(self, chunk, entries):
+        segs = self._hist_segments(chunk)
+        if len(segs) == 1:
+            m, rank, start, rows = segs[0]
+            return (
+                entries[m].k[rank, start : start + rows],
+                entries[m].v[rank, start : start + rows],
+            )
+        k = torch.cat([entries[m].k[r, s : s + n] for m, r, s, n in segs])
+        v = torch.cat([entries[m].v[r, s : s + n] for m, r, s, n in segs])
+        return k, v
+
+    def _hist_tail_chunk(self, cc, start: int, end: int, device):
+        """A one-request chunk over context rows [start, end) (start aligned)."""
+        from types import SimpleNamespace
+
+        from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+
+        lb, vb = cc.k3_dcp_local_block, cc.k3_dcp_virtual_block
+        local_start = (start // vb) * lb
+        n_local = -(-end // vb) * lb - local_start
+        local_lens = get_dcp_local_seq_lens(
+            torch.tensor([end], dtype=torch.int32), self.dcp_world_size, None, lb
+        ).tolist()[0]
+        meta = torch.tensor([0, n_local, local_start], dtype=torch.int32).to(
+            device, non_blocking=True
+        )
+        return SimpleNamespace(
+            num_requests=1,
+            num_local_context_tokens=n_local,
+            padded_local_cu_seq_lens=meta[:2],
+            starts=meta[2:],
+            padded_local_seq_lens=[n_local],
+            local_context_lens_allranks=[local_lens],
+            local_starts=[local_start],
+            num_context_tokens=end - start,
+            max_seq_len=end - start,
+        ), local_lens
+
+    def _dcp_hist_context(self, q: torch.Tensor, attn_metadata):
+        prefill = attn_metadata.prefill
+        cc = prefill.chunked_context
+        layer = self.layer_name
+        ctx = cc.context_lens_list
+        reqs = _hc.prefill_requests(attn_metadata.num_decodes, ctx)
+        if reqs is None:
+            return self.impl._context_parallel_compute_prefill_context(  # type: ignore[attr-defined]
+                q,
+                self._attn_read_kv_cache(),
+                attn_metadata,
+                k_scale=self._k_scale,
+                dcp_world_size=self.dcp_world_size,
+                **self._dcp_kv_pack_kwargs(),
+            )
+        kv_cache = self._attn_read_kv_cache()
+        kpe_passthrough = self._hist_kpe_passthrough()
+        dcp = self.dcp_world_size
+        lb, vb = cc.k3_dcp_local_block, cc.k3_dcp_virtual_block
+        align = cc.k3_chunk_alignment
+        allgather_rows = cc.workspace.shape[0] // (dcp + 1)
+        num_prefills = len(ctx)
+        entries: list = [None] * num_prefills
+
+        # Bring each cached request up to its current context: process only the
+        # rows added since its last chunk (from an aligned start).
+        for p, (rid, _cont) in enumerate(reqs):
+            e = _hc.get(layer, rid)
+            if e is None:
+                continue
+            if e.h > ctx[p]:
+                _hc.drop_layer(layer, rid)
+                _hc.stats["stale"] += 1
+                continue
+            if e.h < ctx[p]:
+                start = (e.h // align) * align
+                tail, local_lens = self._hist_tail_chunk(cc, start, ctx[p], q.device)
+                if (
+                    tail.num_local_context_tokens > allgather_rows
+                    or -(-ctx[p] // vb) * lb > e.k.shape[1]
+                ):
+                    _hc.drop_layer(layer, rid)
+                    _hc.stats["tail_too_large"] += 1
+                    continue
+                tk, tv = self._dcp_chunk_kv(
+                    tail, prefill.block_table[p : p + 1], cc, kv_cache, kpe_passthrough
+                )
+                self._hist_scatter(tail, [e], tk, tv)
+                if e.local_valid != local_lens:
+                    _hc.drop_layer(layer, rid)
+                    _hc.stats["tail_invalid"] += 1
+                    continue
+                e.h = ctx[p]
+                _hc.stats["tail_rows"] += ctx[p] - start
+            entries[p] = e
+
+        single = len(cc.chunks) == 1 and not cc.empty_token_slices
+        single_result = None
+        output = output_lse = None
+        for chunk in cc.chunks:
+            ps = range(chunk.request_slice.start, chunk.request_slice.stop)
+            chunk_entries = [entries[p] for p in ps]
+            if self._hist_covers(chunk, chunk_entries):
+                k, v = self._hist_assemble(chunk, chunk_entries)
+                _hc.stats["chunk_reused"] += 1
+                _hc.stats["rows_reused"] += chunk.num_context_tokens
+                if _hc.VERIFY:
+                    kb, vb_ = self._dcp_chunk_kv(
+                        chunk,
+                        prefill.block_table[chunk.request_slice],
+                        cc,
+                        kv_cache,
+                        kpe_passthrough,
+                    )
+                    same = torch.equal(
+                        k.contiguous().view(torch.uint8), kb.view(torch.uint8)
+                    ) and torch.equal(
+                        v.contiguous().view(torch.uint8), vb_.view(torch.uint8)
+                    )
+                    _hc.stats["verify_ok" if same else "verify_mismatch"] += 1
+                    k, v = kb, vb_
+            else:
+                k, v = self._dcp_chunk_kv(
+                    chunk,
+                    prefill.block_table[chunk.request_slice],
+                    cc,
+                    kv_cache,
+                    kpe_passthrough,
+                )
+                _hc.stats["chunk_computed"] += 1
+                store = []
+                for p in ps:
+                    rid, cont = reqs[p]
+                    e = entries[p]
+                    if e is None and cont:
+                        plen_rows = -(-(ctx[p] + 1) // vb) * lb
+                        e = _hc.create(
+                            layer,
+                            rid,
+                            dcp,
+                            max(plen_rows, _hc.max_local_rows(rid, vb, lb)),
+                            k.shape[1],
+                            k.shape[2],
+                            v.shape[2],
+                            k.dtype,
+                            k.device,
+                        )
+                        entries[p] = e
+                    store.append(e if cont else None)
+                if any(x is not None for x in store):
+                    self._hist_scatter(chunk, store, k, v)
+            attn_output, attn_lse = prefill.prefill_backend.run_prefill_context_chunk(
+                chunk=chunk, q=q[chunk.token_slice], k=k, v=v
+            )
+            # Same fold order as the impl loop: a lone chunk is the partial,
+            # otherwise each chunk is merged right after it runs.
+            if single:
+                single_result = (attn_output, attn_lse)
+                continue
+            if output is None:
+                output, output_lse = init_mla_context_partial(
+                    cc, attn_output, attn_lse, num_tokens=q.shape[0]
+                )
+            accumulate_mla_context_chunk(chunk, attn_output, attn_lse, output, output_lse)
+
+        # Finish: a continuing prompt's entry now covers its whole context; a
+        # prompt whose last chunk ran no longer needs one.
+        for p, (rid, cont) in enumerate(reqs):
+            e = entries[p]
+            if e is None:
+                continue
+            if not cont:
+                _hc.drop_layer(layer, rid)
+                continue
+            want = get_dcp_local_seq_lens_cached(ctx[p], dcp, lb)
+            if e.local_valid[:dcp] == want:
+                e.h = ctx[p]
+            else:
+                _hc.drop_layer(layer, rid)
+                _hc.stats["finish_invalid"] += 1
+
+        if single:
+            return single_result
+        return output, output_lse
+
     def _compute_prefill_context(
         self,
         q: torch.Tensor,
@@ -1144,7 +1457,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         )
 
         if has_context:
-            if self.dcp_world_size > 1:
+            if self.dcp_world_size > 1 and _hc.ENABLED and self._hist_supported(
+                attn_metadata, q
+            ):
+                context_output, context_lse = self._dcp_hist_context(q, attn_metadata)
+            elif self.dcp_world_size > 1:
                 context_output, context_lse = (
                     self.impl._context_parallel_compute_prefill_context(  # type: ignore[attr-defined]
                         q,

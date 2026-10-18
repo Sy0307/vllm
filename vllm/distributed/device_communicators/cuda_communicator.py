@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import contextlib
+import os
+from typing import Any
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -26,6 +30,28 @@ from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
+
+# Share one PyNccl communicator across groups with identical ranks (see
+# CudaCommunicator.__init__); VLLM_K3_SHARE_PYNCCL=0 restores one per group.
+_K3_SHARE_PYNCCL = os.environ.get("VLLM_K3_SHARE_PYNCCL", "1") == "1"
+_K3_SHARED_PYNCCL: dict[tuple[Any, ...], Any] = {}
+_K3_PYNCCL_REFS: dict[int, int] = {}
+# Groups built under k3_pynccl_share_tag(tag) only share PyNccl communicators
+# with groups built under the same tag. The K3 overlapped drafter's duplicate
+# groups use their own tag so they never share an NCCL communicator with the
+# target, whose collectives run concurrently on another stream.
+_K3_PYNCCL_SHARE_TAG: str | None = None
+
+
+@contextlib.contextmanager
+def k3_pynccl_share_tag(tag: str | None):
+    global _K3_PYNCCL_SHARE_TAG
+    saved = _K3_PYNCCL_SHARE_TAG
+    _K3_PYNCCL_SHARE_TAG = tag
+    try:
+        yield
+    finally:
+        _K3_PYNCCL_SHARE_TAG = saved
 
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
 # non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
@@ -104,13 +130,35 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
-        if self.world_size > 1:
+        # Groups over the same ranks (e.g. TP, EP and DCP on one node) can
+        # share one NCCL communicator: each extra one costs ~1.1 GiB of
+        # device memory on B200. Collectives are issued in the same order on
+        # every rank, so sharing keeps the per-communicator ordering valid.
+        share_key: tuple[Any, ...] | None = (
+            (tuple(self.ranks), self.device.index)
+            if _K3_SHARE_PYNCCL and tcp_store_group is None
+            else None
+        )
+        if share_key is not None and _K3_PYNCCL_SHARE_TAG is not None:
+            share_key = share_key + (_K3_PYNCCL_SHARE_TAG,)
+        if self.world_size > 1 and share_key in _K3_SHARED_PYNCCL:
+            self.pynccl_comm = _K3_SHARED_PYNCCL[share_key]
+            _K3_PYNCCL_REFS[id(self.pynccl_comm)] += 1
+            logger.info(
+                "Sharing PyNccl communicator of ranks %s with group %s",
+                self.ranks,
+                unique_name,
+            )
+        elif self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
             )
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
+            if share_key is not None:
+                _K3_SHARED_PYNCCL[share_key] = self.pynccl_comm
+                _K3_PYNCCL_REFS[id(self.pynccl_comm)] = 1
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
@@ -805,7 +853,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def destroy(self):
         if self.pynccl_comm is not None:
-            self.pynccl_comm.destroy()
+            comm_id = id(self.pynccl_comm)
+            refs = _K3_PYNCCL_REFS.get(comm_id, 1) - 1
+            if refs > 0:
+                _K3_PYNCCL_REFS[comm_id] = refs
+            else:
+                _K3_PYNCCL_REFS.pop(comm_id, None)
+                for k in [
+                    k for k, v in _K3_SHARED_PYNCCL.items() if v is self.pynccl_comm
+                ]:
+                    del _K3_SHARED_PYNCCL[k]
+                self.pynccl_comm.destroy()
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None

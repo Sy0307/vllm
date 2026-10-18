@@ -360,8 +360,11 @@ class PPHandler:
         assert self.is_last_rank
         if compute_need_sampled_mask(input_batch) is None:
             return
+        # Wait for whichever stream produced the drafts (the main stream, or
+        # the K3 draft side stream with VLLM_K3_DRAFT_OVERLAP).
+        producer = torch.cuda.current_stream()
         with torch.cuda.stream(self.broadcast_stream):
-            self.broadcast_stream.wait_stream(self.main_stream)
+            self.broadcast_stream.wait_stream(producer)
             send = draft_tokens[input_batch.idx_mapping].contiguous()
             # Must record the idx_mapping tensor since it was allocated
             # on the main stream.

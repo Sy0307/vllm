@@ -7,14 +7,13 @@ from dataclasses import dataclass, replace
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
+    resolve_mamba_prefill_checkpoint,
 )
 
 
@@ -46,7 +45,7 @@ def compute_mamba_prefill_checkpoints(
         position = get_mamba_prefill_checkpoint_position(
             seq_len, cache_hit_alignment_tokens, drop_eagle_block=drop_eagle_block
         )
-        valid = is_mamba_prefill_checkpoint_valid(
+        valid, col = resolve_mamba_prefill_checkpoint(
             query_start=query_start,
             query_end=seq_len,
             checkpoint_position=position,
@@ -55,7 +54,7 @@ def compute_mamba_prefill_checkpoints(
             checkpoint_alignment=checkpoint_alignment,
         )
         offsets.append(position - query_start if valid else 0)
-        cols.append(cdiv(seq_len, mamba_block_size) - 2 if valid else -1)
+        cols.append(col)
     return offsets, cols
 
 
@@ -103,6 +102,39 @@ class MambaPrefillCheckpointBuilder:
         m: CommonAttentionMetadata,
         request_rows: list[int],
     ) -> MambaPrefillCheckpointMetadata | None:
+        return self.finish(self.build_shared(m, request_rows), m)
+
+    def finish(
+        self,
+        shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]] | None,
+        m: CommonAttentionMetadata,
+    ) -> MambaPrefillCheckpointMetadata | None:
+        """Group-specific part: gather the state slots from this group's table."""
+        if shared is None:
+            return None
+        (
+            checkpoint_offsets_tensor,
+            request_rows_tensor,
+            checkpoint_cols_tensor,
+            checkpoint_offsets,
+        ) = shared
+        return MambaPrefillCheckpointMetadata(
+            checkpoint_offsets_tensor,
+            _gather_checkpoint_state_indices(
+                m.block_table_tensor, request_rows_tensor, checkpoint_cols_tensor
+            ),
+            offsets=checkpoint_offsets,
+            request_rows=request_rows_tensor,
+            block_cols=checkpoint_cols_tensor,
+        )
+
+    def build_shared(
+        self,
+        m: CommonAttentionMetadata,
+        request_rows: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[int]] | None:
+        """Batch-only part (same for every KV-cache group of this spec):
+        checkpoint offsets and (row, column) coordinates on the device."""
         if self.vllm_config.cache_config.mamba_cache_mode != "align":
             return None
         if self.kv_cache_spec.num_prefill_checkpoint_blocks == 0:
@@ -144,14 +176,11 @@ class MambaPrefillCheckpointBuilder:
         checkpoint_cols_tensor = async_tensor_h2d(
             checkpoint_cols, dtype=torch.int64, device=m.query_start_loc.device
         )
-        return MambaPrefillCheckpointMetadata(
+        return (
             checkpoint_offsets_tensor,
-            _gather_checkpoint_state_indices(
-                m.block_table_tensor, request_rows_tensor, checkpoint_cols_tensor
-            ),
-            offsets=checkpoint_offsets,
-            request_rows=request_rows_tensor,
-            block_cols=checkpoint_cols_tensor,
+            request_rows_tensor,
+            checkpoint_cols_tensor,
+            checkpoint_offsets,
         )
 
 

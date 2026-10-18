@@ -107,6 +107,42 @@ def test_delegating_parser_strips_response_wrapper_without_tool_parser():
     assert tool_calls == []
 
 
+@pytest.mark.parametrize("suffix", ["continued", "continued<|close|>response<|sep|>"])
+def test_partial_response_suffix_is_content_in_nonstreaming(suffix):
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    parser.set_prompt_token_ids(OPEN_IDS + [100] + CLOSE_IDS + RESPONSE_OPEN_IDS)
+    reasoning, content, tool_calls = parser.parse(suffix, request)
+    assert reasoning is None
+    assert content == "continued"
+    assert tool_calls == []
+    assert parser.count_reasoning_tokens([101, 102]) == 0
+
+
+def test_partial_response_suffix_is_content_in_streaming():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[], stream=True)
+    delta = parser.parse_delta(
+        "continued",
+        [101, 102],
+        request,
+        OPEN_IDS + [100] + CLOSE_IDS + RESPONSE_OPEN_IDS,
+        finished=True,
+    )
+    assert delta is not None and delta.content == "continued"
+    assert delta.reasoning is None
+    assert parser.count_reasoning_tokens([101, 102]) == 0
+
+
+def test_closed_historical_reasoning_does_not_hide_new_reasoning():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    parser.set_prompt_token_ids(OPEN_IDS + [100] + CLOSE_IDS + OPEN_IDS)
+    reasoning, content, _ = parser.parse("still thinking", request)
+    assert reasoning == "still thinking" and content is None
+    assert parser.count_reasoning_tokens([101, 102]) == 2
+
+
 def test_is_reasoning_end_uses_full_input_ids():
     parser = KimiK3ReasoningParser(DummyTokenizer())
 

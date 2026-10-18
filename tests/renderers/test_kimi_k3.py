@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams
 from vllm.renderers.kimi_k3 import KimiK3Renderer, _merge_k3_media_io_kwargs
@@ -259,6 +261,106 @@ def test_render_messages_returns_token_prompt():
     assert prompt == {"prompt_token_ids": [1, 2, 3]}
     assert "multi_modal_data" not in prompt
     assert conversation[0]["role"] == "user"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_k3_rejects_named_function_before_tokenization(stream):
+    request = ChatCompletionRequest(
+        model="kimi-k3",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tool_choice={"type": "function", "function": {"name": "lookup"}},
+        stream=stream,
+    )
+    tokenizer = StubTokenizer([1])
+    renderer = _make_renderer(tokenizer)
+    with pytest.raises(VLLMValidationError, match="specified.*thinking enabled"):
+        renderer.render_messages(
+            request.messages, ChatParams(tool_choice=request.tool_choice)
+        )
+    assert not tokenizer.calls
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [{"role": "user", "content": "hi", "partial": True}],
+        [
+            {"role": "assistant", "content": "prefix", "partial": True},
+            {"role": "user", "content": "hi"},
+        ],
+    ],
+)
+@pytest.mark.asyncio
+async def test_k3_rejects_misplaced_partial_after_request_validation(messages):
+    request = ChatCompletionRequest(model="kimi-k3", messages=messages)
+    tokenizer = StubTokenizer([1])
+    renderer = _make_renderer(tokenizer)
+    for render in (renderer.render_messages, renderer.render_messages_async):
+        with pytest.raises(VLLMValidationError, match="final assistant"):
+            if render == renderer.render_messages_async:
+                await render(request.messages, ChatParams())
+            else:
+                render(request.messages, ChatParams())
+    assert not tokenizer.calls
+
+
+def test_partial_false_does_not_change_normal_chat_rendering():
+    request = ChatCompletionRequest(
+        model="kimi-k3",
+        messages=[{"role": "user", "content": "hi", "partial": False}],
+    )
+    tokenizer = StubTokenizer([1])
+    renderer = _make_renderer(tokenizer)
+    _, prompt = renderer.render_messages(request.messages, ChatParams())
+    assert prompt == {"prompt_token_ids": [1]}
+    assert len(tokenizer.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "prefix", ["结论：", "  prefix\n\t", "", "<|open|>think<|sep|>"]
+)
+def test_partial_uses_real_k3_response_channel_and_preserves_prefix(prefix):
+    """Optional CPU integration against the pinned deployment tokenizer."""
+    model_path = os.environ.get("K3_TOKENIZER_PATH")
+    if not model_path:
+        pytest.skip("Set K3_TOKENIZER_PATH to the pinned K3 tokenizer")
+    from transformers import AutoTokenizer
+
+    from vllm.parser.parser_manager import ParserManager
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    renderer = _make_renderer(tokenizer)
+    request = ChatCompletionRequest(
+        model="kimi-k3",
+        messages=[
+            {"role": "user", "content": "Continue the answer."},
+            {
+                "role": "assistant",
+                "content": prefix,
+                "partial": True,
+                "reasoning_content": "Existing reasoning.",
+            },
+        ],
+    )
+    _, prompt = renderer.render_messages(
+        request.messages, ChatParams(tool_choice="none")
+    )
+    ids = prompt["prompt_token_ids"]
+    rendered = tokenizer.decode(ids)
+    assert rendered.endswith("<|open|>response<|sep|>" + prefix)
+    assert "Existing reasoning." in rendered
+    assert "tool_choice=none" in rendered
+    assert rendered.count('message role="assistant"') == 1
+    prefix_ids = tokenizer.encode(prefix, allow_special_tokens=False)
+    if prefix_ids:
+        assert ids[-len(prefix_ids) :] == prefix_ids
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="kimi_k3")
+    parser = parser_cls(tokenizer)
+    assert parser.is_reasoning_end(ids)
+    parser.set_prompt_token_ids(ids)
+    reasoning, content, _ = parser.parse("continued", request)
+    assert reasoning is None and content == "continued"
 
 
 def test_render_messages_derives_private_xtml_tool_attrs():

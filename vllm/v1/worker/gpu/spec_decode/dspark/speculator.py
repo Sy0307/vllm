@@ -23,6 +23,7 @@ CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
 """
 
+import os
 from typing import Any
 
 import torch
@@ -36,12 +37,27 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
 
+# K3: greedy draft ids from per-rank logit shards + a (value, index) gather
+# instead of an all-gather of the full-vocab draft logits.
+_K3_DRAFT_LOCAL_ARGMAX = os.environ.get("VLLM_K3_DRAFT_LOCAL_ARGMAX", "0") == "1"
+# Also run the gathered-argmax path and count disagreements in a device counter
+# (graph-safe); read with ``k3_draft_local_argmax_stats()``.
+_K3_DRAFT_LOCAL_ARGMAX_VERIFY = (
+    os.environ.get("VLLM_K3_DRAFT_LOCAL_ARGMAX_VERIFY", "0") == "1"
+)
+
 
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        # Persistent so the verify counter can be updated inside the draft graph.
+        self._k3_la_stats = (
+            torch.zeros(2, dtype=torch.int64, device=device)
+            if _K3_DRAFT_LOCAL_ARGMAX_VERIFY
+            else None
+        )
 
         # Whether to sample from the anchor position. When True, uses anchor-as-first
         # (N slots, each position predicts the next token). When False, uses 1+N
@@ -153,9 +169,85 @@ class DSparkSpeculator(DFlashSpeculator):
             use_fp64=self.use_fp64_gumbel,
         )
 
+    def _k3_local_argmax_ok(self) -> bool:
+        """Greedy drafting over a vocab-parallel head: each rank can take the
+        argmax of its own logit shard (+ the replicated Markov bias slice) and
+        only (value, index) pairs are gathered. Same element values as the
+        gathered path, first-index tie-break, so the draft ids are identical."""
+        if not _K3_DRAFT_LOCAL_ARGMAX:
+            return False
+        if (
+            self.draft_logits is not None
+            or self.use_acceptance_estimator
+            or self.draft_watermarker is not None
+            or getattr(self, "_d2t_scatter_index", None) is not None
+        ):
+            return False
+        lm_head = getattr(self.model, "lm_head", None)
+        lp = getattr(self.model, "logits_processor", None)
+        return (
+            lm_head is not None
+            and lp is not None
+            and getattr(lm_head, "tp_size", 1) > 1
+            and hasattr(lm_head, "shard_indices")
+            and lp.org_vocab_size == lm_head.org_vocab_size
+        )
+
+    def _sample_sequential_local_argmax(
+        self, num_reqs: int, head_hidden: torch.Tensor
+    ) -> None:
+        from vllm.distributed import tensor_model_parallel_all_gather
+
+        n_spec = self.num_speculative_steps
+        num_sample = num_reqs * n_spec
+        sample_hidden = head_hidden[self.sample_indices[:num_sample]]
+        lm_head = self.model.lm_head
+        shard = lm_head.shard_indices
+        lo, hi = shard.org_vocab_start_index, shard.org_vocab_end_index
+        # Local shard of the draft logits (scale / soft cap applied per element
+        # exactly as after the gather); padding columns sit past ``hi - lo``.
+        base_local = self.model.logits_processor(
+            lm_head, sample_hidden, skip_gather=True
+        )
+        base_local = base_local[:, : hi - lo].view(num_reqs, n_spec, hi - lo)
+        tp = lm_head.tp_size
+        base_full = None
+        if _K3_DRAFT_LOCAL_ARGMAX_VERIFY:
+            base_full = self.model.compute_draft_logits(sample_hidden).view(
+                num_reqs, n_spec, -1
+            )
+        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        for i in range(n_spec):
+            bias = self.model.markov_bias(self.model.markov_embed(prev))
+            logits_i = base_local[:, i] + bias[:, lo:hi]
+            vals, idx = logits_i.max(dim=-1)
+            pair = torch.stack([vals.float(), (idx + lo).float()], dim=-1)
+            gathered = tensor_model_parallel_all_gather(pair, dim=-1).view(
+                num_reqs, tp, 2
+            )
+            win = gathered[:, :, 0].argmax(dim=-1, keepdim=True)
+            draft_ids = (
+                gathered[:, :, 1].gather(dim=-1, index=win).squeeze(-1).to(torch.int64)
+            )
+            if base_full is not None:
+                ref = (base_full[:, i] + bias).argmax(dim=-1)
+                self._k3_la_stats[0] += (ref != draft_ids).sum()
+                self._k3_la_stats[1] += num_reqs
+            draft_sampled_i = self.model.map_draft_to_target(draft_ids)
+            self.draft_tokens[:num_reqs, i] = draft_sampled_i
+            prev = draft_sampled_i
+
+    def k3_draft_local_argmax_stats(self) -> list[int]:
+        """[mismatches, compared draft tokens] since start (verify mode)."""
+        stats = getattr(self, "_k3_la_stats", None)
+        return [0, 0] if stats is None else stats.tolist()
+
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
             self._sample_sequential_topk(num_reqs, head_hidden)
+            return
+        if not self.use_confidence_head and self._k3_local_argmax_ok():
+            self._sample_sequential_local_argmax(num_reqs, head_hidden)
             return
 
         # Sequential Markov sampling over the backbone's output hidden states.

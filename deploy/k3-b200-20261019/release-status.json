@@ -1,0 +1,11 @@
+{
+  "status": "source-frozen-pending-gpu-acceptance",
+  "unit_tests_passed": 117,
+  "gpu_http_sse_acceptance": "deferred until after documentation by user request",
+  "assembled_package_hour_score": "not run",
+  "existing_async_run": "cx-final2costv2-candidate-h1-r1",
+  "default_configuration": "baseline-reference",
+  "default_tail_improvement_claimed": false,
+  "numerical_quality": "Shared TP4 and optional CuTe history are not proven semantically equivalent; full semantic evaluation is pending.",
+  "inherited_lint": "Frozen measured source has pre-existing lint findings; see evidence/frozen-source-precommit.json. Authored API and deployment scripts checked separately."
+}

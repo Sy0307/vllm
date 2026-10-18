@@ -1,0 +1,1702 @@
+{
+  "branch": "k3/b200-tail-release-20261019",
+  "previous_release_parent": "984c1efeaeaca19942ade2f57b171213e4101d88",
+  "upstream_merge_parent": "a2fb4827324bf023075799ef3d70d347834b8137",
+  "isolated_merge_snapshot": "f779262c188f7ba406fab8528df8ee86a22f03e1",
+  "native_wheel_metadata_commit": "94f4170df37fe29d68bd2f7e5a496501b78d55ae",
+  "native_overlay": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/campaigns/sy-final2-20261017/mgG",
+  "native_python_archive_sha256": "24acdb282f0cfc33a7f538e282c4783c7549a2dcd0d4b57b275bc7a7ddda4823",
+  "reconciliation": {
+    "archive_sha256": "24acdb282f0cfc33a7f538e282c4783c7549a2dcd0d4b57b275bc7a7ddda4823",
+    "changed": [
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/.___init__.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/.__triton.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._fmha.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._fmha_helpers.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._k3_plan.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_decode.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_decode_fp16.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_decode_fp8.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_decode_fp8_sm107.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_helpers.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_helpers_sm107.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_kv_pack_quantize_fp8.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._mla_prefill.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/._utils.py",
+        "before": null,
+        "after": "dfe5eeb92812539ea004d6fbab61a9a5e2084206947d855a3db02ef8ff8874cc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/__init__.py",
+        "before": null,
+        "after": "86784e467a0bc02d59482af38145632da89280d9568cde6cb01f74678bab8708"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/_triton.py",
+        "before": null,
+        "after": "9612efae8838be5166671a62c91705d39a9a604a68a5be8f171fcf28e0dfbbcc"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/fmha.py",
+        "before": null,
+        "after": "b10161310a44dd9a1e3eaae1a601221bb8f7049a07f7b036db155fb914e561d8"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/fmha_helpers.py",
+        "before": null,
+        "after": "20348ecb662bb5418482dce9c7d28327b5e08dd9333f7245a94b4df526bee75b"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/k3_plan.py",
+        "before": null,
+        "after": "9c3b33d818a5be32d7e1b3ae9ced5db29576b2e962529b29b4d09724de3bc22a"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_decode.py",
+        "before": null,
+        "after": "3c1afad10bb8f94b5b3088cb9e87ce09f5b798634e633ed728e7bb50102b8c89"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_decode_fp16.py",
+        "before": null,
+        "after": "08b5557f5446b38f68e31e66f40c54fa9573857c7e7103cfdbf0d140d0c0fcc2"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_decode_fp8.py",
+        "before": null,
+        "after": "d4ca8149f431f907b30903e0598d81bafa2d99073323eb0adc3917407199109e"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_decode_fp8_sm107.py",
+        "before": null,
+        "after": "e28d65449009a00a1a853434ae7e533b49b498387f9d18acae617291806f2554"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_helpers.py",
+        "before": null,
+        "after": "bcfaa2ca3cab523f3e4c3b68d83af69a91241250bc471da46f6b272e34ab6e4a"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_helpers_sm107.py",
+        "before": null,
+        "after": "5d3466ed9770eb307848cf639b7f18b23628364c9d217ef4eaa64ed560ffb065"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_kv_pack_quantize_fp8.py",
+        "before": null,
+        "after": "5e3edb821d704c2da6d055f46bc8b700b028b463fd9ced6a55dcfb14955fc2c4"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/mla_prefill.py",
+        "before": null,
+        "after": "c25c6279ad7ef07a674beef3ee5edc57d3efc815688d0eb3a5037f856e908e51"
+      },
+      {
+        "path": "deploy/k3-b200-20261019/vendor/tokenspeed_mla/utils.py",
+        "before": null,
+        "after": "e02292be794ccef474745439f08b497e6507b74eb758f97276e6a9000ee8fdd1"
+      },
+      {
+        "path": "vllm/_k3_ts_mla_decode.py",
+        "before": "27c730cbc31a69a4c5a46bfda18a3dc2008eb70824a7da473218e5b535bb0952",
+        "after": "d9ec9b23282a42d862470d86f5320bf812315cf65a3ef8d29133027e81e25d20"
+      },
+      {
+        "path": "vllm/_k3_ts_plan.py",
+        "before": null,
+        "after": "c58ef12a62eb157115191bea94f3e5da9e8936b3dc1e406d1529e19dc19caeb5"
+      },
+      {
+        "path": "vllm/_version.py",
+        "before": null,
+        "after": "7d1bc10f7cb4d8724515bd67895905346f2a4e321a502e94d5234b212ad329f0"
+      },
+      {
+        "path": "vllm/distributed/device_communicators/cuda_communicator.py",
+        "before": "2f5368d6ca1856a7b2b49fc423cc4728483d0c9289f913a7bc7cbe0baa040ec0",
+        "after": "3c4813bde5e9aff5457a1deebfa6239729730e190f6983168bc69dea854e930d"
+      },
+      {
+        "path": "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
+        "before": "8c7299a848b06429671124617e031e7f57d420102ff084e44004391294ea7872",
+        "after": "0d8abac63febb6e9ea18317b5bf6cc5bfaa044947b0746c46a274ef4f33c2793"
+      },
+      {
+        "path": "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+        "before": "042e9b097c7880ac93239a87ebdfc782897ef5add96860afbb1cd13fb32c5c2e",
+        "after": "fde22c3cf42f8da7c955b294f2e3d7624a6c9a058644fa449d9c3ed9195ad6e5"
+      },
+      {
+        "path": "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+        "before": "ffbd9d4031e01aed6175e055bcef80292457604b12e7d7253a800e03d3ea9fda",
+        "after": "4180e0b6f129a3900bd72ef7123ddc61abb40269defd718d2b9395bab30373df"
+      },
+      {
+        "path": "vllm/distributed/parallel_state.py",
+        "before": "0e47cff9a89717183bdce6403f0454961848247f51306a0f1dfbe3d6e1b93336",
+        "after": "8a6e9f5fc20472b9e7d34f5a4d991173586db1bde9c6596024249c2862d215c3"
+      },
+      {
+        "path": "vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py",
+        "before": "ebde9824eabd559950f4a4f1d364bb1054293ee06c3d3843a32fec906440246f",
+        "after": "54df7bc19bb9443689b30cbefd81d8bdcef2f6bbb49285ba5798b28539dfb6d2"
+      },
+      {
+        "path": "vllm/model_executor/layers/attention/mla_attention.py",
+        "before": "612a4187b0cfb04438089c7c4ff63b035af3018a2200646af56740406e4b7d14",
+        "after": "702697075a37eb643ae8c9c45f837ed08677328ce9899e4d315c33cc111dca4e"
+      },
+      {
+        "path": "vllm/model_executor/layers/linear.py",
+        "before": "7a9b90937865fa35d955ffc2017f23d3997bc4fba954e2667870b1b4854a38e0",
+        "after": "9d2b437bdd23ba217522a32ebdc87f54d48f17e50d979be5abda81445086e3e2"
+      },
+      {
+        "path": "vllm/model_executor/layers/mamba/checkpoint.py",
+        "before": "542e017ad94e51ae1adaac2234b2aa2d7ae04df19080e1421f466c2dcb520196",
+        "after": "f7531d93b3b433715eef4aee2b1430793e75c5ae9e883fb56ad368d7d80d5c35"
+      },
+      {
+        "path": "vllm/model_executor/models/interfaces.py",
+        "before": "f9c7d801ead69056b090b1996b3820e7a7653fb463078a8d1992df5e47ca7556",
+        "after": "3a18b7dd822149b7941c39e400c9b8c5fb84f01aa61f93871383f97e2b3e53b9"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/kda.py",
+        "before": "c1fabf99f88c27c2dfbcd2dd67e905bbce2338aecfe0e794e85f67ef76c1d895",
+        "after": "a0386a64ac6d24783521b90be6f319421a9686fe2e3c4466998bcbdbadb3a299"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/kda_metadata.py",
+        "before": "b25df6b6109fcdfbef96da059423dc562e045ac8ed25f8f9ec146b52dbd7e83a",
+        "after": "70c8d74c73bbcba9f934d89d07d6465ef2ec3b6a8dd55f18c9316b17394ee891"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/mla.py",
+        "before": "414581b501ca17f8e7d81f160394cad7ee518709a1912a7e1b61222e28045daa",
+        "after": "487fbf569d96efba6e2752175e21b7bbc593001bf3e1fa0b901296ca57103723"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/mla_hist_cache.py",
+        "before": null,
+        "after": "d73752a0dacbaf1cc1f574ce57a35cdedcf44f87322a9feb8abd8d1ba9db888f"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/model.py",
+        "before": "d755214d5c5e83fd8f1141147644126745a5fc19ef0761359a81dc5863f129e7",
+        "after": "c9ef1e09f8f9db696252f35cab0908557d7b00936f67e2d9443f788d20f5cb02"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/shared_tp.py",
+        "before": null,
+        "after": "d2ce29199cc558cf5ba321393bab649566c6d1ce29595f54d4748fbd1ab0579d"
+      },
+      {
+        "path": "vllm/models/kimi_k3/nvidia/sp_input_projection.py",
+        "before": "2868fc6e380c5f5f836c9a358330ed33f5f4e929bf65c24aaf5d9200e90a1199",
+        "after": "8525bf5c71cc05c0aef3abc2bc4e23b98673a136f33c18a02f05414dc323af3f"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/__init__.py",
+        "before": null,
+        "after": "6505093c596a2393849f36619594e677931c6c5c0d302c9fdf4d71917ca9d10e"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/envs.py",
+        "before": null,
+        "after": "1059461b6fb8d175de9db587cfb36ee3502bac1c8b54201fa3edf262abcf6a5c"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/legacy/__init__.py",
+        "before": null,
+        "after": "667f5068c618eceec4d9c839b8367273ddd8c2bd688be4510f0d0cd25296efde"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/legacy/a_fused_k_grouped_gemm.py",
+        "before": null,
+        "after": "9b4b5c96b17667b41d4e5ba7ebb75ae731fc92577a3a0d3872f379caa3568966"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/legacy/a_fused_m_grouped_gemm.py",
+        "before": null,
+        "after": "6d997188e26caf96e02c9e72edba269bab50c4a863830f57e7014b6642df1084"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/legacy/b_fused_k_grouped_gemm.py",
+        "before": null,
+        "after": "72cfbe2d38421fc3a6eeef5cc8f41497f42b10464112895d7e86ed55869b6f73"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/legacy/m_grouped_gemm.py",
+        "before": null,
+        "after": "dcbc27c583cbe0e600a94b66c2c28d51b5b79f46188582efbfd8fec801207044"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/legacy/tune_options.py",
+        "before": null,
+        "after": "73696872fa80d4b72cf25a469de55534f6689f4dfea84b66d150d57ded004b26"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/mega/__init__.py",
+        "before": null,
+        "after": "3a221b6d380fd0c94e9be1bd45c2e79554f48a25a68f88a78bca1b0fd98bac38"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/testing/__init__.py",
+        "before": null,
+        "after": "860e35af472f2e293883f8d06b928058f05fd5c32a4f108e2d774958ee198529"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/testing/bench.py",
+        "before": null,
+        "after": "478d694e5fe95cca78a2c6ee53f7436fc906dc4851cf51ab88a5a9b617142332"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/testing/numeric.py",
+        "before": null,
+        "after": "de92b73f28acb3c5f560fbb942161c88c7e849e6c52bb38fd20c67b8e4d747c7"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/testing/utils.py",
+        "before": null,
+        "after": "20e5e4450cec023dabd8e92e32d9d6b7500991b9264d1068e942999aa52afec0"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/utils/__init__.py",
+        "before": null,
+        "after": "bf31f6e9fc30482ef83a73d63fdb6ed4d46deec847b35c0f9d39816d9b923bb4"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/utils/dist.py",
+        "before": null,
+        "after": "acf0fc25aa44ca5a54f2f757a39d462f43cf4ea1585d49f3feb59deecffefee3"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/utils/layout.py",
+        "before": null,
+        "after": "eb8ad89745ebfa72bf1a6ded9129ee57f15515857787f0308bb92c61dcbc5b5a"
+      },
+      {
+        "path": "vllm/third_party/deep_gemm/utils/math.py",
+        "before": null,
+        "after": "9cdecd0c0a0a8b3c64af87107464c91510876110eb80bdb485ff1f74eda8ea0e"
+      },
+      {
+        "path": "vllm/third_party/flashmla/flash_mla_interface.py",
+        "before": null,
+        "after": "75b470a05ac3baa9f80df664fa5bccdb52fba6016caed7a85f03b2c7725b0510"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/__init__.py",
+        "before": null,
+        "after": "34ccceb5dda84af035d57d5c3c1bfb7a186363455f1165389346c21b32a3897d"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/_jit_cache.py",
+        "before": null,
+        "after": "082a288b6226612d023dfa3da10471ed0d87f7173a5471b946fa102d57e4156d"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/api.py",
+        "before": null,
+        "after": "319d313fa15e73aaead73c7a5dbece49f2c447334230fd44c18021587b929cf5"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/bench_utils.py",
+        "before": null,
+        "after": "bb6663b4ae1542075f799885edc18fe2f67306b30a2e9e0948cdc12761e8c023"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/csrc/fmha_sm100_inst.jinja",
+        "before": null,
+        "after": "192705cbd589f7de906fa97d77855a4ca4677375324154b3c37718480710e23e"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/csrc/fmha_sm100_variant_run.cu.jinja",
+        "before": null,
+        "after": "61f297ff036dd54a550d7f0455607bc155ee6008135c881139d37ce4104db323"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/example.py",
+        "before": null,
+        "after": "5f7a95fcc574f659fc67ce0d542bbbab2f0a0d074a0514a58792e3299bc235b2"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/fp4_indexer_interface.py",
+        "before": null,
+        "after": "10df94ac974772414706232a56f5ff5d314554e25ba1d473c351ad08bc3a59b6"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/interface.py",
+        "before": null,
+        "after": "83ab2344c378a4fa2716090dbb2f0e437dd63f4473fe8421e17f191e65548d31"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/q8_indexer_interface.py",
+        "before": null,
+        "after": "41ab72fc2a710df50874d9a459156e7d43211eb66f0ba0ae7b4659916db71dda"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/quantize.py",
+        "before": null,
+        "after": "d6378f2db2678238bc00d7e70cae8f086f36f4031277e5ce32a615b89e695f26"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/requirements.txt",
+        "before": null,
+        "after": "336404acc7a51e1bb7a962ebcc57ece1fcbd688416d96e396c54da18b30e4a29"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/sparse_index_utils.py",
+        "before": null,
+        "after": "bd9a73e4bb34dbb333c672e64b99beb7a4ce400691b300f1dd486bfa320650e7"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/__init__.py",
+        "before": null,
+        "after": "65d0a9ce76e5abd520192360234849a035e993e7af72f1a3bf7186b61c43fe73"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/blackwell_prefill/__init__.py",
+        "before": null,
+        "after": "dac678b4383e1e0b8b1257f4715371558c5e70f17f9a191427fc612dcfa1a93f"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/blackwell_prefill/atten_fwd_sm100.py",
+        "before": null,
+        "after": "4b1baf3df80e98b4b57f1a138175ca4016b957afa39772493910f87a7ba092d2"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/blackwell_prefill/combine.py",
+        "before": null,
+        "after": "896596ec6879aedf0acbbb46e6b2d0a64bb9ba6491a18bb67b4d3a2466e5e590"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/__init__.py",
+        "before": null,
+        "after": "65d0a9ce76e5abd520192360234849a035e993e7af72f1a3bf7186b61c43fe73"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/aot_cache.py",
+        "before": null,
+        "after": "399fdf8d730ae2f3c79be9a74658ce2b2b20010784e7867434b4428ef0f20805"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/barrier.py",
+        "before": null,
+        "after": "1a876f870c1a7fd8b20c0fc0efc56840c311467e994a7ab660fa2cafb2b64951"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/blackwell_helpers.py",
+        "before": null,
+        "after": "05825809e350f5c6158566657e3bf422035a36a967a03db59d7de0000e69441e"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/block_info.py",
+        "before": null,
+        "after": "f26e6afb3b304987be276717e057a0887cbfe5f2a09b37d3f040164a9126fd4c"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/copy_utils.py",
+        "before": null,
+        "after": "6c4b726fc3bb67b8c828d8cde444a59e1e1656f75ff2faf965f43103abd2eb30"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/cute_dsl_utils.py",
+        "before": null,
+        "after": "c57242190a8dd391b65095a564245e5dfc981289741d9bd4236294743b3f4590"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/fast_math.py",
+        "before": null,
+        "after": "9eab7a32dcc0b7bba9942e3e91cce005f8a7e201cdb3e412a2e7d1d53b8c67cf"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/mask.py",
+        "before": null,
+        "after": "2fbef9d57a60398a65c11e5789225dc15a85d007633f0887c5ee8e3f11e85cb0"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/mma_sm100_desc.py",
+        "before": null,
+        "after": "0b53ea05da7a08d3c0f7169d436c419dfe30bd0944f77492ffb094f8b6414240"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/named_barrier.py",
+        "before": null,
+        "after": "e64b4988efa13fcd1f8d347bf7b0ac95419f9b63f2869716e96259acdc88e5b4"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/pack_gqa.py",
+        "before": null,
+        "after": "1ff64fa5bfeac939bf194fc5a0f82262c754377a759a534785464887a31328dd"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/paged_kv.py",
+        "before": null,
+        "after": "8f4ffab2d4f5039b845402c45ff19a4216162227bee8ba46b1e016f1a4221db9"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/pipeline.py",
+        "before": null,
+        "after": "1d82d2f5c53c25dc7e115cea08ba6d2e92e4f05f31922c9de4deca8cc56d6f58"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/rubin_helpers.py",
+        "before": null,
+        "after": "579f7f2ed83fb88ea161cea41ef4adc5ce27bd0765c21a917dd32350d7831ed1"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/rubin_softmax_helpers.py",
+        "before": null,
+        "after": "6a3e5876ffab7d72b0f48deca712d89cf5dfd9409d1523134bae14cb348db495"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/seqlen_info.py",
+        "before": null,
+        "after": "9e3fe993b720047216de6b456f7e376acbe15d170f3883896b5f15db4846de19"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/softmax.py",
+        "before": null,
+        "after": "d4375bfa673ebe676e17baee1163fc467e7f2e13a4e02ef0ba1876b1534c4ec2"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/tile_scheduler.py",
+        "before": null,
+        "after": "c776629ab254d69676155313f9c62f36aa6411abd1a3622f97350c6914368bb2"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/tma_utils.py",
+        "before": null,
+        "after": "41c22c3ec5c32c537500f8dda34ad904ea8303f9d6f240891e40653497a97e7c"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/common/utils.py",
+        "before": null,
+        "after": "a3bd6cafd3f03b54f02878c0530af64de9da43363d22f344c52bc3536f827b67"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/__init__.py",
+        "before": null,
+        "after": "250a50b4be7c7eca3c0765f0be7d1755ebd5a888e7935e705501345141862c2b"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/build_k2q_csr/__init__.py",
+        "before": null,
+        "after": "9fcd178faa1332085a4e1afbf2f6efbcd19c8e3a7b3254f4a176a5d7adb8c966"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/decode_schedule.py",
+        "before": null,
+        "after": "427b6d5e57f75116c735e733e855e8f63261d3ec09e9e30cf92aa0727ed2c606"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fp4_indexer.py",
+        "before": null,
+        "after": "28fa7bcd65d48bedd425c1554a3b72fc8d2b38c4100ae4913e8babec2eb2e93c"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd/__init__.py",
+        "before": null,
+        "after": "034baadade27e58df89848316fd373c64f6c2ac62bd85678b05f91a048a53a6a"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd/atten_fwd.py",
+        "before": null,
+        "after": "b9cd88a9328f0358ee627f2af3c54c7994b15979f440a52494b8ae14786e2d5e"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd/atten_fwd_nvfp4_kv.py",
+        "before": null,
+        "after": "9f967b621058ac3574444e719726e6a1fe8f3dde5fbc030b225426b86f0dab5a"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd/combine.py",
+        "before": null,
+        "after": "e60df199b33d7ff3aaaac8d2a06a992c181ae6ac33533fe41587cce725f47375"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd_decode/__init__.py",
+        "before": null,
+        "after": "5d025dc2f2d09b6f51c15a9566f0acb449d3c7e76152bc261fa45c5baef9a51f"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd_decode/atten_fwd.py",
+        "before": null,
+        "after": "ab4e35f985460a6a90fc5493cb014894d52fd000b44a6109996bc8b8c8e66c21"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd_decode/build_decode_schedule/__init__.py",
+        "before": null,
+        "after": "007d878dc6a57994cc41866a73cb94e5134045fbb793d724794329c1b1c7cb35"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd_decode/combine.py",
+        "before": null,
+        "after": "6012bdd6bdf0f06484dd4f56df4d10c2114845b94ebd8c276a37f120f77b8513"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/fwd_decode/tile_scheduler.py",
+        "before": null,
+        "after": "ea67a3147fd0eb3ea6a66857af72a5c18822ccb0a1e549398eb354df9492d147"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/prepare_k2q_csr.py",
+        "before": null,
+        "after": "ad04914b94b5eeac425fa7ff8ddabde057a8795588f27727c4bbcebb4740cdc4"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/prepare_scheduler.py",
+        "before": null,
+        "after": "c6e4af4542fd7c5239b8cc675d820078f2409baf71f765e3239b943f1a97666b"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/q8kv4_indexer_decode.py",
+        "before": null,
+        "after": "0321685d4892e70b9426d4800d2339068d762c9f6993e2fa16098a8e3a88b997"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/q8kv8_indexer_decode.py",
+        "before": null,
+        "after": "23da03bb8802a4105049f1ab2a4966a95f4d47c502295d3bbcf85f394d09350e"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/q8kv8_indexer_prefill.py",
+        "before": null,
+        "after": "13385399b63f2ca396fa7bae501e76d0d4724a9d76cfb431bbec718032757423"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/src/sm100/q8kv8_indexer_prefill_plan.py",
+        "before": null,
+        "after": "186d5b76c299049bbf4b432ba4b3b4c9021494d010beddf5cd24e63d2e8f821e"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/test_fp4_indexer.py",
+        "before": null,
+        "after": "6b494f6b9ce9c8aa70a3bee9c18cb4c196aef9b8682893bc6077a83ae0114263"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/test_q8_indexer.py",
+        "before": null,
+        "after": "cb32f79ffd522edc989c17898a8658fb4040f4cdd8e9cd3765d88045292aa058"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/cute/test_sparse_atten.py",
+        "before": null,
+        "after": "957f74fc52b4b585470a1c80736213b0df4c2b13df124c1122f1f5cd0305c0a4"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/__init__.py",
+        "before": null,
+        "after": "3498e6284a99d1e6d702c5e9491c8abe12704cdccfb3de137d56b852dd8b1c43"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/_build_utils.py",
+        "before": null,
+        "after": "a649c6964a4b9fd114c87a29cd7480f255c987e4e888aeebf73da1b65fe7d2a5"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/build.py",
+        "before": null,
+        "after": "a33e1dc2490a2ddfc035565a808cbeced02a1ce63d394dfc5d038fe34f247d98"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/csrc/templates/decode_attention_inst.cu.jinja",
+        "before": null,
+        "after": "8226d3e3faf678f37cae83687688a3ec587cce823dabd13f4853222e1ebd314f"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/csrc/templates/decode_attention_run.cu.jinja",
+        "before": null,
+        "after": "475c08c0a325e1e20443dcce299b22682bfd2d63bd70f4bd9a1323bc26415c42"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/interface.py",
+        "before": null,
+        "after": "f81f39a747f8e62ff612005039fcbd0956fb63f600747aa6786bc7b41ea7c30c"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/decode_q8kv4/jit.py",
+        "before": null,
+        "after": "1199c1229ac82479b37072c93f3e6eabb057002bc0ebf97bf2787d3cf13ee52b"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/jit.py",
+        "before": null,
+        "after": "cf1c2d7baabef554c553dfa49149a69cb81b2ae3dffe0eae8a105b84d6d23223"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/__init__.py",
+        "before": null,
+        "after": "3e8f7c828680c873947205a6410f1d765697f23d721a24f82dddf6bfee428015"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/aot_export.py",
+        "before": null,
+        "after": "14cbdfa95f84ac0b88c82129e1be49227db09809eb22a5fdb6a47b228a3541f5"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/build_kvouter_index.py",
+        "before": null,
+        "after": "87782697255c7ef7c2874fe36a3068fb29505a0e80c14e438ede30ed0e23761c"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/cpp_backend.py",
+        "before": null,
+        "after": "64745592ef6180a88b7036d50cb29f39859a0ed48e7e7e3f93ba54bd81ee1866"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/interface.py",
+        "before": null,
+        "after": "d39951e10b5d6a13ed360e4acc6b6b3dbec9c1f2b382f78c5df46c6ef184d2b7"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/sparse_fwd_kvouter.py",
+        "before": null,
+        "after": "40125d9c57a5a029f47a259a02367d4fdb1ef391fd3b13f6e1dd5da844a417af"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/sparse_fwd_kvouter_combine.py",
+        "before": null,
+        "after": "be37f085e7bf072e2279fb767b6d44adf8b34f15012c8f3ecf22cb90ba8df1db"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/kvouter/sparse_fwd_kvouter_load_balance_schedule.py",
+        "before": null,
+        "after": "7e007c6629095713bb2e7ce9bbb3fc830245dec3a17a2a8be831dde6716220e3"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/msa_warmup.py",
+        "before": null,
+        "after": "bfa7ac62ec63d288f0979405860d0ceb4ab0bcf30742ec3ff43a8b48f6230af9"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/nvfp4_kv.py",
+        "before": null,
+        "after": "e10aac1bc3d091f745deaa9f19282795aed8427370e5fbcf55b341e87be706cf"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/prefill_q8kv4/__init__.py",
+        "before": null,
+        "after": "fcaaef8c18e3b53605408198b806d2dc96ea68f549782dd7b1032f788a76c015"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/prefill_q8kv4/build.py",
+        "before": null,
+        "after": "7a8e2ed2e3d61fa3e9f1c39f4be504d5d09e87ddd674ab8334fb619a3625c933"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/prefill_q8kv4/csrc/templates/prefill_attention_inst.cu.jinja",
+        "before": null,
+        "after": "d5d7fc5fe535b0900cc5774999f2d2f1a2fc585ef7a91897e0f665b7adeca3d0"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/prefill_q8kv4/interface.py",
+        "before": null,
+        "after": "69628649f14c839f28d7dc2a3c06bdecedc3b3c3a72ccfe4fa4b960ee75e5f5c"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/prefill_q8kv4/jit.py",
+        "before": null,
+        "after": "34b1a75b78f7bee7811e75a0ce4d32de96ef2ffa21a625597fe09973e478278e"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/q8kv4_decode_adapter.py",
+        "before": null,
+        "after": "b9e2a44a9c6f0d538991b902cd29e2d6898732d57cac50695af1038568c2ea90"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/q8kv4_prefill_adapter.py",
+        "before": null,
+        "after": "40d126372faaa5572e6d95204b07bb2c24291e54f78ed53e6b075e488b65aca3"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/sparse.py",
+        "before": null,
+        "after": "1ab28a2c34b4b8422e8adaa728b18d608d15d369ac4429ce0410912e8fb5cd71"
+      },
+      {
+        "path": "vllm/third_party/fmha_sm100/sparse_fmha_adapter.py",
+        "before": null,
+        "after": "38152ac4cdc6dfb728c7ad5a279dac4b05cce42c5f76632d64b60897046ce3c7"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/__init__.py",
+        "before": null,
+        "after": "e3b54fd4d89ec2a646087874356926475f5f5befdc64f222dd77e905aee78052"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/ampere_helpers.py",
+        "before": null,
+        "after": "cadac170a7da379e27c36d044360480d710cfa88d082dad2b9decd58e4847111"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/barrier.py",
+        "before": null,
+        "after": "767af807aa7521b8d15ee6c9534f4745a7ad2224b0da2b816cc49ccb9ea6c119"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/blackwell_helpers.py",
+        "before": null,
+        "after": "68ed6ae96a18aac82d334d2eadc401fe1c74c0dca5f176eb8398201f174ad2a2"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/block_info.py",
+        "before": null,
+        "after": "c801f1c2aea5b23531572cbb39fd0c3707f7dc827cb0fb3fa5598701cf753817"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/block_sparse_utils.py",
+        "before": null,
+        "after": "23202c5ab32976bdf2815af8a74b832fcee198b65fa30e64301f6b91a94d70ea"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/block_sparsity.py",
+        "before": null,
+        "after": "3905d3202fb9cf90f27d6f9645eb17605766310a3fb1d0bc1d91fe8a4fd61aba"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/blockscaled_utils.py",
+        "before": null,
+        "after": "e2c2eec7b3a529045fe3b830f65013bae242b677a0ef798c43092a45f1438569"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/cache_utils.py",
+        "before": null,
+        "after": "ed29d0efe4b0fe049d393407551244712400921ee946d61f0de3902110729b82"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/compute_block_sparsity.py",
+        "before": null,
+        "after": "da2e1a50dbe03a89c78064948e7d1e25de2930d0e05052ca288e75a09e4b2178"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/copy_utils.py",
+        "before": null,
+        "after": "8da38d559d684dc70bf0b1d8333765952aece5ace9eefa1036e9738e35e63d65"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/cu_blocks_kernels.py",
+        "before": null,
+        "after": "fac5571de88193cd9b9f05684a513de6f1a52e67b92509416bcd7f9619dd0f35"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/cute_dsl_ptxas.py",
+        "before": null,
+        "after": "21f0674c9f5a99d7c339092e49d5822d387b0a4673888becff1ac073cb5ac619"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/cute_dsl_utils.py",
+        "before": null,
+        "after": "a9f6d79bda82744aebd992593d6ec6aa45dfea43f638c007bce6f3df2987f0ab"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/fa_logging.py",
+        "before": null,
+        "after": "bc71edfa4b1cb7af64b78def09e790ff4c6fe64ab4fcf8e3d9699f44e8d3c0a0"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/fast_math.py",
+        "before": null,
+        "after": "7e5f822bf4d0ba36967558f3ae9a1408b410cb726c31222cd61703569d1be738"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/flash_fwd.py",
+        "before": null,
+        "after": "2327ba3cd0155ef8f286a4edb3772d18120a1b37d33de7be69651ab96dda268a"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/flash_fwd_combine.py",
+        "before": null,
+        "after": "1114d94ada45d3df7ff950ff2380e7e5782aefb552708e1ba7a4e67c3280ae9d"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/flash_fwd_mla_sm100.py",
+        "before": null,
+        "after": "25d00d622ffd6a51f0ed8c781754f4df12eacef3432ccc881446b0b5d26bc5cf"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/flash_fwd_sm100.py",
+        "before": null,
+        "after": "6f45c3b9ce6fa7f9255f8ba6d656d0ce2f411d5a4b516169916ad28aefca3e51"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/flash_fwd_sm120.py",
+        "before": null,
+        "after": "3797f27c07d6458a78a7a22198c442fe9abe1c4562047e81f81d61df831f885a"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/flash_fwd_sm90.py",
+        "before": null,
+        "after": "1b640455fb76e8c7719e4137b66c809de641e6986a8cdc181f6216db48f9d0ba"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/interface.py",
+        "before": null,
+        "after": "5a3ec5fdcda160c6a453586194fd4c2249527d560c26dde7a7a099875957e1bb"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/kernel_info_utils.py",
+        "before": null,
+        "after": "d547d83cfb5dba511fc9b34068cf5379ba1e1e5567a2fb472772b628c02858c1"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/mask.py",
+        "before": null,
+        "after": "7521049651eca207d8dcd2aefd6724e859a234f1c667bcd8116f7c3cc3ad5ac7"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/mixed_dtype_gemm.py",
+        "before": null,
+        "after": "4ed2b297f7fec34f1519481ef97a317b8f20fa742540d7d5a3e4a271e42445a2"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/mma_sm100_desc.py",
+        "before": null,
+        "after": "ac6ec28b2f1a4b797c391a7807b88f83b430452d418262c3dfa7b0f3516e39f9"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/named_barrier.py",
+        "before": null,
+        "after": "bf5607c2f28769f6756d62f061538ac4a79b6c23eebabc9ceb7fcf87720376d3"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/pack_gqa.py",
+        "before": null,
+        "after": "066cfd82e31a49a0616af51c8354c307945020ecea8e9514139e8c4eff1cc484"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/paged_kv.py",
+        "before": null,
+        "after": "af0d174d58c6030847e9829035ae1812957e54faca5f3d1a9f800f4c2599a62a"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/pipeline.py",
+        "before": null,
+        "after": "849bce91c72be0a5c7458979e10c8290f45e05253a83600e30fb9540c61ed56a"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/prepare_scheduler.py",
+        "before": null,
+        "after": "1b7fd8f55c47a79e581672aa2cbc41763481d3f2ad23ec458dfb2ee3ea19b53f"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/seqlen_info.py",
+        "before": null,
+        "after": "c200347671d38aef34b26c9d47b2658471c395f7735780034d557ee4df908bf3"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/shearing_bias.py",
+        "before": null,
+        "after": "df97fcdebae584a75c14a907637dc65819bdeafcde97ec8a207246f24482704d"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/sm100_hd256_2cta_fmha_forward.py",
+        "before": null,
+        "after": "b3f28b8239f3503b89bd9e3806a4ccb0b8332b283412f77b69aec55a4d3e6f5d"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/softmax.py",
+        "before": null,
+        "after": "3db63695e9d36f8fd7ec302844937c6378539941945bb92a8a32a43d0c304099"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/testing.py",
+        "before": null,
+        "after": "1db68083be2e5a0eaf1e9545048cbb947c22ce2899a0f45767b10376a176e7b9"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/tile_scheduler.py",
+        "before": null,
+        "after": "470e5cc8bb6fb36721266eaa5bed61eb75721833f8442d29d761b821243d943d"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/topk_gather_kv.py",
+        "before": null,
+        "after": "db7897a374279261287980a9612b52cd01a9bf079dafa7d6f88ad09bd993d5c7"
+      },
+      {
+        "path": "vllm/third_party/tml_fa4/utils.py",
+        "before": null,
+        "after": "fbf21187a903aac33c9646922a85de80db4d3b4dd2dd9437acb8fc5b861c3848"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/__init__.py",
+        "before": null,
+        "after": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/compaction.py",
+        "before": null,
+        "after": "34919681c109b47d3bad6dd2d31a169371cd353e88137feebc1c8c6a49f2c032"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/compaction_details/_masked_compaction.py",
+        "before": null,
+        "after": "80575b48b4d9969169dcef2adc2888d9fe18a15162a0e9a53190802d6b4d7178"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs.py",
+        "before": null,
+        "after": "56061a61a2d018245b4a6ee3e41ff79d9f6cf089ffc072d1ca95fb5ded1da4a2"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/_common.py",
+        "before": null,
+        "after": "08787760becc4590c1dc3fa3f98308b78a66e730a19cee9b0d77c1e8a99b45f7"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/_matmul_ogs.py",
+        "before": null,
+        "after": "c192e1d30f60f2c292744f37149f9363d76a825728610783d1eb533be284a921"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/_p_matmul_ogs.py",
+        "before": null,
+        "after": "96159a4e7ac1cb220e99f5cbe60f991c68b9012b88b555678d607f1b32d2c839"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/_reduce_grouped.py",
+        "before": null,
+        "after": "f67a8632e89012e745b1c7fed7f6ee031f0478752644669ccc29425be20bac49"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/opt_flags.py",
+        "before": null,
+        "after": "19e20f1cb9cf1f61bba0b2787f8ecda47183e17773fbadded02bd4ee48f9c719"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/opt_flags_details/opt_flags_amd.py",
+        "before": null,
+        "after": "9426288afcfd8ba29a3723d0a889f286e83312d212e210ee4bb49b94c521e02f"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/matmul_ogs_details/opt_flags_details/opt_flags_nvidia.py",
+        "before": null,
+        "after": "cea9971a3b39fdb90257563bf16beda190368f3b4126f71c48270bccda5635f3"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/numerics.py",
+        "before": null,
+        "after": "74e775d0084578bdc668872de76c6a72450406d2f19e86b2c7db7371ee20e860"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/numerics_details/__init__.py",
+        "before": null,
+        "after": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/numerics_details/flexpoint.py",
+        "before": null,
+        "after": "5596fd01d03991d94cec364342393b41523c629abe7f166d5e9d1229a4c56061"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/numerics_details/mxfp.py",
+        "before": null,
+        "after": "c115715b9add3247084c4576247e88c7f525bf13834d0d7ab41b3d0e9c6c57ce"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/numerics_details/mxfp_details/_downcast_to_mxfp.py",
+        "before": null,
+        "after": "6908f774b3c1d949196d7a1b6b4c6ad4b1e2c36f78877a7e35437a675fa29b54"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/numerics_details/mxfp_details/_upcast_from_mxfp.py",
+        "before": null,
+        "after": "50298d8b908b1355cd0f82364abe748a540f20ae5f1d9c7df1618bc2a918c56c"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/proton_opts.py",
+        "before": null,
+        "after": "0443785ec981dcf9267c727f6b3c07e8a3444888be191443edf6afc858b5f1c3"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/reduction_details/reduce_bitmatrix.py",
+        "before": null,
+        "after": "83c92ebb11a35556c7185e3aeb487802f4e280de158f291e5dddf95407d725fd"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/routing.py",
+        "before": null,
+        "after": "0aa55772883118d0eec936d8058f682f35074089e85fb9cfc87215ac97f11899"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/routing_details/_expt_data.py",
+        "before": null,
+        "after": "13defd26d0da5bf6b2f3cbd945c748096a9293117de8c1d9f13b877836c1a80e"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/routing_details/_routing_compute.py",
+        "before": null,
+        "after": "987c5b9e68ea589a40d07854cb49699943f2193a8ef867e9e7708c3a5066719b"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/specialize.py",
+        "before": null,
+        "after": "e8d94b8912af3ca58c6e4557c8c07bdf1e3a5b3206d55af99ea7fb6f79311e80"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/swiglu.py",
+        "before": null,
+        "after": "6f22081f81630cdb1eff3515e7f335d2ebd7110ec70c646320e58227758e4a8d"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/swiglu_details/_swiglu.py",
+        "before": null,
+        "after": "230fb476dccc603ac8b633003c9a356d297482c071e48ed22e857c1fd1b8f67a"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/target_info.py",
+        "before": null,
+        "after": "4003467834f8a5c4c80f8f0bc77bc396025e77fbd9ae89083cb438e10a1a1a77"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor.py",
+        "before": null,
+        "after": "e08640c83d78a45a01bca8f874b9a69e759976c785ea38047a2b52e0a049a24e"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout.py",
+        "before": null,
+        "after": "dbfe89fb74e1c377676a299cfcdd08aaead03a2aac160833b478cccf1222cafe"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/base.py",
+        "before": null,
+        "after": "2223c16c379d5c47adb29eaf8b5e6a4fcd760a7b864f5591fa68847caffb04a2"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/blackwell_scale.py",
+        "before": null,
+        "after": "e60a5969b587dbd8e5fa675cf751cf3b5f93f7d43013a70318c0ac0f49a56611"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/blackwell_value.py",
+        "before": null,
+        "after": "abf4653fc4b6641f6a79e2af9fbae2d50093a01dbea20c10c05f6b9de931cda8"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/cdna4_scale.py",
+        "before": null,
+        "after": "0dc2bbf97fc70f9b919436411a1ae7557c5676bbbbcf63501b63962ec6088c8a"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/hopper_scale.py",
+        "before": null,
+        "after": "dd7ed682636b6bfa93e394b9087b208e9fe0a013b202adbeac43e3c034115f48"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/hopper_value.py",
+        "before": null,
+        "after": "21e97c9800ff325525d5274344f7e82afcd72af537524b027806df6b31b74faf"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/tensor_details/layout_details/strided.py",
+        "before": null,
+        "after": "86504afe2d2033068e862e21f41c0e8e53b05dca85544412565f6de6b41d4835"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/testing.py",
+        "before": null,
+        "after": "a2ba392036876caf15cb2071353ad3cc66e7a2a1048a39fa267d340d1c8e7592"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/topk.py",
+        "before": null,
+        "after": "db3baedc20e07d41c38d0bbc89710e2bbf43373d29348388f06b91d75dd58371"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/topk_details/__init__.py",
+        "before": null,
+        "after": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/topk_details/_topk_backward.py",
+        "before": null,
+        "after": "4820d74485e8eecfbc62cdbcca6c8b30f95da8e692e623ac3dd4983e6b5467b1"
+      },
+      {
+        "path": "vllm/third_party/triton_kernels/topk_details/_topk_forward.py",
+        "before": null,
+        "after": "b96cd075eec221f009d9a32139605b9966f28edf6385ee166108f3768a6599f6"
+      },
+      {
+        "path": "vllm/v1/attention/backend.py",
+        "before": "981ec1fc4b84d085838d73c209bf058d732804f5112271e12c8e10fe648177ed",
+        "after": "73e7677616e9dd4185a41249cf6333e8203f0bfc1052af12ec14657bd2e48dc7"
+      },
+      {
+        "path": "vllm/v1/attention/backends/mla/prefill/trtllm_ragged.py",
+        "before": "f34832e217e1850b33690c456483eccff2e9cd3910bf4c0839e9e280ac14b4ec",
+        "after": "d47f3e0111ef7b0dd7b217e34584d0935f339fc9265de802a51f43e92ad8e7c3"
+      },
+      {
+        "path": "vllm/v1/attention/backends/mla/tokenspeed_mla.py",
+        "before": "012b2c54e2538d23e09381ac11ffb09c3ef4317e8e8029e8a2a96b97b1422c7e",
+        "after": "1de11cf8a213b1fa5d6fe8e4f3e31496ccf023d91173c75bb7af64851f6c0384"
+      },
+      {
+        "path": "vllm/v1/attention/ops/dcp.py",
+        "before": "f76296c841363f26c83908229eaddabfce665a9a39b7e802d252885d6d15353e",
+        "after": "1627e66ea990f6bf2a2087e4f71e75595df21683e3dbc67680ec558fdbf865de"
+      },
+      {
+        "path": "vllm/v1/core/block_pool.py",
+        "before": "6d1e0d89b43e3b2ae396906b9c2f0551dbe192b60d05f8c1ca2d93a91bbbeea3",
+        "after": "c75ad1ed74c1c6ee8a690bc6964f75394ae1529cacb3625ad8da63f4e67a31c7"
+      },
+      {
+        "path": "vllm/v1/core/kv_cache_manager.py",
+        "before": "d08315437c6b07040d1b7e12d7bd7d6e966c976a286f05a9788098cfdd9754c7",
+        "after": "c74f136eb0b37f09e4ab9452ae76934639adee25fb21880e653c67055097f96a"
+      },
+      {
+        "path": "vllm/v1/core/kv_cache_planning.py",
+        "before": "dd03a0eb2a75eebdc6b912f0cffa50bb6d3e06f0810c4d964bc9de30dc2a3360",
+        "after": "8be5ba69fcf1a438c89c9f58dc4c31ff8e0a2195372f9e13e3329d66235d117b"
+      },
+      {
+        "path": "vllm/v1/core/sched/scheduler.py",
+        "before": "534a752a25f7e1d448f003fa14eccd218f4391e36b5a35841ab2cdee490b8cbe",
+        "after": "9117f62cd2442b58be9b08455fcfeaaaa0f9499b934e3454181a2873d80858d5"
+      },
+      {
+        "path": "vllm/v1/core/single_type_kv_cache_manager.py",
+        "before": "42f58ece888fd4600ff1755d39ab3bf112e4cca8413f5fabcd30fdc2339facee",
+        "after": "1ec83bf065391cf229594ae4579b56351cf9878ca037f1405475f6414be958a2"
+      },
+      {
+        "path": "vllm/v1/kv_cache_interface.py",
+        "before": "39ea5be3054f97238f81ba070ea661f1b5975a6268ced5f413d4a057ea449d4a",
+        "after": "d6e84efd01f28df34e37e1606e9d43040732704e66cb7f3a943fac67be2cad91"
+      },
+      {
+        "path": "vllm/v1/worker/gpu/attn_utils.py",
+        "before": "4ff080ab9c815037b53daceae4bd4654b5e9077b02e534bfb86b40f2a0edbe82",
+        "after": "1369adce190fb8b03aae91a3845de8fe2e1b88d00b6cd7bd340bc6a604a01f33"
+      },
+      {
+        "path": "vllm/v1/worker/gpu/kv_connector.py",
+        "before": "7d9fec7b8b81c09c0bd87e5b9b4e2b829b0231b5805e86111df6a1eef2b4fe97",
+        "after": "7f67e2122c66dc99b14c99ed69ffaf6a84a437ace102532cb9258926908f5426"
+      },
+      {
+        "path": "vllm/v1/worker/gpu/model_runner.py",
+        "before": "91e6a4eb1b7f8e01b5ae613a05b1b6544b431d420bec02a01c6f42c17b388ec8",
+        "after": "143719e54018e05bc4290754081e3a7c387d58a35998241e35af9b107d747d2d"
+      },
+      {
+        "path": "vllm/v1/worker/gpu/pp_utils.py",
+        "before": "b3a1c65318bc1921729f2aec39cf9cdf412c349c6b76c370bd917a3e12192ea3",
+        "after": "8adb407d3e65c8ec11559fd7793810fc2f5ebc849f0e7d401800b2e62b23cd66"
+      },
+      {
+        "path": "vllm/v1/worker/gpu/spec_decode/dflash/speculator.py",
+        "before": "56a3aad5e012ebca4c91f5d5fbe73a3ebef1e6cfb9b75c6aac5d616639df1bdf",
+        "after": "aff9bfb5caa706f85be6c6483e9f61125bff7a26c9fbe0c99569aa55fb99587f"
+      },
+      {
+        "path": "vllm/v1/worker/gpu/spec_decode/dspark/speculator.py",
+        "before": "97bcfaa655c6d4a5ecdfb17ab87b80547e8216b9d15a91c341798ebbb558f146",
+        "after": "d4f270367c9d28e76885b4505b57021a0040b9b11ce45ae7f8adbca1951f812a"
+      },
+      {
+        "path": "vllm/v1/worker/workspace.py",
+        "before": "bcf9ea207279c38a476be4ca74137a9d3a973f1fd97d85639a383357f881eb06",
+        "after": "249aa413f8ab8e63a1749086cc0ec0143b9f556815d1d4f1c17d6b1975957008"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/__init__.py",
+        "before": null,
+        "after": "50713012c3a5e8045f368672342aea6eeeb3b3ce0968cb5639b1f158b9499487"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/ampere_helpers.py",
+        "before": null,
+        "after": "cadac170a7da379e27c36d044360480d710cfa88d082dad2b9decd58e4847111"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/barrier.py",
+        "before": null,
+        "after": "767af807aa7521b8d15ee6c9534f4745a7ad2224b0da2b816cc49ccb9ea6c119"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/bench_utils.py",
+        "before": null,
+        "after": "5bd0302c4cd4cd2c3b7e8b1d01eb49d546475d06897678f5543ea2e0172aae84"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/benchmark.py",
+        "before": null,
+        "after": "43bb07eb55d46a402abab8c50984eb39d4cf8f19a11ad79cd0291919614a9101"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/benchmark_flash_attention_fp8.py",
+        "before": null,
+        "after": "ba5e05f40bd3cc788a6a6c32d5d75bf60f1ea04767783115377e434e386c241d"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/blackwell_helpers.py",
+        "before": null,
+        "after": "d0d469d9ee7a9f1c934af5525433ad7b8a0ad7f12119ec574ef078129a089ef8"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/block_info.py",
+        "before": null,
+        "after": "f0ed9cc670dd7382e9ca65dcbe118b9abed4296ebadcc5d68a43ed33900c4968"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/block_sparse_utils.py",
+        "before": null,
+        "after": "9aeba86f906805f93b0c381985333458ae0f7287f8e965e60b50f0903dc2a70f"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/block_sparsity.py",
+        "before": null,
+        "after": "5d804b8c0730a84fa016d9a313cbb16fb66a023cb6bdcee7390e8c2e85d84059"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/cache_utils.py",
+        "before": null,
+        "after": "fc62f0889f79b770717e9030cb003749a14a7e01b3ada1443062ca11ac0edb9d"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/compute_block_sparsity.py",
+        "before": null,
+        "after": "aa508c474fcd03494d7dbbdef5fb2598935ec4447e0d3b5a8f2700c799390188"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/copy_utils.py",
+        "before": null,
+        "after": "0f563eeeb6654602d1541f7202b7b88386c4dbdbd24ad6b0825834d65e508c09"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/cu_blocks_kernel.py",
+        "before": null,
+        "after": "7a8f4ae3cecf7ff517f05abea31cd95ef3048ba2be47b3175b15cd78af7555c0"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/cute_dsl_ptxas.py",
+        "before": null,
+        "after": "21f0674c9f5a99d7c339092e49d5822d387b0a4673888becff1ac073cb5ac619"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/cute_dsl_utils.py",
+        "before": null,
+        "after": "ea5955c88e692e9704b0f47868eede7b405529e87dcd86e2d30474855a1abbea"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/fa_logging.py",
+        "before": null,
+        "after": "bc71edfa4b1cb7af64b78def09e790ff4c6fe64ab4fcf8e3d9699f44e8d3c0a0"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/fast_math.py",
+        "before": null,
+        "after": "7e5f822bf4d0ba36967558f3ae9a1408b410cb726c31222cd61703569d1be738"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd.py",
+        "before": null,
+        "after": "91fdb0e4beb0a3f9611984380090eef1968e4c7c0b3781dd2af20dfd47760f3d"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_mla_dk_sm100.py",
+        "before": null,
+        "after": "f42a8c414eb2f708135f687359059c724b137af9c3ff600ad23899663a113b5b"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_mla_dq_dqv_sm100.py",
+        "before": null,
+        "after": "8f1e74128562799159715e616b562ddd117652cf480f3669e6014f29615f7a80"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_mla_sm100.py",
+        "before": null,
+        "after": "16ccd55cb1d00eaf5e943ad3496ad7a5a6c39076dcc55b7d8c59dd5529a2d26e"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_postprocess.py",
+        "before": null,
+        "after": "e22dea9c6c94c508a023a55d1d5b0a66c9474eae93ba620e357fbddc1ebff38c"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_preprocess.py",
+        "before": null,
+        "after": "73dc44b33bf72e713476e973f786f40d57ecd71a0af77581429395c57ea21750"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_sm100.py",
+        "before": null,
+        "after": "7560cf738c342206cb45eb10f2a76ab2976030d1b55a734cc9e2d462a1bb50e0"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_sm120.py",
+        "before": null,
+        "after": "9f5b0b67da797a30978452e86c191545c4f097a8e07123aef049b5c0b050f910"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_bwd_sm90.py",
+        "before": null,
+        "after": "b78e0e8f587c478431cfda7f84cc25f0e4027fdee20709a71aebabdc28588eb2"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd.py",
+        "before": null,
+        "after": "2f953f9be60af867bc5ac3efb0823e440abe153f3309753325bbce9bf49a7ef2"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd_combine.py",
+        "before": null,
+        "after": "6cbd911fa7b0165cd1f643e1ee5645e74bcd3ce8bd849d579aa42b2de48e8b3d"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd_mla_decode_sm100.py",
+        "before": null,
+        "after": "3ed0a12ab8ed15c3e5f6bac0d0db269cf05190b2620b5172ee7e551d170ebfbb"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd_mla_sm100.py",
+        "before": null,
+        "after": "702305a6d6ff2121a53fa4da28cd60ae75501755812f324cd12a96d9b95a7aef"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd_sm100.py",
+        "before": null,
+        "after": "a080f5c1565a53bd90789ca88133ab055f0fa34e93fe866ed768f39c916667cb"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd_sm120.py",
+        "before": null,
+        "after": "61f3c4c018b8d9e6a3e12694a0a565ce660cd4ddbe68aed060ba71291abd8493"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/flash_fwd_sm90.py",
+        "before": null,
+        "after": "3b5d0f896cce32d6940e8fb280b06719279d7d9af93e42346e2d51553fe4e7a1"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/hopper_helpers.py",
+        "before": null,
+        "after": "5d93fe7c60b3865719cf83aec3f79b06f76299fc2634b4f3811d56e7b0d358ed"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/interface.py",
+        "before": null,
+        "after": "0d00d4b96c9cd616eae488ae394d6c50ab22e403a01df5a896995599fd62b2e3"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/mask.py",
+        "before": null,
+        "after": "ea35a2c9f29d82e8c939a7b161c39bd8bf40c43c702958fbfe074205fe5054e7"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/mma_sm100_desc.py",
+        "before": null,
+        "after": "ac6ec28b2f1a4b797c391a7807b88f83b430452d418262c3dfa7b0f3516e39f9"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/named_barrier.py",
+        "before": null,
+        "after": "3616f5a860455b03a27de302db45c13554bb1b655778876b30872b11c818a673"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/pack_gqa.py",
+        "before": null,
+        "after": "24dfcd04219f2c40128c6ae718c519e514bb23ab17c116c614c477fedd38a181"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/paged_kv.py",
+        "before": null,
+        "after": "668bfae057343bba37e414459ad20ad5d4d97d5a78a64f59e7b4ba739f1066e1"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/pipeline.py",
+        "before": null,
+        "after": "849bce91c72be0a5c7458979e10c8290f45e05253a83600e30fb9540c61ed56a"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/prepare_scheduler.py",
+        "before": null,
+        "after": "95d8425a6ec9c4f1cd9d2390e06af58716a4a518d6baf1949c7810d369f68e42"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/seqlen_info.py",
+        "before": null,
+        "after": "640d2433702635d68d4f0b94e9fa2d6b81da48b7f62056270b1b1fd480c72f30"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_backward.py",
+        "before": null,
+        "after": "9ad38e0535bccb21b647bf0de532969445c69f9434b13b3c467b606c0c973600"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_backward_dkdvkernel.py",
+        "before": null,
+        "after": "b2ab2ca01c7313f7d38f19b2ca12d2bf3e7a9e2d19704fd6dddfc8ed136bdfc9"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_backward_dqkernel.py",
+        "before": null,
+        "after": "9cabc2ed2c15ad4f15a3464d0b7982e08bd25838e9906b0ab94ba76c61cce03b"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/sm100_hd256_2cta_fmha_forward.py",
+        "before": null,
+        "after": "83f83a0c2dfe89804f2843ac5b1d56d42e353cd802eea61382f9a59c8e3ea937"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/sm90_config_search.py",
+        "before": null,
+        "after": "bd0ed6094e9fc48de587098f9b05bccbdd5f450b70d3500759a48b5d436cff9c"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/softmax.py",
+        "before": null,
+        "after": "fbf2ae0275d10fd66855baacbf9804db8030b233aa02140fd1a728e7a3a79969"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/testing.py",
+        "before": null,
+        "after": "3342b4475126666e5bff050316cd2a586852f7c82eb23fd21172470cc40a15ff"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/tile_scheduler.py",
+        "before": null,
+        "after": "27482cb3ef36aabcc07b115075557f6c18740790b4bd30986f2d52959be23abd"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/topk_gather_kv.py",
+        "before": null,
+        "after": "85d31fc88cdf332054439fcc2e2438d2a387b52d421eb458789f767d3cf64cc6"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/cute/utils.py",
+        "before": null,
+        "after": "2115599e1eefed2f8504f7d1d48088bb7bf3286cf2ea2fa98eb093876267099f"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/layers/rotary.py",
+        "before": null,
+        "after": "b826cc3339488815b26f974135a8f53d44149d019b4c82e1ad4240a6ec0e28c4"
+      },
+      {
+        "path": "vllm/vllm_flash_attn/ops/triton/rotary.py",
+        "before": null,
+        "after": "f1f4bf9a0b28cc544fa882b60628d74b8923e8b47e1f8438a7af43fa7b5061e4"
+      }
+    ]
+  },
+  "reference_document": "https://acnc6zeentra.feishu.cn/wiki/UMFKwfKCZiWz77kF9kQcgtG7nlE",
+  "api_contract_sources": [
+    "https://platform.kimi.com/docs/guide/use-tool-choice",
+    "https://platform.kimi.com/docs/guide/use-partial-mode-feature-of-kimi-api",
+    "https://platform.kimi.com/docs/guide/kimi-k3-quickstart"
+  ],
+  "selected_configuration": "baseline-reference",
+  "scored_variant": {
+    "mooncake": true,
+    "spec_update": {
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_rates": [
+        0.8,
+        0.6,
+        0.45,
+        0.35
+      ]
+    },
+    "extra_pythonpath": [
+      "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/up/deps",
+      "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/deps/cdsl48",
+      "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013"
+    ],
+    "args_set": {
+      "--worker-extension-cls": "k3memext.K3MemExt",
+      "--profiler-config": {
+        "profiler": "torch",
+        "torch_profiler_dir": "{NODE}/profiles",
+        "torch_profiler_with_stack": false,
+        "torch_profiler_record_shapes": false,
+        "ignore_frontend": true,
+        "torch_profiler_use_gzip": true,
+        "torch_profiler_dump_cuda_time_total": false
+      },
+      "--max-num-scheduled-tokens": "9216",
+      "--max-num-batched-tokens": "9792",
+      "--compilation-config": {
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes": [
+          5,
+          10,
+          20,
+          40,
+          60,
+          80,
+          100,
+          120,
+          140,
+          160,
+          180,
+          200,
+          220,
+          240,
+          260,
+          280,
+          300,
+          320,
+          340,
+          360,
+          380,
+          400,
+          420,
+          440,
+          460,
+          480,
+          560,
+          640,
+          720,
+          800,
+          880,
+          960,
+          1280,
+          1536,
+          1792,
+          2048,
+          2560,
+          3072,
+          3584,
+          4096,
+          5120,
+          6144,
+          6656,
+          7168,
+          7680,
+          8192,
+          9216
+        ]
+      },
+      "--max-num-seqs": "192",
+      "--long-prefill-token-threshold": "0"
+    },
+    "overlay": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/campaigns/codex-final2-budget-headroom-20261018/overlay",
+    "env": {
+      "VLLM_K3_DCP_FP8_GATHER": "1",
+      "VLLM_K3_SPLIT_MERGE_FUSED": "1",
+      "VLLM_K3_KDA_SP_SHAPES": "1280,1536,1792,2048,2560,3072,3584,4096,5120,6144,6656,7168,7680,8192,9216,9792",
+      "VLLM_K3_SMLP_SP_SHAPES": "1280,1536,1792,2048,2560,3072,3584,4096,5120,6144,6656,7168,7680,8192,9216,9792",
+      "VLLM_K3_KDA_SP_MC_SHAPES": "1280,1536,1792,2048,2560,3072,3584,4096,5120,6656,7168,9792",
+      "VLLM_K3_SMLP_SP_MC_SHAPES": "1280,1536,1792,2048,2560,3072,3584,4096,5120,6144,6656,7168,7680,8192,9216,9792",
+      "VLLM_K3_MOONCAKE_LOOKUP_SKIP_LOCAL": "1",
+      "VLLM_K3_MOONCAKE_LOOKUP_VERIFY_FILE": "/tmp/k3opt_lookup_verify",
+      "VLLM_K3_KPE_FP8_PASSTHROUGH": "1",
+      "VLLM_K3_TS_VS_ALPHA": "1.0",
+      "VLLM_K3_TS_FOLD_VS": "1",
+      "VLLM_K3_TS_WORK_ORDER": "auto",
+      "VLLM_K3_TS_UPSTREAM": "1",
+      "VLLM_K3_TS_PLAN": "1",
+      "VLLM_K3_TS_SPLIT_CAP": "8",
+      "VLLM_K3_MAMBA_CKPT_REFRESH": "1",
+      "VLLM_K3_DRAFT_LOCAL_ARGMAX": "1",
+      "VLLM_K3_TS_FOLD_NONCAUSAL": "1",
+      "TOKENSPEED_MLA_FP8_SKIP_CORRECTION": "0",
+      "VLLM_K3_KDA_SHARED_META": "1",
+      "VLLM_K3_MAMBA_CKPT_HOLD": "1",
+      "VLLM_K3_WORKSPACE_VIEW_CACHE": "1",
+      "VLLM_K3_MC_EAGLE_TAIL_KEY": "1",
+      "VLLM_K3_SHARED_OVERLAP_MAX_TOKENS": "64",
+      "VLLM_K3_MEGAMOE_RESERVED_SMS": "16",
+      "VLLM_K3_NO_FORWARD_SAVE": "1",
+      "FLASHINFER_CUBIN_DIR": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/up/deps/flashinfer_cubin/cubins",
+      "VLLM_K3_KV_GROUP_SIZE": "35",
+      "VLLM_K3_MOONCAKE_LOOKUP_TWO_PASS": "1",
+      "VLLM_K3_PP_PREFILL_MATCH_WAIT": "16",
+      "VLLM_K3_PP_PREFILL_MATCH_LOG": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/campaigns/codex-final2-budget-headroom-score-20261018/control-pm-stats.log",
+      "VLLM_K3_SHARED_TP_SIZE": "4",
+      "VLLM_K3_STRICT_PREFILL_THRESHOLD": "0"
+    },
+    "rank_args_set": {
+      "0": {
+        "--gpu-memory-utilization": "0.95"
+      },
+      "1": {
+        "--gpu-memory-utilization": "0.91"
+      }
+    }
+  },
+  "serving_differences_from_score": [
+    "Real block rejection sampling replaces synthetic acceptance rates.",
+    "Diagnostic profiler, worker extension and development endpoints disabled.",
+    "Fresh release overlay, cache namespace and log paths.",
+    "Four API compatibility files changed as recorded in source.lock.json."
+  ],
+  "release_status": "packaged source; documentation now; GPU acceptance and performance of assembled package deferred",
+  "optional_feature_changes": {
+    "vllm/v1/core/sched/scheduler.py": {
+      "baseline_sha256": "dc4d32b39a78ea91ba5611c45b96effcdbd38335282c2ff6dc97ffeea1d9e8d3",
+      "packaged_sha256": "85e0599fec19e134b9592a8c7a34720018e953d8db004f186bb34baf19b880f9",
+      "default": "disabled",
+      "scope": "Cost target is zero; CuTe history flag is zero. No performance/quality claim for the combined release."
+    },
+    "vllm/v1/attention/backends/mla/prefill/trtllm_ragged.py": {
+      "baseline_sha256": "d47f3e0111ef7b0dd7b217e34584d0935f339fc9265de802a51f43e92ad8e7c3",
+      "packaged_sha256": "eaee981700dd6d326da3b53d7c05fc97a8b53d700c6aad698860eae01fd1003b",
+      "default": "disabled",
+      "scope": "Cost target is zero; CuTe history flag is zero. No performance/quality claim for the combined release."
+    }
+  },
+  "reference_performance_is_not_release_measurement": true
+}

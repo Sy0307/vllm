@@ -84,6 +84,67 @@ logger = init_logger(__name__)
 
 import os as _k3_os
 _K3_COHORT_BALANCE = _k3_os.environ.get("VLLM_K3_COHORT_BALANCE", "0") == "1"
+# Decode cohort balancing for V2+PP2+async (works with speculative decoding):
+# defer a few decode requests of the heavier cohort by one step so that the
+# two alternating cohorts carry similar load. Load = 1 + context / CTX_UNIT.
+_K3_DECODE_BALANCE = _k3_os.environ.get("VLLM_K3_DECODE_BALANCE", "0") == "1"
+_K3_DECODE_BALANCE_CTX = float(_k3_os.environ.get("VLLM_K3_DECODE_BALANCE_CTX", "400000"))
+_K3_DECODE_BALANCE_THRESH = float(_k3_os.environ.get("VLLM_K3_DECODE_BALANCE_THRESH", "2.0"))
+_K3_DECODE_BALANCE_COOLDOWN = int(_k3_os.environ.get("VLLM_K3_DECODE_BALANCE_COOLDOWN", "16"))
+# Optional runtime switch (A/B within one run): when set, balancing is on only
+# while this file exists and contains "1"; re-read every 128 steps. Deferral
+# counts are appended to "<file>.log".
+_K3_DECODE_BALANCE_FILE = _k3_os.environ.get("VLLM_K3_DECODE_BALANCE_FILE", "")
+_K3_CKPT_REFRESH = _k3_os.environ.get("VLLM_K3_MAMBA_CKPT_REFRESH", "0") == "1"
+_K3_CKPT_HOLD = _k3_os.environ.get("VLLM_K3_MAMBA_CKPT_HOLD", "0") == "1"
+# PP prefill admission matching (the attention-DP "context balance" idea applied
+# to the in-flight PP micro-batches): a waiting request's prompt chunk is only
+# admitted if the step it joins stays within the estimated cost of the previous
+# non-empty step, or once it has been held _K3_PM_WAIT times. A hold is counted
+# only on a step that had room for the request and carried decode rows. Nothing
+# is held while more requests wait than there are free slots: then slots, not
+# pipeline bubbles, bound throughput, and a hold would only idle a slot. Chunks
+# of an already admitted prompt are never held, and chunk sizes are unchanged.
+_K3_PM_WAIT = int(_k3_os.environ.get("VLLM_K3_PP_PREFILL_MATCH_WAIT", "0"))
+_K3_PM_LOG = _k3_os.environ.get("VLLM_K3_PP_PREFILL_MATCH_LOG", "")
+# Optional runtime switch (A/B within one run): matching is on only while this
+# file contains "1"; re-read every 128 non-empty steps.
+_K3_PM_FILE = _k3_os.environ.get("VLLM_K3_PP_PREFILL_MATCH_FILE", "")
+
+# Opt-in: keep the configured per-request cap even when it is alone.
+_K3_STRICT_PREFILL_THRESHOLD = _k3_os.environ.get("VLLM_K3_STRICT_PREFILL_THRESHOLD", "0") == "1"
+
+# Soft per-request cost target; zero preserves the original scheduler.
+_K3_PC_MS = float(_k3_os.environ.get("VLLM_K3_PREFILL_COST_TARGET_MS", "0"))
+_K3_PC_MIN_BLOCKS = int(_k3_os.environ.get("VLLM_K3_PREFILL_MIN_BLOCKS", "4"))
+if not 0 <= _K3_PC_MS < float("inf") or _K3_PC_MIN_BLOCKS < 1:
+    raise ValueError("Invalid K3 prefill cost target or minimum block count")
+
+
+def _k3_pm_chunk_cost(num_tokens: int, num_history: int) -> float:
+    """Estimated last-stage cost (ms) of one prompt chunk (mgF C144 AgentX
+    timeline fit, R^2 0.996)."""
+    return (13.6e-3 * num_tokens + 4.9 + 100e-6 * num_history
+            + 57.7e-9 * num_tokens * (num_history + num_tokens / 2))
+
+
+def _k3_pm_decode_cost(context: int) -> float:
+    """Estimated last-stage cost (ms) of one speculative decode request."""
+    return 0.218 + 0.873e-6 * context
+
+
+def _k3_pm_hold(step_cost: float, chunk_cost: float, prev_cost: float,
+                num_holds: int) -> bool:
+    """Hold a new prompt chunk when it would make this step heavier than the
+    previous one, unless it has already been held _K3_PM_WAIT times."""
+    if num_holds >= _K3_PM_WAIT:
+        return False
+    return step_cost + chunk_cost > prev_cost
+
+
+class _K3RequeueEntries(list):
+    """Deferred-free entry: (block, hash) pairs to move to the LRU tail once the
+    request's own blocks (queued just before, same fence) are back in the pool."""
 
 
 class Scheduler(SchedulerInterface):
@@ -417,6 +478,15 @@ class Scheduler(SchedulerInterface):
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
         self.sched_step_seq = 0
+        # PP prefill admission matching state (see _K3_PM_WAIT).
+        self._k3_pm_seq = 0
+        self._k3_pm_prev = 0.0
+        self._k3_pm_on = not _K3_PM_FILE
+        self._k3_pm_read_seq = -(10**9)
+        self._k3_pm_stats = {
+            "held": 0, "fit": 0, "forced": 0, "free": 0, "holds_of_admitted": 0,
+            "queued": 0, "slot_bound_steps": 0,
+        }
         self.processed_step_seq = 0
         # FIFO of (fence_seq, blocks): blocks become safe to free once
         # processed_step_seq >= fence_seq.
@@ -445,6 +515,56 @@ class Scheduler(SchedulerInterface):
             {} if self.log_stats and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+
+    def _k3_decode_balance_defer(self) -> set[str]:
+        """Pick decode requests of the current cohort to defer by one step.
+
+        With PP2 the running decode requests alternate between two cohorts
+        (``next_decode_eligible_step`` parity). In the decode loop the step
+        time follows the heavier cohort, so an unbalanced split wastes the
+        lighter cohort's slot. Deferring a request one step moves it to the
+        other cohort; it costs that request one step of latency once.
+        """
+        step = self.current_step
+        cur: list[Request] = []
+        other_load = 0.0
+        cur_load = 0.0
+        unit = _K3_DECODE_BALANCE_CTX
+        for r in self.running:
+            if r.is_prefill_chunk or r.num_computed_tokens < r.num_prompt_tokens:
+                continue
+            w = 1.0 + r.num_computed_tokens / unit
+            if r.next_decode_eligible_step <= step:
+                cur.append(r)
+                cur_load += w
+            elif r.next_decode_eligible_step == step + 1:
+                other_load += w
+        diff = cur_load - other_load
+        defer: set[str] = set()
+        if diff <= _K3_DECODE_BALANCE_THRESH:
+            return defer
+        cooldown = _K3_DECODE_BALANCE_COOLDOWN
+        candidates = sorted(
+            (
+                (1.0 + r.num_computed_tokens / unit, r)
+                for r in cur
+                if step - getattr(r, "_k3_balance_step", -(10**9)) > cooldown
+            ),
+            key=lambda x: -x[0],
+        )
+        for w, r in candidates:
+            if diff <= _K3_DECODE_BALANCE_THRESH:
+                break
+            # Moving w changes the difference by 2w; never overshoot past
+            # balance by more than the threshold.
+            if 2 * w > diff + _K3_DECODE_BALANCE_THRESH:
+                continue
+            defer.add(r.request_id)
+            r._k3_balance_step = step
+            diff -= 2 * w
+        if defer:
+            self._k3_balance_deferrals = getattr(self, "_k3_balance_deferrals", 0) + len(defer)
+        return defer
 
     def _mamba_block_aligned_split(
         self,
@@ -594,6 +714,46 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _k3_pc_cap(self, request, count: int, computed: int) -> int:
+        """Apply a soft per-request cost cap before native KDA alignment.
+
+        The efficient block floor and one-block final-tail allowance may
+        exceed the target. This is neither a whole-step nor a latency bound.
+        Existing alignment, lookahead and allocation remain authoritative.
+        """
+        block = self.cache_config.block_size
+        minimum = _K3_PC_MIN_BLOCKS * block
+        if (_K3_PC_MS <= 0 or request.has_encoder_inputs or count <= minimum
+                or computed >= request.num_prompt_tokens):
+            return count
+        available = _K3_PC_MS - (4.9 + 100e-6 * computed)
+        if available <= 0:
+            cap = minimum
+        else:
+            linear = 13.6e-3 + 57.7e-9 * computed
+            quadratic = 57.7e-9 / 2
+            root = 2 * available / (
+                linear + (linear * linear + 4 * quadratic * available) ** 0.5
+            )
+            cap = max(minimum, int(root))
+        remaining = request.num_tokens - computed
+        # Avoid an extra history reconstruction for a tail only slightly
+        # larger than the proposed chunk. Unlike V1 this is bounded slack.
+        if remaining <= count and remaining <= cap + block:
+            return count
+        selected = min(count, cap)
+        if selected < count:
+            limited = getattr(self, "_k3_pc_limited", 0) + 1
+            self._k3_pc_limited = limited
+            if limited == 1 or limited % 64 == 0:
+                logger.info(
+                    "K3 prefill cost cap: limited=%d history=%d before=%d "
+                    "after=%d target_ms=%.1f min_blocks=%d",
+                    limited, computed, count, selected,
+                    _K3_PC_MS, _K3_PC_MIN_BLOCKS,
+                )
+        return selected
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -650,7 +810,7 @@ class Scheduler(SchedulerInterface):
         num_eligible_reqs = num_running + num_waiting
         long_prefill_token_threshold = (
             self.scheduler_config.long_prefill_token_threshold
-            if num_eligible_reqs > 1
+            if num_eligible_reqs > 1 or _K3_STRICT_PREFILL_THRESHOLD
             else 0
         )
         if long_prefill_token_threshold > 0 and self.adaptive_long_prefill_threshold:
@@ -668,10 +828,63 @@ class Scheduler(SchedulerInterface):
                 if not _r.is_prefill_chunk:
                     _k3_cohort_load[_r.next_decode_eligible_step % 2] += 1.0 + _r.num_computed_tokens / 73000.0
 
+        _k3_defer: set[str] | None = None
+        if _K3_DECODE_BALANCE and _K3_DECODE_BALANCE_FILE and self.current_step % 128 == 0:
+            try:
+                with open(_K3_DECODE_BALANCE_FILE) as _f:
+                    _on = _f.read().strip() == "1"
+            except OSError:
+                _on = False
+            _prev = getattr(self, "_k3_balance_on", None)
+            self._k3_balance_on = _on
+            try:
+                with open(_K3_DECODE_BALANCE_FILE + ".log", "a") as _f:
+                    _f.write(f"{__import__('time').time():.3f} step={self.current_step} "
+                             f"on={int(_on)} deferrals={getattr(self, '_k3_balance_deferrals', 0)}\n")
+            except OSError:
+                pass
+        if (
+            _K3_DECODE_BALANCE
+            and (not _K3_DECODE_BALANCE_FILE or getattr(self, "_k3_balance_on", False))
+            and self.use_pp
+            and self.use_v2_model_runner
+            and self.parallel_config.pipeline_parallel_size == 2
+        ):
+            _k3_defer = self._k3_decode_balance_defer()
+
+        _k3_pm = _K3_PM_WAIT > 0 and self.use_pp
+        if _k3_pm and _K3_PM_FILE and self._k3_pm_seq - self._k3_pm_read_seq >= 128:
+            self._k3_pm_read_seq = self._k3_pm_seq
+            try:
+                with open(_K3_PM_FILE) as _f:
+                    self._k3_pm_on = _f.read().strip() == "1"
+            except OSError:
+                self._k3_pm_on = False
+        _k3_pm = _k3_pm and self._k3_pm_on
+        _k3_pm_track = _k3_pm
+        # Estimated cost of this step so far and its number of decode requests.
+        _k3_pm_cost = 0.0
+        _k3_pm_dec = 0
+
+        # Both PP cohorts are affected by a heavy step, including a cohort
+        # whose decode is not eligible until the next scheduler invocation.
+        _k3_pc_mixed = (
+            _K3_PC_MS > 0 and self.use_pp and self.use_v2_model_runner
+            and self.parallel_config.pipeline_parallel_size == 2
+            and self.need_mamba_block_aligned_split
+            and self.num_prefill_lookahead == 1
+            and any(not r.is_prefill_chunk for r in self.running)
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if _k3_defer and request.request_id in _k3_defer:
+                # Decode cohort balancing: run this request one step later,
+                # in the lighter cohort.
+                req_index += 1
+                continue
             if input_budget <= draft_slots:
                 break
 
@@ -733,6 +946,11 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
                 - self.num_sampled_tokens_per_step,
             )
+
+            if _k3_pc_mixed:
+                num_new_tokens = self._k3_pc_cap(
+                    request, num_new_tokens, request.num_computed_tokens
+                )
 
             # Apply Mamba alignment before encoder caps.
             if self.need_mamba_block_aligned_split:
@@ -887,6 +1105,14 @@ class Scheduler(SchedulerInterface):
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
             req_index += 1
+            if _k3_pm:
+                if request.is_prefill_chunk:
+                    _k3_pm_cost += _k3_pm_chunk_cost(
+                        num_new_tokens, request.num_computed_tokens
+                    )
+                else:
+                    _k3_pm_cost += _k3_pm_decode_cost(request.num_computed_tokens)
+                    _k3_pm_dec += 1
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -928,6 +1154,13 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        if _k3_pm and (
+            len(self.waiting) + len(self.kv_holding_waiting)
+            > self.max_num_running_reqs - len(self.running)
+        ):
+            # Slot-bound: admit in arrival order without holding.
+            _k3_pm = False
+            self._k3_pm_stats["slot_bound_steps"] += 1
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
@@ -981,6 +1214,22 @@ class Scheduler(SchedulerInterface):
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
                     continue
+
+                if _k3_pm and request.num_computed_tokens == 0:
+                    # Held on an earlier step: decide from the cached estimate
+                    # before repeating the local and connector prefix lookups.
+                    _est = getattr(request, "_k3_pm_est", None)
+                    if (
+                        _est is not None
+                        and _k3_pm_dec
+                        and _k3_pm_hold(
+                            _k3_pm_cost, _est[0], self._k3_pm_prev, _est[1]
+                        )
+                    ):
+                        request._k3_pm_est = (_est[0], _est[1] + 1)
+                        self._k3_pm_stats["held"] += 1
+                        skip_request(request_queue)
+                        continue
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
@@ -1200,6 +1449,11 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, request_token_budget)
                     assert num_new_tokens > 0
 
+                    if _k3_pc_mixed and not pad_spec_decode:
+                        num_new_tokens = self._k3_pc_cap(
+                            request, num_new_tokens, num_computed_tokens
+                        )
+
                     # Apply Mamba alignment before encoder caps.
                     if self.need_mamba_block_aligned_split:
                         num_new_tokens = self._mamba_block_aligned_split(
@@ -1248,6 +1502,31 @@ class Scheduler(SchedulerInterface):
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
+
+                    if _k3_pm_track and num_new_tokens > 1 + self.num_spec_tokens:
+                        _c = _k3_pm_chunk_cost(num_new_tokens, num_computed_tokens)
+                        _est = getattr(request, "_k3_pm_est", None)
+                        _holds = _est[1] if _est is not None else 0
+                        request._k3_pm_est = (_c, _holds)
+                        if not _k3_pm:
+                            _k3_pm_kind = "queued"
+                        elif not _k3_pm_dec:
+                            # No decode rows in this step (empty or prefill-only):
+                            # there is no light step to protect, and empty steps
+                            # never age a hold, so admit.
+                            _k3_pm_kind = "free"
+                        elif _k3_pm_hold(_k3_pm_cost, _c, self._k3_pm_prev, _holds):
+                            request._k3_pm_est = (_c, _holds + 1)
+                            self._k3_pm_stats["held"] += 1
+                            skip_request(request_queue)
+                            continue
+                        elif _k3_pm_cost + _c <= self._k3_pm_prev:
+                            _k3_pm_kind = "fit"
+                        else:
+                            _k3_pm_kind = "forced"
+                        self._k3_pm_stats[_k3_pm_kind] += 1
+                        self._k3_pm_stats["holds_of_admitted"] += _holds
+                        _k3_pm_cost += _c
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1587,6 +1866,21 @@ class Scheduler(SchedulerInterface):
         # write KV and have their output processed later in update_from_output).
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
+        if _K3_PM_WAIT > 0 and total_num_scheduled_tokens > 0:
+            self._k3_pm_seq += 1
+            if _k3_pm_track:
+                self._k3_pm_prev = _k3_pm_cost
+            if _K3_PM_LOG and self._k3_pm_seq % 4096 == 0:
+                try:
+                    with open(_K3_PM_LOG, "a") as _f:
+                        _f.write(
+                            f"{time.time():.3f} seq={self._k3_pm_seq} "
+                            f"on={int(self._k3_pm_on)} "
+                            + " ".join(f"{k}={v}" for k, v in self._k3_pm_stats.items())
+                            + "\n"
+                        )
+                except OSError:
+                    pass
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
@@ -2874,6 +3168,16 @@ class Scheduler(SchedulerInterface):
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
         if blocks:
             self.deferred_frees.append((self.sched_step_seq, blocks))
+        if _K3_CKPT_HOLD:
+            held = self.kv_cache_manager.k3_pop_held_states(request)
+            if held:
+                self.deferred_frees.append((self.sched_step_seq, held))
+        if _K3_CKPT_REFRESH:
+            released = self.kv_cache_manager.k3_pop_released_states(request)
+            if released:
+                self.deferred_frees.append(
+                    (self.sched_step_seq, _K3RequeueEntries(released))
+                )
 
     def _free_cow_retained_blocks(
         self, blocks: list[KVCacheBlock], fence_seq: int
@@ -2898,6 +3202,9 @@ class Scheduler(SchedulerInterface):
             if fence > self.processed_step_seq:
                 break
             _, blocks = self.deferred_frees.popleft()
+            if isinstance(blocks, _K3RequeueEntries):
+                self.kv_cache_manager.block_pool.k3_requeue_cached_blocks(blocks)
+                continue
             # Free in reverse order so that the tail blocks are evicted first.
             self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
 

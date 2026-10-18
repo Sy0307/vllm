@@ -1,0 +1,76 @@
+{
+  "created_epoch": 1792348960.290702,
+  "candidates": [
+    {
+      "label": "同轮基线9216",
+      "source": "budget-headroom-score-comparison.json",
+      "arm": "control",
+      "throughput_tok_s": 2228.9321352975508,
+      "ttft_ms": {
+        "mean": 2522.9259064667895,
+        "p50": 1540.1109569999999,
+        "p90": 3871.9380232000003,
+        "p95": 6664.339693399984,
+        "p99": 26528.31080128
+      },
+      "tpot_request_average_ms": {
+        "mean": 38.040885336159995,
+        "p50": 35.9973264332211,
+        "p90": 52.96921598528276,
+        "p95": 63.060245090468676,
+        "p99": 94.98460402160086
+      },
+      "formal_errors": 81.0
+    },
+    {
+      "label": "扩大预算+严格单请求上限",
+      "source": "budget-headroom-score-comparison.json",
+      "arm": "candidate",
+      "throughput_tok_s": 2222.8398829680045,
+      "ttft_ms": {
+        "mean": 2077.654487493937,
+        "p50": 1520.0577389999999,
+        "p90": 3460.228497599999,
+        "p95": 5174.420092700006,
+        "p99": 12008.018971419999
+      },
+      "tpot_request_average_ms": {
+        "mean": 39.49323950901307,
+        "p50": 36.081088381161,
+        "p90": 55.28028084632368,
+        "p95": 66.66813431943675,
+        "p99": 125.1757567523287
+      },
+      "formal_errors": 77.0
+    },
+    {
+      "label": "CuTe历史注意力/9216",
+      "source": "cute-context-score-comparison.json",
+      "arm": "candidate",
+      "throughput_tok_s": 2257.9485921077912,
+      "ttft_ms": {
+        "mean": 2324.802252314621,
+        "p50": 1503.6094455,
+        "p90": 3504.7509907000026,
+        "p95": 6019.421095999998,
+        "p99": 21031.155398200015
+      },
+      "tpot_request_average_ms": {
+        "mean": 37.10787559269088,
+        "p50": 35.36737513191242,
+        "p90": 50.544111501661824,
+        "p95": 59.85097952456631,
+        "p99": 94.43364633878231
+      },
+      "formal_errors": 83.0
+    }
+  ],
+  "running_candidate": "costcapv2/12288,target450ms,min4blocks",
+  "limitations": [
+    "Singlehourresults fromseparatecampaigns; noassumptionofidenticalclosed-looprequesttiming.",
+    "All useC96/S192,10warmups/lane,3600formal,K4syntheticcontrolledrates.",
+    "TTFT andTPOTsourcedfromsuccessfulrequestdistributions;errorcountslistedseparately."
+  ],
+  "selected": "baseline-reference",
+  "selection_status": "packaging choice only; final runtime selection and new experiments deferred at user request"
+}

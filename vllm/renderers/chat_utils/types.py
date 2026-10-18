@@ -310,6 +310,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
+    partial: bool
+    """Continue the final assistant response on renderers supporting Partial Mode."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam

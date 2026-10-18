@@ -1,0 +1,601 @@
+{
+  "models": {
+    "/gpfs/mszn/models/moonshotai/Kimi-K3": {
+      "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3",
+      "files": {
+        "config.json": {
+          "sha256": "9710e121a58d03ac92c8d6da287a19541994319afbbe6d6202af001ffd379213",
+          "size": 7006,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/config.json"
+        },
+        "tokenizer_config.json": {
+          "sha256": "5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e",
+          "size": 3478,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/tokenizer_config.json"
+        },
+        "model.safetensors.index.json": {
+          "sha256": "a1c5210650ce71d2d3ae9ec5a101ac4afd3cf4b10091be589853437eb967febd",
+          "size": 59764096,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model.safetensors.index.json"
+        },
+        "modeling_kimi_linear.py": {
+          "sha256": "9e3564c70ac21854ce5a090cc946c5dc76b70d1050ef50840449181a20fff44a",
+          "size": 51506,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/modeling_kimi_linear.py"
+        },
+        "media_utils.py": {
+          "sha256": "78403540328f9847d6b7ebc5c44eb2e6a752863de0afb7d0710728bb161dc60d",
+          "size": 13844,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/media_utils.py"
+        },
+        "configuration.json": {
+          "sha256": "f888421726665e8a84b738eed42a64875aed79de8be7daade851ac8bf4c0cef9",
+          "size": 73,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/configuration.json"
+        },
+        "kimi_k3_processor.py": {
+          "sha256": "ec9f7e86d2ab0eee07a8e7e7c037046e77ac3c25a710ad1298ec13be3b585b54",
+          "size": 7660,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/kimi_k3_processor.py"
+        },
+        "kimi_k3_vision_processing.py": {
+          "sha256": "d122b30bfd3a51a6f05d4bfcfda1e657827322b1353f7caefeebc2835d7736b5",
+          "size": 6686,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/kimi_k3_vision_processing.py"
+        },
+        "tokenization_kimi.py": {
+          "sha256": "f28ea66e2d862a2a5814970b2ce40c2f7d8296ff09aed90a7e7def689b906944",
+          "size": 16145,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/tokenization_kimi.py"
+        },
+        "encoding_k3.py": {
+          "sha256": "b9cb7ae100fed34b9337f80dacee5abbf7e261fe9b74bc0e76366701d46f5333",
+          "size": 22827,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/encoding_k3.py"
+        },
+        "README.md": {
+          "sha256": "57de265b5842dfa465c6e73b368b0e15a89b8793b5450528dad577da202cc6fe",
+          "size": 45261,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/README.md"
+        },
+        "configuration_kimi_k3.py": {
+          "sha256": "735eb9ebe593e17d231e08e1df7f7be9b5ee0e079f511aa201f9572077b416ae",
+          "size": 11343,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/configuration_kimi_k3.py"
+        },
+        "modeling_kimi_k3.py": {
+          "sha256": "b9171c96726eda55234c92ac8dfae7e24c512fda68968ae8f2c3782b42665ea2",
+          "size": 53444,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/modeling_kimi_k3.py"
+        },
+        "generation_config.json": {
+          "sha256": "c6648c25e9705af7fba8847e243840d21b5cc63ddeb6297f750a7ddbb6a02836",
+          "size": 53,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/generation_config.json"
+        },
+        "preprocessor_config.json": {
+          "sha256": "4be333605990c53a816e586dee9d5dd545afb7a59947c17f8f7ef26b4782668e",
+          "size": 1011,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/preprocessor_config.json"
+        },
+        "tiktoken.model": {
+          "sha256": "b6c497a7469b33ced9c38afb1ad6e47f03f5e5dc05f15930799210ec050c5103",
+          "size": 2795286,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/tiktoken.model"
+        }
+      },
+      "weight_files": [
+        {
+          "name": "model-00032-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00032-of-000096.safetensors"
+        },
+        {
+          "name": "model-00024-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00024-of-000096.safetensors"
+        },
+        {
+          "name": "model-00036-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00036-of-000096.safetensors"
+        },
+        {
+          "name": "model-00018-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00018-of-000096.safetensors"
+        },
+        {
+          "name": "model-00056-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00056-of-000096.safetensors"
+        },
+        {
+          "name": "model-00044-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00044-of-000096.safetensors"
+        },
+        {
+          "name": "model-00037-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00037-of-000096.safetensors"
+        },
+        {
+          "name": "model-00043-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00043-of-000096.safetensors"
+        },
+        {
+          "name": "model-00020-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00020-of-000096.safetensors"
+        },
+        {
+          "name": "model-00076-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00076-of-000096.safetensors"
+        },
+        {
+          "name": "model-00008-of-000096.safetensors",
+          "size": 16567501776,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00008-of-000096.safetensors"
+        },
+        {
+          "name": "model-00013-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00013-of-000096.safetensors"
+        },
+        {
+          "name": "model-00075-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00075-of-000096.safetensors"
+        },
+        {
+          "name": "model-00052-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00052-of-000096.safetensors"
+        },
+        {
+          "name": "model-00093-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00093-of-000096.safetensors"
+        },
+        {
+          "name": "model-00086-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00086-of-000096.safetensors"
+        },
+        {
+          "name": "model-00006-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00006-of-000096.safetensors"
+        },
+        {
+          "name": "model-00088-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00088-of-000096.safetensors"
+        },
+        {
+          "name": "model-00033-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00033-of-000096.safetensors"
+        },
+        {
+          "name": "model-00062-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00062-of-000096.safetensors"
+        },
+        {
+          "name": "model-00046-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00046-of-000096.safetensors"
+        },
+        {
+          "name": "model-00082-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00082-of-000096.safetensors"
+        },
+        {
+          "name": "model-00029-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00029-of-000096.safetensors"
+        },
+        {
+          "name": "model-00055-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00055-of-000096.safetensors"
+        },
+        {
+          "name": "model-00060-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00060-of-000096.safetensors"
+        },
+        {
+          "name": "model-00027-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00027-of-000096.safetensors"
+        },
+        {
+          "name": "model-00083-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00083-of-000096.safetensors"
+        },
+        {
+          "name": "model-00045-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00045-of-000096.safetensors"
+        },
+        {
+          "name": "model-00023-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00023-of-000096.safetensors"
+        },
+        {
+          "name": "model-00012-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00012-of-000096.safetensors"
+        },
+        {
+          "name": "model-00038-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00038-of-000096.safetensors"
+        },
+        {
+          "name": "model-00002-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00002-of-000096.safetensors"
+        },
+        {
+          "name": "model-00019-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00019-of-000096.safetensors"
+        },
+        {
+          "name": "model-00085-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00085-of-000096.safetensors"
+        },
+        {
+          "name": "model-00009-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00009-of-000096.safetensors"
+        },
+        {
+          "name": "model-00022-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00022-of-000096.safetensors"
+        },
+        {
+          "name": "model-00034-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00034-of-000096.safetensors"
+        },
+        {
+          "name": "model-00094-of-000096.safetensors",
+          "size": 4697664072,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00094-of-000096.safetensors"
+        },
+        {
+          "name": "model-00011-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00011-of-000096.safetensors"
+        },
+        {
+          "name": "model-00007-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00007-of-000096.safetensors"
+        },
+        {
+          "name": "model-00042-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00042-of-000096.safetensors"
+        },
+        {
+          "name": "model-00087-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00087-of-000096.safetensors"
+        },
+        {
+          "name": "model-00061-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00061-of-000096.safetensors"
+        },
+        {
+          "name": "model-00035-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00035-of-000096.safetensors"
+        },
+        {
+          "name": "model-00070-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00070-of-000096.safetensors"
+        },
+        {
+          "name": "model-00001-of-000096.safetensors",
+          "size": 2341216112,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00001-of-000096.safetensors"
+        },
+        {
+          "name": "model-00066-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00066-of-000096.safetensors"
+        },
+        {
+          "name": "model-00040-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00040-of-000096.safetensors"
+        },
+        {
+          "name": "model-00021-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00021-of-000096.safetensors"
+        },
+        {
+          "name": "model-00031-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00031-of-000096.safetensors"
+        },
+        {
+          "name": "model-00096-of-000096.safetensors",
+          "size": 802448352,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00096-of-000096.safetensors"
+        },
+        {
+          "name": "model-00089-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00089-of-000096.safetensors"
+        },
+        {
+          "name": "model-00068-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00068-of-000096.safetensors"
+        },
+        {
+          "name": "model-00053-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00053-of-000096.safetensors"
+        },
+        {
+          "name": "model-00091-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00091-of-000096.safetensors"
+        },
+        {
+          "name": "model-00047-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00047-of-000096.safetensors"
+        },
+        {
+          "name": "model-00078-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00078-of-000096.safetensors"
+        },
+        {
+          "name": "model-00073-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00073-of-000096.safetensors"
+        },
+        {
+          "name": "model-00065-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00065-of-000096.safetensors"
+        },
+        {
+          "name": "model-00071-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00071-of-000096.safetensors"
+        },
+        {
+          "name": "model-00058-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00058-of-000096.safetensors"
+        },
+        {
+          "name": "model-00003-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00003-of-000096.safetensors"
+        },
+        {
+          "name": "model-00016-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00016-of-000096.safetensors"
+        },
+        {
+          "name": "model-00041-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00041-of-000096.safetensors"
+        },
+        {
+          "name": "model-00081-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00081-of-000096.safetensors"
+        },
+        {
+          "name": "model-00063-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00063-of-000096.safetensors"
+        },
+        {
+          "name": "model-00028-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00028-of-000096.safetensors"
+        },
+        {
+          "name": "model-00005-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00005-of-000096.safetensors"
+        },
+        {
+          "name": "model-00010-of-000096.safetensors",
+          "size": 16990911504,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00010-of-000096.safetensors"
+        },
+        {
+          "name": "model-00026-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00026-of-000096.safetensors"
+        },
+        {
+          "name": "model-00030-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00030-of-000096.safetensors"
+        },
+        {
+          "name": "model-00050-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00050-of-000096.safetensors"
+        },
+        {
+          "name": "model-00048-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00048-of-000096.safetensors"
+        },
+        {
+          "name": "model-00057-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00057-of-000096.safetensors"
+        },
+        {
+          "name": "model-00054-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00054-of-000096.safetensors"
+        },
+        {
+          "name": "model-00015-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00015-of-000096.safetensors"
+        },
+        {
+          "name": "model-00014-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00014-of-000096.safetensors"
+        },
+        {
+          "name": "model-00004-of-000096.safetensors",
+          "size": 16567501776,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00004-of-000096.safetensors"
+        },
+        {
+          "name": "model-00039-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00039-of-000096.safetensors"
+        },
+        {
+          "name": "model-00080-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00080-of-000096.safetensors"
+        },
+        {
+          "name": "model-00095-of-000096.safetensors",
+          "size": 92289328,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00095-of-000096.safetensors"
+        },
+        {
+          "name": "model-00064-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00064-of-000096.safetensors"
+        },
+        {
+          "name": "model-00051-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00051-of-000096.safetensors"
+        },
+        {
+          "name": "model-00067-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00067-of-000096.safetensors"
+        },
+        {
+          "name": "model-00025-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00025-of-000096.safetensors"
+        },
+        {
+          "name": "model-00072-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00072-of-000096.safetensors"
+        },
+        {
+          "name": "model-00059-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00059-of-000096.safetensors"
+        },
+        {
+          "name": "model-00084-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00084-of-000096.safetensors"
+        },
+        {
+          "name": "model-00077-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00077-of-000096.safetensors"
+        },
+        {
+          "name": "model-00069-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00069-of-000096.safetensors"
+        },
+        {
+          "name": "model-00017-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00017-of-000096.safetensors"
+        },
+        {
+          "name": "model-00092-of-000096.safetensors",
+          "size": 16567507176,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00092-of-000096.safetensors"
+        },
+        {
+          "name": "model-00090-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00090-of-000096.safetensors"
+        },
+        {
+          "name": "model-00049-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00049-of-000096.safetensors"
+        },
+        {
+          "name": "model-00074-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00074-of-000096.safetensors"
+        },
+        {
+          "name": "model-00079-of-000096.safetensors",
+          "size": 16990916912,
+          "resolved": "/gpfs/mszn/models/moonshotai/Kimi-K3/model-00079-of-000096.safetensors"
+        }
+      ]
+    },
+    "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark": {
+      "resolved": "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark",
+      "files": {
+        "config.json": {
+          "sha256": "5a3c2f4f91c965ed93b14de5f12a4e9c17fd98d8c99916ed2deb26ce8702f970",
+          "size": 1251,
+          "resolved": "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark/config.json"
+        },
+        "configuration.json": {
+          "sha256": "f888421726665e8a84b738eed42a64875aed79de8be7daade851ac8bf4c0cef9",
+          "size": 73,
+          "resolved": "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark/configuration.json"
+        },
+        "README.md": {
+          "sha256": "4734eec1b55b5b40b4050512a029808aea117f24440dcaf27815efd1127a88dc",
+          "size": 6316,
+          "resolved": "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark/README.md"
+        }
+      },
+      "weight_files": [
+        {
+          "name": "model.safetensors",
+          "size": 7124633450,
+          "resolved": "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark/model.safetensors"
+        }
+      ]
+    }
+  },
+  "weights_content_hashed": false,
+  "revision_from_hub_metadata": null,
+  "note": "Model directories have no Hub download metadata. Config/tokenizer hashes and weight filenames/sizes are recorded; weight bytes are externally provisioned, not included or content-verified by this package."
+}

@@ -233,11 +233,31 @@ class MooncakeStoreScheduler:
             request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
+            skip_tokens=num_computed_tokens,
         )
         if lookup_result is None:
             # Lookup not ready yet; scheduler will retry on a later step.
             return None, False
         num_external_hit_tokens = lookup_result.hit_length
+        if self.client.lookup_skip_tokens(request.request_id) > num_computed_tokens:
+            # The lookup assumed a longer local prefix than the scheduler holds
+            # now (local blocks were evicted meanwhile): the gap was never
+            # probed in the store. Re-probe from the current local hit; the
+            # request retries on a later step.
+            self._k3_lookup_redo = getattr(self, "_k3_lookup_redo", 0) + 1
+            if self._k3_lookup_redo % 50 == 1:
+                logger.info(
+                    "K3 Mooncake lookup re-probed %d times (local prefix shrank)",
+                    self._k3_lookup_redo,
+                )
+            self.client.lookup(
+                request.request_id,
+                request.num_tokens,
+                request.block_hashes,
+                non_block=True,
+                skip_tokens=num_computed_tokens,
+            )
+            return None, False
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0

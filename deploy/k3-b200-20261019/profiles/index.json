@@ -1,0 +1,25 @@
+{
+  "profiles": {
+    "ttft-strict": [
+      "budget-headroom-score",
+      "candidate",
+      "measured TTFT improvement with TPOT P99 regression; opt-in"
+    ],
+    "cute-history": [
+      "cute-context-score",
+      "candidate",
+      "measured speed benefit, numerical differences and no semantic quality pass; opt-in"
+    ],
+    "prefill-cost-v2": [
+      "prefill-cost-v2-score",
+      "candidate",
+      "asynchronous experiment; result not consumed for this package"
+    ],
+    "default": [
+      "benchmark.json",
+      "serving.json",
+      "9216/9792, C96/S192, prefill pairing + TP4; baseline reference 2228.93 tok/s"
+    ]
+  },
+  "rule": "Profiles are alternatives, not additive. No speedups may be summed. Combined package not scored."
+}

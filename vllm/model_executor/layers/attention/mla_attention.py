@@ -199,6 +199,7 @@ return curr_o @ W_O
 """
 
 import functools
+import os
 import itertools
 import math
 from abc import abstractmethod
@@ -214,6 +215,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm.triton_utils import tl, triton
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -2230,7 +2232,7 @@ def build_mla_chunked_context_metadata(
             chunk.local_starts = local_starts_per_chunk[index]
         chunks.append(chunk)
 
-    return MLACommonPrefillMetadata.ChunkedContextMetadata(
+    metadata = MLACommonPrefillMetadata.ChunkedContextMetadata(
         context_lens=context_lens_gpu,
         workspace=chunked_prefill_workspace,
         chunks=chunks,
@@ -2238,6 +2240,12 @@ def build_mla_chunked_context_metadata(
         empty_token_slices=empty_token_slices,
         dcp_manager=dcp_manager,
     )
+    if use_dcp:
+        # Kimi-K3 cross-step context reuse plans its own aligned tail chunks.
+        metadata.k3_chunk_alignment = chunk_alignment
+        metadata.k3_dcp_local_block = dcp_local_block_size
+        metadata.k3_dcp_virtual_block = dcp_virtual_block_size
+    return metadata
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
@@ -2443,9 +2451,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 ),
                 dtype=torch.bfloat16
                 if use_packed_fp8_cache
-                else self.model_config.dtype,
+                else (
+                    # Keep the gathered context in fp8: the local gather is a
+                    # byte copy and the DCP all-gather moves half the bytes;
+                    # rows are dequantized after the gather.
+                    torch.float8_e4m3fn
+                    if _K3_DCP_FP8_GATHER
+                    and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
+                    else self.model_config.dtype
+                ),
                 device=device,
             )
+            if self.chunked_prefill_workspace.dtype == torch.float8_e4m3fn:
+                global _K3_DCP_FP8_GATHER_OUT_DTYPE
+                _K3_DCP_FP8_GATHER_OUT_DTYPE = self.model_config.dtype
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
             assert isinstance(self.dcp_manager, MLADCPManager)
             self.dcp_manager.init_kv_gather(
@@ -2685,6 +2704,50 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
 
         return attn_metadata  # type: ignore[return-value]
+
+
+_K3_DCP_FP8_GATHER = os.environ.get("VLLM_K3_DCP_FP8_GATHER", "0") == "1"
+_K3_KPE_FP8_PASSTHROUGH = os.environ.get("VLLM_K3_KPE_FP8_PASSTHROUGH", "0") == "1"
+# Dtype the fp8-gathered context is dequantized to (the model dtype the bf16
+# workspace used to hold); set by the metadata builder that allocates it.
+_K3_DCP_FP8_GATHER_OUT_DTYPE: torch.dtype = torch.bfloat16
+
+
+@triton.jit
+def _dequant_fp8_rows_kernel(
+    src_ptr, dst_ptr, scale_ptr, n_rows, src_row_stride, D: tl.constexpr,
+    BLOCK_ROWS: tl.constexpr, BLOCK_D: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+    cols = tl.arange(0, BLOCK_D)
+    mask = (rows[:, None] < n_rows) & (cols[None, :] < D)
+    x = tl.load(src_ptr + rows[:, None].to(tl.int64) * src_row_stride + cols[None, :],
+                mask=mask, other=0.0)
+    scale = tl.load(scale_ptr)
+    y = x.to(tl.float32) * scale
+    tl.store(dst_ptr + rows[:, None].to(tl.int64) * D + cols[None, :],
+             y.to(dst_ptr.dtype.element_ty), mask=mask)
+
+
+def _dequant_fp8_rows(
+    x: torch.Tensor, scale: torch.Tensor, out_dtype: torch.dtype
+) -> torch.Tensor:
+    """Dequantize gathered fp8 KV rows ``[N, 1, D]`` (last dim contiguous,
+    arbitrary row stride) to ``out_dtype``: ``fp32(x) * scale`` rounded once,
+    matching ``gather_and_maybe_dequant_cache``."""
+    assert x.dim() == 3 and x.shape[1] == 1 and x.stride(-1) == 1
+    n, _, d = x.shape
+    out = torch.empty((n, 1, d), dtype=out_dtype, device=x.device)
+    if n == 0:
+        return out
+    block_d = triton.next_power_of_2(d)
+    block_rows = max(1, 4096 // block_d)
+    _dequant_fp8_rows_kernel[(triton.cdiv(n, block_rows),)](
+        x.view(torch.float8_e4m3fn), out, scale.reshape(-1).to(torch.float32),
+        n, x.stride(0), D=d, BLOCK_ROWS=block_rows, BLOCK_D=block_d,
+    )
+    return out
 
 
 def reorg_kvcache(
@@ -3098,6 +3161,20 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output = None
         output_lse = None
         workspace = chunked_context.workspace
+        fp8_gather = workspace.dtype == torch.float8_e4m3fn
+        # With a unit KV scale, fp8 -> (x * 1.0) -> bf16 -> fp8 is the identity,
+        # so the fused FP8 key pack can take the gathered fp8 k_pe as-is.
+        kpe_passthrough = False
+        if fp8_gather:
+            assert self.kv_cache_dtype in ("fp8", "fp8_e4m3") and k_scale is not None
+            assert kv_c_and_k_pe_cache.element_size() == 1
+            if _K3_KPE_FP8_PASSTHROUGH and kv_pack is not None and use_fp8_prefill:
+                unit = getattr(self, "_k3_unit_k_scale", None)
+                if unit is None:
+                    unit = self._k3_unit_k_scale = bool(
+                        k_scale.numel() == 1 and float(k_scale.item()) == 1.0
+                    )
+                kpe_passthrough = unit
 
         for chunk in chunked_context.chunks:
             assert chunk.padded_local_seq_lens is not None
@@ -3115,6 +3192,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dst=workspace[:toks],
                     block_table=block_table,
                     workspace_starts=padded_local_cu_seq_lens,
+                    batch_size=chunk.num_requests,
+                    seq_starts=chunk.starts,
+                )
+            elif fp8_gather:
+                ops.cp_gather_cache(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks].view(kv_c_and_k_pe_cache.dtype),
+                    block_table=block_table,
+                    cu_seq_lens=padded_local_cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
                 )
@@ -3172,6 +3258,14 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 max_seq_len=chunk.max_seq_len,
                 toks=toks,
             )
+            if fp8_gather:
+                kv_c_normed = _dequant_fp8_rows(
+                    kv_c_normed, k_scale, _K3_DCP_FP8_GATHER_OUT_DTYPE
+                )
+                if not kpe_passthrough:
+                    k_pe = _dequant_fp8_rows(
+                        k_pe, k_scale, _K3_DCP_FP8_GATHER_OUT_DTYPE
+                    )
             if kv_b_proj_input_dtype is not None:
                 kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
 

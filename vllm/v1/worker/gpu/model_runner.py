@@ -16,6 +16,7 @@ hidden. Prefer utility functions defined elsewhere and call them from here,
 instead of embedding feature-specific logic directly.
 """
 
+import contextlib
 import functools
 import gc
 import time
@@ -39,8 +40,14 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_k3_draft_groups,
+    get_pp_group,
+    k3_draft_groups,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.models.kimi_k3.nvidia import mla_hist_cache as _k3_mla_hist_cache  # k3_mla_hist_cache
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
@@ -156,6 +163,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    _inner_decoder,
     set_eagle3_aux_hidden_state_layers,
     verify_supports_aux_hidden_states_over_pp,
 )
@@ -188,6 +196,13 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
 logger = init_logger(__name__)
+
+# K3 PP: on the last stage, run the drafter on a side stream so it overlaps the
+# next microbatch's target forward instead of extending this stage's step.
+_K3_DRAFT_OVERLAP = __import__("os").environ.get("VLLM_K3_DRAFT_OVERLAP", "0") == "1"
+# Debug only (bitwise overlap on/off check): append every step's drafts as JSON
+# lines {"req_ids": [...], "drafts": [[...], ...]} to this file. Synchronizes.
+_K3_DRAFT_DUMP = __import__("os").environ.get("VLLM_K3_DRAFT_DUMP", "")
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -414,7 +429,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     assert self.pp_handler is not None
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                with use_workspace_lane(self._draft_workspace_lane):
+                with use_workspace_lane(self._draft_workspace_lane), k3_draft_groups():
                     self.speculator.load_model(self.model)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
@@ -536,8 +551,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # for the max capture size so they can be sliced per batch.
             # Save as persistent member so runtime can copy received data
             # into the same addresses that the CUDA graphs captured.
+            # A sequence-parallel model ships only its TP rank's rows between
+            # stages, so it can ask for smaller receive buffers.
+            inner = _inner_decoder(self.model)
+            pp_rows = self.max_num_tokens
+            if hasattr(inner, "pp_intermediate_rows"):
+                pp_rows = inner.pp_intermediate_rows(pp_rows)
             self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                batch_size=self.max_num_tokens,
+                batch_size=pp_rows,
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
@@ -940,7 +961,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.prepare_watermarking(
                     self.sampler, input_batch.idx_mapping
                 )
-            with use_workspace_lane(self._draft_workspace_lane):
+            with use_workspace_lane(self._draft_workspace_lane), k3_draft_groups():
                 self.speculator.propose(
                     input_batch=input_batch,
                     attn_metadata=attn_metadata,
@@ -1105,7 +1126,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         self.kv_cache_config,
                     )
                     if self.speculator is not None:
-                        with use_workspace_lane(self._draft_workspace_lane):
+                        with use_workspace_lane(self._draft_workspace_lane), k3_draft_groups():
                             self.speculator.capture()
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
@@ -1739,6 +1760,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if _k3_done is not None:
             torch.cuda.current_stream().wait_event(_k3_done)
             self.model_state._k3_commit_done = None
+        # An overlapped drafter may still read this stage's last outputs and
+        # input buffers until it has staged them into its own buffers.
+        _k3_dic = getattr(self, "_k3_draft_inputs_done", None)
+        if _k3_dic is not None:
+            torch.cuda.current_stream().wait_event(_k3_dic)
+            self._k3_draft_inputs_done = None
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -2047,6 +2074,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_active_loras=batch_desc.num_active_loras,
             )
 
+            if _k3_mla_hist_cache.ENABLED:
+                _k3_mla_hist_cache.set_step(
+                    input_batch.req_ids,
+                    input_batch.num_computed_tokens_np,
+                    input_batch.num_scheduled_tokens,
+                    input_batch.prefill_len_np,
+                )
             with set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -2122,6 +2156,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return None
 
+    def _k3_dump_drafts(self, input_batch: Any, draft_tokens: torch.Tensor) -> None:
+        import json
+
+        from vllm.distributed import get_tensor_model_parallel_rank
+
+        if get_tensor_model_parallel_rank() != 0:
+            return
+        req_ids = getattr(input_batch, "req_ids", None)
+        record = {
+            "req_ids": list(req_ids) if req_ids is not None else None,
+            "drafts": draft_tokens[: input_batch.num_reqs].cpu().tolist(),
+        }
+        with open(_K3_DRAFT_DUMP, "a") as f:
+            f.write(json.dumps(record) + "\n")
+
     @torch.inference_mode()
     @step_eplb_after()
     def sample_tokens(
@@ -2169,6 +2218,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Last rank: sample tokens
         assert hidden_states is not None
+        # Rejection sampling reads draft tokens an overlapped drafter wrote.
+        _k3_dd = getattr(self, "_k3_draft_done", None)
+        if _k3_dd is not None:
+            torch.cuda.current_stream().wait_event(_k3_dd)
+            self._k3_draft_done = None
         draft_hidden_states = hidden_states
         if self.pcp_manager is not None:
             hidden_states, aux_hidden_states, input_batch = (
@@ -2263,66 +2317,111 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        if self.speculator is not None:
-            assert self.sampler is not None
-            if isinstance(self.speculator, DraftModelSpeculator):
-                self.speculator.observe_verification(
-                    input_batch.idx_mapping, num_sampled, num_rejected
+        # Overlap only with the drafter's own TP/DCP groups in place: sharing the
+        # target's communicators / symmetric workspaces across two concurrently
+        # running streams hangs (direct DCP A2A epochs diverge across ranks).
+        k3_overlap = (
+            _K3_DRAFT_OVERLAP
+            and self.speculator is not None
+            and self.pp_handler is not None
+            and get_k3_draft_groups()[0] is not None
+        )
+        draft_ctx: Any = contextlib.nullcontext()
+        if k3_overlap:
+            if getattr(self, "_k3_draft_stream", None) is None:
+                # High priority: the draft is on its microbatch's critical
+                # path, the overlapped target forward is not.
+                self._k3_draft_stream = torch.cuda.Stream(self.device, priority=-1)
+            draft_stream = self._k3_draft_stream
+            draft_stream.wait_stream(self.main_stream)
+            # Step-local tensors from the main stream are read on the side
+            # stream; keep the allocator from recycling them early.
+            for t in (input_batch.idx_mapping, num_sampled, num_rejected):
+                t.record_stream(draft_stream)
+            # The target's last hidden / aux states are step-local too; the
+            # drafter stages them into its own buffers on the side stream.
+            for t in (draft_hidden_states, *(aux_hidden_states or ())):
+                if isinstance(t, torch.Tensor) and t.is_cuda:
+                    t.record_stream(draft_stream)
+            draft_ctx = torch.cuda.stream(draft_stream)
+        with draft_ctx:
+            if self.speculator is not None:
+                assert self.sampler is not None
+                if isinstance(self.speculator, DraftModelSpeculator):
+                    self.speculator.observe_verification(
+                        input_batch.idx_mapping, num_sampled, num_rejected
+                    )
+                spec_hidden_states = get_drafter_hidden_states(
+                    self.model, draft_hidden_states
                 )
-            spec_hidden_states = get_drafter_hidden_states(
-                self.model, draft_hidden_states
-            )
-            if isinstance(self.sampler, GPUWatermarkSampler):
-                self.speculator.prepare_watermarking(
-                    self.sampler, input_batch.idx_mapping
-                )
-            with use_workspace_lane(self._draft_workspace_lane):
-                draft_tokens = self.speculator.propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.next_prefill_tokens,
-                    self.sampler.sampling_states.temperature.gpu,
-                    self.sampler.sampling_states.seeds.gpu,
-                    num_speculative_tokens=num_spec_tokens,
-                    dp_sync_state=dp_sync_state,
-                    mm_inputs=mm_inputs,
-                )
-            if num_spec_tokens < self.num_speculative_steps:
-                draft_tokens[:, num_spec_tokens:] = -1
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if self.adaptive_verification is not None:
-                self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs, input_batch
-                )
+                if isinstance(self.sampler, GPUWatermarkSampler):
+                    self.speculator.prepare_watermarking(
+                        self.sampler, input_batch.idx_mapping
+                    )
+                with use_workspace_lane(self._draft_workspace_lane), k3_draft_groups():
+                    draft_tokens = self.speculator.propose(
+                        input_batch,
+                        attn_metadata,
+                        slot_mappings_by_layer,
+                        spec_hidden_states,
+                        aux_hidden_states,
+                        num_sampled,
+                        num_rejected,
+                        self.req_states.last_sampled_tokens,
+                        self.req_states.next_prefill_tokens,
+                        self.sampler.sampling_states.temperature.gpu,
+                        self.sampler.sampling_states.seeds.gpu,
+                        num_speculative_tokens=num_spec_tokens,
+                        dp_sync_state=dp_sync_state,
+                        mm_inputs=mm_inputs,
+                    )
+                if num_spec_tokens < self.num_speculative_steps:
+                    draft_tokens[:, num_spec_tokens:] = -1
+                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+                if _K3_DRAFT_DUMP:
+                    self._k3_dump_drafts(input_batch, draft_tokens)
+                if self.adaptive_verification is not None:
+                    self.adaptive_verification.record_confidences(
+                        self.speculator.draft_token_confidence_probs, input_batch
+                    )
 
-        if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
-            self.draft_tokens_handler.set_draft_tokens(
-                input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
-            )
-            if self.pp_handler is not None:
-                self.pp_handler.broadcast_drafts(
-                    self.req_states.draft_tokens, input_batch
+            if self.num_speculative_steps > 0:
+                # Spec-decode and diffusion LLMs both use draft tokens but the latter does
+                # not have a speculator (i.e. self.speculator is None)
+                self.draft_tokens_handler.set_draft_tokens(
+                    input_batch,
+                    self.req_states.draft_tokens[input_batch.idx_mapping, :num_spec_tokens],
                 )
+                if self.pp_handler is not None:
+                    self.pp_handler.broadcast_drafts(
+                        self.req_states.draft_tokens, input_batch
+                    )
+        if k3_overlap:
+            self._k3_draft_done = torch.cuda.Event()
+            self._k3_draft_done.record(self._k3_draft_stream)
+            self._k3_draft_inputs_done = (
+                getattr(self.speculator, "_k3_inputs_consumed", None)
+                or self._k3_draft_done
+            )
 
         _k3_lp = getattr(self, "_k3_late_ps", None)  # k3_late_commit
         if _k3_lp is not None:
             self._k3_late_ps = None
             self.model_state.postprocess_state(*_k3_lp)
-        # Post-step KV connector related operations.
-        # K3: the KV connector may read KDA state; order it after a side-stream commit.
-        _k3_done2 = getattr(self.model_state, "_k3_commit_done", None)
-        if _k3_done2 is not None:
-            torch.cuda.current_stream().wait_event(_k3_done2)
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        # Post-step KV connector related operations. With an overlapped
+        # drafter, issue them on the draft stream: KV saves fence on the current
+        # stream, and the MLA group's blocks include the draft layers it writes.
+        with (
+            torch.cuda.stream(self._k3_draft_stream)
+            if k3_overlap
+            else contextlib.nullcontext()
+        ):
+            # K3: the KV connector may read KDA state; order it after a
+            # side-stream commit.
+            _k3_done2 = getattr(self.model_state, "_k3_commit_done", None)
+            if _k3_done2 is not None:
+                torch.cuda.current_stream().wait_event(_k3_done2)
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
         model_runner_output.ec_connector_output = ec_connector_output
 

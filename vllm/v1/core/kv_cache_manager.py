@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import json
+import os
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
@@ -15,7 +18,16 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    _K3_CKPT_HOLD,
+    _K3_CKPT_REFRESH,
+    MambaManager,
+)
+
+# K3: per-request local prefix-lookup record (JSONL, path prefix): reconciled
+# hit vs. the longest single-group (full-attention) hit, i.e. how much cached
+# attention prefix a missing Mamba state throws away.
+_K3_CACHE_DIAG = os.environ.get("VLLM_K3_CACHE_DIAG_PREFIX") or None
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -316,9 +328,58 @@ class KVCacheManager:
         shared_prefix_boundary = (
             num_new_computed_tokens + num_uncached if num_uncached else 0
         )
+        if _K3_CACHE_DIAG is not None:
+            self._k3_cache_diag(request, num_new_computed_tokens, num_uncached)
 
         blocks = self.create_kv_cache_blocks(computed_blocks)
         return blocks, num_new_computed_tokens, shared_prefix_boundary
+
+    def _k3_cache_diag(self, request: Request, hit: int, uncached: int) -> None:
+        state = self.__dict__.setdefault("_k3_diag_state", {})
+        rid = request.request_id
+        if state.get(rid) == (hit, uncached):
+            return
+        first = rid not in state
+        if len(state) > 200000:
+            state.clear()
+        state[rid] = (hit, uncached)
+        fh = self.__dict__.get("_k3_diag_fh")
+        if fh is None:
+            fh = open(
+                f"{_K3_CACHE_DIAG}-{int(time.time())}-{os.getpid()}.jsonl",
+                "a",
+                buffering=1,
+            )
+            self._k3_diag_fh = fh
+        fh.write(
+            json.dumps(
+                {
+                    "t": round(time.time(), 3),
+                    "rid": rid,
+                    "n": request.num_tokens,
+                    "hit": hit,
+                    "attn": hit + uncached,
+                    "first": first,
+                }
+            )
+            + "\n"
+        )
+
+    def k3_pop_held_states(self, request: Request) -> list[KVCacheBlock]:
+        """State blocks the request kept referenced (``_K3_CKPT_HOLD``)."""
+        held: list[KVCacheBlock] = []
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                held.extend(manager.k3_pop_held_state(request.request_id))
+        return held
+
+    def k3_pop_released_states(self, request: Request) -> list:
+        """Hashed Mamba states the request released before finishing."""
+        entries: list = []
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                entries.extend(manager.k3_pop_released_states(request.request_id))
+        return entries
 
     def get_computed_blocks_for_connector(
         self, request: Request
@@ -627,6 +688,16 @@ class KVCacheManager:
 
         """
         self.coordinator.free(request.request_id)
+        if _K3_CKPT_HOLD:
+            # After the request's own blocks: the held state becomes the
+            # youngest entry and outlives the attention prefix it gates.
+            self.block_pool.free_blocks(self.k3_pop_held_states(request))
+        if _K3_CKPT_REFRESH:
+            # After the request's own blocks: its checkpoints become the
+            # youngest entries and outlive the attention prefix they gate.
+            self.block_pool.k3_requeue_cached_blocks(
+                self.k3_pop_released_states(request)
+            )
 
     def remove_skipped_blocks(
         self,

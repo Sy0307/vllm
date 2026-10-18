@@ -26,6 +26,83 @@ import os as _os
 
 _K3_SPLIT_KV = _os.environ.get("VLLM_K3_CONTEXT_SPLIT_KV", "0") == "1"
 _K3_SPLIT_MEMO = _os.environ.get("VLLM_K3_SPLIT_MEMO", "0") == "1"
+_K3_SPLIT_MERGE_FUSED = _os.environ.get("VLLM_K3_SPLIT_MERGE_FUSED", "0") == "1"
+
+
+# Experimental B200 history-only backend. Existing split-KV and causal paths
+# retain their native kernels. Same input/output precision; arithmetic differs.
+_K3_CUTE_CONTEXT = _os.environ.get("VLLM_K3_CUTE_CONTEXT", "0") == "1"
+_K3_CUTE_CONTEXT_DIAG = _os.environ.get("VLLM_K3_CUTE_CONTEXT_DIAG", "0") == "1"
+_k3_cute_context_counts = {}
+
+
+def _k3_context_backend(q, k, v, out):
+    if not _K3_CUTE_CONTEXT:
+        return "trtllm-gen"
+    supported = (
+        q.is_cuda and torch.cuda.get_device_capability(q.device) == (10, 0)
+        and q.dtype == k.dtype == v.dtype == torch.float8_e4m3fn
+        and out.dtype == torch.bfloat16
+        and q.shape[1:] == k.shape[1:] == (12, 192)
+        and v.shape[1:] == (12, 128)
+        and out.shape == (q.shape[0], 12, 128)
+        and all(t.is_contiguous() for t in (q, k, v, out))
+        and all(t.data_ptr() % 16 == 0 for t in (q, k, v))
+        and out.data_ptr() % 32 == 0
+    )
+    return "cute-dsl" if supported else "trtllm-gen"
+
+
+def _k3_cute_indptr(tensor):
+    # Contiguous slices may still have a 4/8/12-byte offset. .to(int32) and
+    # .contiguous() do not copy an already-contiguous int32 view. No memoization:
+    # each invocation must observe this batch's current metadata contents.
+    return tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
+
+
+def k3_cute_context_diagnostics(reset=False):
+    data = dict(enabled=_K3_CUTE_CONTEXT, diagnostic=_K3_CUTE_CONTEXT_DIAG,
+                counts=dict(_k3_cute_context_counts))
+    if reset:
+        _k3_cute_context_counts.clear()
+    return data
+
+from vllm.triton_utils import tl, triton  # noqa: E402
+
+
+@triton.jit
+def _k3_split_merge_kernel(
+    o_ptr, lse_ptr, rows_ptr, out_ptr, lse_out_ptr,
+    Tq, H,
+    o_s0, o_s1, lse_s0, lse_s1, out_s0, out_s1,
+    S: tl.constexpr, D: tl.constexpr, BLOCK_H: tl.constexpr,
+):
+    """Merge S split-KV partials of one query row: LSE-weighted average of the
+    partial outputs (base-2 LSE in), natural-log merged LSE out ([H, Tq])."""
+    t = tl.program_id(0)
+    h = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    d = tl.arange(0, D)
+    m = tl.full([BLOCK_H], float("-inf"), tl.float32)
+    for s in tl.static_range(S):
+        r = tl.load(rows_ptr + s * Tq + t).to(tl.int64)
+        lse = tl.load(lse_ptr + r * lse_s0 + h * lse_s1, mask=hm, other=float("-inf"))
+        m = tl.maximum(m, lse.to(tl.float32))
+    denom = tl.zeros([BLOCK_H], tl.float32)
+    acc = tl.zeros([BLOCK_H, D], tl.float32)
+    for s in tl.static_range(S):
+        r = tl.load(rows_ptr + s * Tq + t).to(tl.int64)
+        lse = tl.load(lse_ptr + r * lse_s0 + h * lse_s1, mask=hm, other=float("-inf"))
+        w = tl.exp2(lse.to(tl.float32) - m)
+        denom += w
+        o = tl.load(o_ptr + r * o_s0 + h[:, None] * o_s1 + d[None, :],
+                    mask=hm[:, None], other=0.0).to(tl.float32)
+        acc += o * w[:, None]
+    merged = acc / denom[:, None]
+    tl.store(out_ptr + t * out_s0 + h[:, None] * out_s1 + d[None, :],
+             merged.to(out_ptr.dtype.element_ty), mask=hm[:, None])
+    lse_out = (m + tl.log2(denom)) * 0.6931471805599453
+    tl.store(lse_out_ptr + h * Tq + t, lse_out, mask=hm)
 
 
 def _k3_split_kv_factor(max_query_len: int, num_requests: int, max_seq_len: int) -> int:
@@ -278,6 +355,11 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         if splits > 1:
             return self._k3_split_context(chunk, q, k, v, out, splits)
 
+        backend = _k3_context_backend(q, k, v, out)
+        query_start_loc, cu_seq_lens = chunk.query_start_loc, chunk.cu_seq_lens
+        if backend == "cute-dsl":
+            query_start_loc = _k3_cute_indptr(query_start_loc)
+            cu_seq_lens = _k3_cute_indptr(cu_seq_lens)
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -291,14 +373,21 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             o_sf_scale=1.0,
             batch_size=chunk.num_requests,
             window_left=-1,
-            cum_seq_lens_q=chunk.query_start_loc,
-            cum_seq_lens_kv=chunk.cu_seq_lens,
+            cum_seq_lens_q=query_start_loc,
+            cum_seq_lens_kv=cu_seq_lens,
             enable_pdl=False,
             is_causal=False,
             return_lse=True,
             out=out,
             skip_all_rows_active_check=True,
+            backend=backend,
         )
+
+        if _K3_CUTE_CONTEXT_DIAG:
+            key = f"{backend}:q{chunk.max_query_len}:kv{chunk.max_seq_len}:b{chunk.num_requests}"
+            # Diagnostic host counts are reset after health, read after drain.
+            # Prefill executes eagerly; decode CUDA graph paths are unchanged.
+            _k3_cute_context_counts[key] = _k3_cute_context_counts.get(key, 0) + 1
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, log2_lse_to_ln(lse.transpose(0, 1))
@@ -343,6 +432,25 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             out=o_rep,
             skip_all_rows_active_check=True,
         )
+        if _K3_SPLIT_MERGE_FUSED and o_rep.stride(-1) == 1:
+            if out is None:
+                out = torch.empty(
+                    num_tokens, q.shape[1], v.shape[2],
+                    device=q.device, dtype=self._prefill_metadata.output_dtype,
+                )
+            num_heads, head_dim = o_rep.shape[1], o_rep.shape[2]
+            lse_out = torch.empty(num_heads, num_tokens, dtype=torch.float32,
+                                  device=q.device)
+            rows = part_rows if part_rows.is_contiguous() else part_rows.contiguous()
+            block_h = min(triton.next_power_of_2(num_heads), 16)
+            _k3_split_merge_kernel[(num_tokens, triton.cdiv(num_heads, block_h))](
+                o_rep, lse_rep, rows, out, lse_out,
+                num_tokens, num_heads,
+                o_rep.stride(0), o_rep.stride(1), lse_rep.stride(0), lse_rep.stride(1),
+                out.stride(0), out.stride(1),
+                S=splits, D=head_dim, BLOCK_H=block_h,
+            )
+            return out, lse_out
         # LSE merge (base-2 LSE from the kernel) over the S partials.
         lse_s = lse_rep.float()[part_rows]  # [S, Tq, H]
         m = lse_s.amax(0)

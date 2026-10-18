@@ -155,25 +155,14 @@ class KimiK3ToolParser(ToolParser):
                 ToolChoiceCustom,
             ),
         )
-        structured_outputs = getattr(request, "structured_outputs", None)
-        has_structural_tag = (
-            structured_outputs is not None
-            and structured_outputs.structural_tag is not None
-        )
-        if named and not has_structural_tag:
-            # Without the XTML structural tag there is no way to force the
-            # named call (the generic JSON guided-decoding path conflicts
-            # with the XTML channel format).
+        if named:
             raise VLLMValidationError(
-                "Named tool choice for Kimi K3 requires strict tool calling "
-                "(VLLM_ENFORCE_STRICT_TOOL_CALLING) so the XTML structural "
-                "tag can force the call. Otherwise use `tool_choice` set to "
-                '"auto", "required", or "none".',
+                "tool_choice 'specified' is incompatible with thinking enabled",
                 parameter="tool_choice",
                 value=request.tool_choice,
             )
 
-        if request.tools and (request.tool_choice == "required" or named):
+        if request.tools and request.tool_choice == "required":
             # K3 emits tool calls in XTML. When strict tool calling is enabled,
             # DelegatingParser._apply_structural_tag has already attached the K3
             # XTML structural tag (structural_tag_model = "kimi_k3"). We return

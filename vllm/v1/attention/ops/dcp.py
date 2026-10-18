@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -1468,6 +1469,20 @@ class MLADCPManager:
         self.device = torch.device(device)
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
+        if getattr(self.group, "_k3_draft", False):
+            # The K3 overlapped drafter owns duplicate DCP groups, hence private
+            # direct workspaces (functools.cache keys on the group). By default
+            # they match the target's capacity, so the drafter takes the same
+            # direct/NCCL path for every batch size as it does without overlap.
+            # VLLM_K3_DRAFT_DCP_WS_TOKENS caps them (larger batches then fall
+            # back to NCCL) to save memory.
+            cap = int(os.environ.get("VLLM_K3_DRAFT_DCP_WS_TOKENS", "0"))
+            if cap > 0:
+                self.max_num_tokens = min(self.max_num_tokens, cap)
+        # VLLM_K3_DRAFT_OVERLAP_COMM=nccl: no peer-spinning direct kernels.
+        self._k3_no_direct = bool(getattr(self.group, "_k3_draft", False)) and (
+            os.environ.get("VLLM_K3_DRAFT_OVERLAP_COMM", "same") == "nccl"
+        )
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
 
@@ -1505,7 +1520,7 @@ class MLADCPManager:
         use_pcp: bool,
     ) -> DCPCombine:
         direct_workspace = None
-        if self.use_a2a:
+        if self.use_a2a and not self._k3_no_direct:
             direct_workspace = get_direct_dcp_a2a_workspace(
                 self.group,
                 self.device,
@@ -1571,15 +1586,19 @@ class MLADCPManager:
         head_dim: int,
         dtype: torch.dtype,
     ) -> Callable[[torch.Tensor], torch.Tensor]:
-        direct_workspace = get_direct_dcp_q_gather_workspace(
-            self.group,
-            self.device,
-            self.max_num_tokens,
-            num_heads,
-            head_dim,
-            dtype,
-            self.num_ubatches,
-            self.padded_num_heads,
+        direct_workspace = (
+            None
+            if self._k3_no_direct
+            else get_direct_dcp_q_gather_workspace(
+                self.group,
+                self.device,
+                self.max_num_tokens,
+                num_heads,
+                head_dim,
+                dtype,
+                self.num_ubatches,
+                self.padded_num_heads,
+            )
         )
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP query gather for MLA.")
@@ -1622,13 +1641,17 @@ class MLADCPManager:
         )
         assert workspace.shape[1] > 0
 
-        direct_workspace = get_direct_dcp_kv_gather_workspace(
-            self.group,
-            workspace.device,
-            max_gathered_tokens,
-            workspace.shape[1],
-            workspace.dtype,
-            self.num_ubatches,
+        direct_workspace = (
+            None
+            if getattr(self, "_k3_no_direct", False)
+            else get_direct_dcp_kv_gather_workspace(
+                self.group,
+                workspace.device,
+                max_gathered_tokens,
+                workspace.shape[1],
+                workspace.dtype,
+                self.num_ubatches,
+            )
         )
         if direct_workspace is not None:
             logger.info_once(

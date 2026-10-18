@@ -489,7 +489,7 @@ def test_adjust_request_rejects_named_tool_choice(tool_request):
         parser.adjust_request(tool_request)
 
     assert exc_info.value.parameter == "tool_choice"
-    assert "requires strict tool calling" in str(exc_info.value)
+    assert "specified' is incompatible with thinking enabled" in str(exc_info.value)
 
 
 def test_responses_chat_params_carries_tool_choice_metadata():

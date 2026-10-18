@@ -804,6 +804,29 @@ class BlockPool:
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks)
 
+    def k3_requeue_cached_blocks(self, entries) -> int:
+        """K3: move free blocks that still hold the given hash to the LRU tail.
+
+        ``entries`` is ``[(block, block_hash), ...]`` recorded when the blocks
+        were released; a block that was evicted, re-hashed or is referenced
+        again is skipped. Returns the number of blocks moved.
+        """
+        moved = 0
+        for block, block_hash in entries:
+            if (
+                block.ref_cnt != 0
+                or block.is_null
+                or block.block_hash != block_hash
+                or block.prev_free_block is None
+                or block.next_free_block is None
+            ):
+                continue
+            pool = block.pool if block.pool is not None else self
+            pool.free_block_queue.remove(block)
+            pool.free_block_queue.append(block)
+            moved += 1
+        return moved
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
 

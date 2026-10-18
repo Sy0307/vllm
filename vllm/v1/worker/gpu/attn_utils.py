@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
+import os
 import numpy as np
 import torch
 
@@ -454,6 +455,10 @@ def build_slot_mappings_by_layer(
     return slot_mappings_by_layer
 
 
+# K3: let hybrid builders share batch-only work across KV-cache groups.
+_K3_SHARED_BUILD_MEMO = os.environ.get("VLLM_K3_KDA_SHARED_META", "0") == "1"
+
+
 def build_attn_metadata(
     attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
@@ -497,6 +502,7 @@ def build_attn_metadata(
     # Also at capture, so FULL graphs share the batch-level buffers.
     cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+    k3_build_memo: dict | None = {} if _K3_SHARED_BUILD_MEMO else None
     for i in range(num_kv_cache_groups):
         if not attn_groups[i]:
             continue
@@ -543,6 +549,7 @@ def build_attn_metadata(
             rswa_prefix_lens=rswa_prefix_lens,
             req_idx=req_idx,
             _token_to_req_indices_cache=token_to_req_indices,
+            _k3_build_memo=k3_build_memo,
             **common_attn_metadata_extra_kwargs,
         )
 

@@ -1583,11 +1583,162 @@ def _replace_active_groups(
 
 
 _TP: GroupCoordinator | None = None
+_K3_SHARED_TP: GroupCoordinator | None = None
+
+
+def get_k3_shared_tp_group() -> GroupCoordinator | None:
+    return _K3_SHARED_TP
+
+
+def init_k3_shared_tp_group(size: int) -> GroupCoordinator:
+    global _K3_SHARED_TP
+    if _K3_SHARED_TP is not None:
+        assert _K3_SHARED_TP.world_size == size
+        return _K3_SHARED_TP
+    world = get_world_group()
+    tp = get_tp_group()
+    assert tp.world_size == 8 and size == 4
+    assert world.world_size == tp.world_size * get_pp_group().world_size
+    start = world.rank // 8 * 8
+    assert tp.ranks == list(range(start, start + 8)), tp.ranks
+    groups = [list(range(i, i + size)) for i in range(0, world.world_size, size)]
+    # CudaCommunicator enables custom AG/RS only for the "tp" group family.
+    # GroupCoordinator assigns a distinct suffix; the default _TP is untouched.
+    _K3_SHARED_TP = init_model_parallel_group(
+        groups, world.local_rank, "nccl", group_name="tp"
+    )
+    return _K3_SHARED_TP
 
 
 def get_tp_group() -> GroupCoordinator:
     assert _TP is not None, "tensor model parallel group is not initialized"
     return _TP
+
+
+# K3 PP drafter overlap (VLLM_K3_DRAFT_OVERLAP=1): the last PP stage issues the
+# drafter on a side stream that runs concurrently with the next microbatch's
+# target forward. The drafter must then not share any communicator or
+# symmetric workspace with the target, so it gets its own TP and DCP group
+# coordinators over the same ranks (own PyNccl, custom all-reduce, symmetric
+# memory, FlashInfer all-reduce workspace and direct DCP workspaces).
+# k3_draft_groups() routes every collective issued inside it to those groups.
+_K3_DRAFT_TP: GroupCoordinator | None = None
+_K3_DRAFT_DCP: GroupCoordinator | None = None
+# Duplicates created collectively on ranks that never run the drafter (earlier
+# PP stages); kept only so their process groups stay alive until shutdown.
+_K3_DRAFT_IDLE_GROUPS: list[GroupCoordinator] = []
+
+
+def k3_draft_overlap_requested() -> bool:
+    import os
+
+    return os.environ.get("VLLM_K3_DRAFT_OVERLAP", "0") == "1"
+
+
+def k3_draft_comm_mode() -> str:
+    """``same`` (default): the drafter's duplicate groups use the same
+    collective algorithms as the target (custom all-reduce, FlashInfer fused
+    all-reduce + RMSNorm, direct symmetric-memory DCP), so drafts stay
+    bit-identical to running without overlap. ``nccl``: plain NCCL only, which
+    avoids peer-spinning kernels on the side stream at the cost of different
+    draft numerics (all-reduce order) and slower draft collectives."""
+    import os
+
+    mode = os.environ.get("VLLM_K3_DRAFT_OVERLAP_COMM", "same")
+    assert mode in ("same", "nccl"), mode
+    return mode
+
+
+def get_k3_draft_groups() -> tuple[GroupCoordinator | None, GroupCoordinator | None]:
+    return _K3_DRAFT_TP, _K3_DRAFT_DCP
+
+
+def is_k3_draft_group(group: Any) -> bool:
+    return bool(getattr(group, "_k3_draft", False))
+
+
+@contextmanager
+def k3_draft_groups():
+    """Route TP/DCP collectives issued inside to the drafter's own groups.
+
+    A no-op unless the drafter groups exist on this rank (overlap enabled and
+    this is the last PP stage). Restores the target groups on exit, also when
+    nested or on error. Objects that bind a group at construction (e.g. MLA's
+    ``MLADCPManager``) must be constructed inside this context as well.
+    """
+    global _TP, _DCP
+    if _K3_DRAFT_TP is None:
+        yield
+        return
+    saved = (_TP, _DCP)
+    _TP = _K3_DRAFT_TP
+    if _K3_DRAFT_DCP is not None:
+        _DCP = _K3_DRAFT_DCP
+    try:
+        yield
+    finally:
+        _TP, _DCP = saved
+
+
+def _init_k3_draft_groups(
+    tp_group_ranks: list[list[int]],
+    dcp_group_ranks: list[list[int]] | None,
+    backend: str,
+) -> None:
+    """Collectively create the drafter's TP/DCP duplicates on every rank.
+
+    torch.distributed.new_group is world-collective, so every rank builds every
+    group; only last-PP-stage ranks (where the drafter runs) also build device
+    communicators. The drafter's TP and DCP duplicates share one PyNccl
+    communicator (their collectives are issued in order on one stream) but
+    never the target's.
+    """
+    global _K3_DRAFT_TP, _K3_DRAFT_DCP
+    assert _PP is not None and _K3_DRAFT_TP is None
+    on_drafter = _PP.is_last_rank
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        k3_pynccl_share_tag,
+    )
+
+    local_rank = get_world_group().local_rank
+    nccl_only = k3_draft_comm_mode() == "nccl"
+    with k3_pynccl_share_tag("k3_draft"):
+        # CudaCommunicator enables custom all-reduce / symm-mem / FlashInfer
+        # all-reduce only for the "tp" group family.
+        tp = init_model_parallel_group(
+            tp_group_ranks,
+            local_rank,
+            backend,
+            group_name="k3dtp" if nccl_only else "tp",
+            use_device_communicator=on_drafter,
+        )
+        dcp = None
+        if dcp_group_ranks is not None:
+            dcp = init_model_parallel_group(
+                dcp_group_ranks,
+                local_rank,
+                backend,
+                group_name="dcp",
+                use_device_communicator=on_drafter,
+            )
+    groups = [g for g in (tp, dcp) if g is not None]
+    for g in groups:
+        g._k3_draft = True  # type: ignore[attr-defined]
+    if not on_drafter:
+        _K3_DRAFT_IDLE_GROUPS.extend(groups)
+        return
+    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        register_k3_draft_fi_group,
+    )
+
+    for g in groups:
+        register_k3_draft_fi_group(g.cpu_group, disabled=nccl_only)
+    _K3_DRAFT_TP, _K3_DRAFT_DCP = tp, dcp
+    logger.info(
+        "K3 drafter overlap: duplicate TP group %s and DCP group %s for the drafter",
+        tp.unique_name,
+        dcp.unique_name if dcp is not None else None,
+    )
 
 
 _ETP: GroupCoordinator | None = None
@@ -1699,6 +1850,8 @@ def graph_capture(device: torch.device):
         get_tp_group().graph_capture(context),
         get_pp_group().graph_capture(context),
         get_dp_group().graph_capture(context),
+        (_K3_SHARED_TP.graph_capture(context)
+         if _K3_SHARED_TP is not None else nullcontext()),
     ):
         yield context
 
@@ -2156,6 +2309,7 @@ def initialize_model_parallel(
         use_message_queue_broadcaster=True,
         group_name="tp",
     )
+    k3_tp_group_ranks = group_ranks
 
     global _ETP
     assert _ETP is None, "Engram tensor-parallel group is already initialized"
@@ -2230,6 +2384,7 @@ def initialize_model_parallel(
         use_message_queue_broadcaster=True,
         group_name="dcp",
     )
+    k3_dcp_group_ranks = group_ranks if dcp_size > 1 else None
 
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
@@ -2347,6 +2502,14 @@ def initialize_model_parallel(
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 
+    if (
+        k3_draft_overlap_requested()
+        and pipeline_model_parallel_size > 1
+        and config.speculative_config is not None
+        and not enable_elastic_ep
+    ):
+        _init_k3_draft_groups(k3_tp_group_ranks, k3_dcp_group_ranks, backend)
+
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
@@ -2458,6 +2621,18 @@ def get_node_count() -> int:
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP, _ETP
+
+    global _K3_SHARED_TP
+    if _K3_SHARED_TP:
+        _K3_SHARED_TP.destroy()
+    _K3_SHARED_TP = None
+
+    global _K3_DRAFT_TP, _K3_DRAFT_DCP
+    for g in (_K3_DRAFT_DCP, _K3_DRAFT_TP, *_K3_DRAFT_IDLE_GROUPS):
+        if g is not None:
+            g.destroy()
+    _K3_DRAFT_TP = _K3_DRAFT_DCP = None
+    _K3_DRAFT_IDLE_GROUPS.clear()
 
     if _ETP and _ETP is not _TP:
         _ETP.destroy()

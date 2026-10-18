@@ -1122,6 +1122,69 @@ def get_mamba_prefill_checkpoint_position(
     return max(checkpoint_position, 0)
 
 
+def is_mamba_prefill_checkpoint_in_place(
+    query_start: int, checkpoint_col: int, mamba_block_size: int
+) -> bool:
+    """Whether a checkpoint column is the query's initial-state column.
+
+    Only a query starting inside a Mamba block checkpoints in place; see
+    ``resolve_mamba_prefill_checkpoint``.
+    """
+    return (
+        checkpoint_col >= 0
+        and query_start % mamba_block_size != 0
+        and checkpoint_col == (query_start - 1) // mamba_block_size
+    )
+
+
+def resolve_mamba_prefill_checkpoint(
+    query_start: int,
+    query_end: int,
+    checkpoint_position: int,
+    hash_block_size: int,
+    mamba_block_size: int,
+    checkpoint_alignment: int | None,
+) -> tuple[bool, int]:
+    """Whether a backend can export the checkpoint in this query, and the
+    block-table column that receives it (``-1`` when it cannot).
+
+    The scheduler, ``MambaManager`` and the worker-side metadata builder all
+    call this, so they agree on both the decision and the column.
+
+    - Block-aligned start: the column just below the running column,
+      ``cdiv(query_end, B) - 2``. It must be above the initial-state column,
+      which holds a published full-block state.
+    - Mid-block start: the initial-state column ``(query_start - 1) // B``.
+      That block is private to the request (the CoW copy of a partial hit, the
+      producer's own block after its partial hash moved, or a connector-loaded
+      block). The align pre-copy moves its state into the running column
+      before the forward, so the exporter can overwrite it. The running column
+      must differ from it, i.e. the query must cross a block boundary.
+      Checkpointing anywhere else would leave this block, which still holds
+      state@query_start, inside the next full-block registration.
+    """
+    if checkpoint_alignment is None:
+        return False, -1
+    assert checkpoint_alignment > 0
+
+    initial_state_col = (query_start - 1) // mamba_block_size
+    running_col = cdiv(query_end, mamba_block_size) - 1
+    if query_start % mamba_block_size != 0:
+        checkpoint_col = initial_state_col
+        has_free_column = running_col > initial_state_col
+    else:
+        checkpoint_col = running_col - 1
+        has_free_column = checkpoint_col > initial_state_col
+    valid = (
+        has_free_column
+        and query_start % hash_block_size == 0
+        and query_start + hash_block_size <= checkpoint_position
+        and query_start < checkpoint_position < query_end
+        and (checkpoint_position - query_start) % checkpoint_alignment == 0
+    )
+    return valid, checkpoint_col if valid else -1
+
+
 def is_mamba_prefill_checkpoint_valid(
     query_start: int,
     query_end: int,
@@ -1131,19 +1194,15 @@ def is_mamba_prefill_checkpoint_valid(
     checkpoint_alignment: int | None,
 ) -> bool:
     """Whether a backend can export the checkpoint in this query."""
-    if checkpoint_alignment is None:
-        return False
-    assert checkpoint_alignment > 0
-
-    initial_state_col = (query_start - 1) // mamba_block_size
-    checkpoint_col = cdiv(query_end, mamba_block_size) - 2
-    return (
-        query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
-        and query_start + hash_block_size <= checkpoint_position
-        and query_start < checkpoint_position < query_end
-        and (checkpoint_position - query_start) % checkpoint_alignment == 0
+    valid, _ = resolve_mamba_prefill_checkpoint(
+        query_start=query_start,
+        query_end=query_end,
+        checkpoint_position=checkpoint_position,
+        hash_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        checkpoint_alignment=checkpoint_alignment,
     )
+    return valid
 
 
 @dataclass(frozen=True)

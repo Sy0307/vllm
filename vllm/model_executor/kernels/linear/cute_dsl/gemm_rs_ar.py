@@ -879,8 +879,10 @@ class GemmRsAr:
     workspace; that is outside this integration's current scope.
     """
 
-    def __init__(self, *, max_M: int, N: int, all_reduce: bool = False) -> None:
-        tp_group = get_tp_group()
+    def __init__(
+        self, *, max_M: int, N: int, all_reduce: bool = False, tp_group=None
+    ) -> None:
+        tp_group = get_tp_group() if tp_group is None else tp_group
         group = tp_group.device_group
         rank = tp_group.rank_in_group
         world_size = tp_group.world_size

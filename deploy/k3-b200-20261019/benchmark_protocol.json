@@ -1,0 +1,21 @@
+{
+  "concurrency": 96,
+  "max_num_seqs": 192,
+  "warmup_requests_per_lane": 10,
+  "formal_sending_seconds": 3600,
+  "warmup_grace_seconds": 1800,
+  "seed": 42,
+  "num_dataset_entries": 393,
+  "scenario": "inferencex-agentx-mvp",
+  "dataset": "semianalysis_cc_traces_weka_062126",
+  "synthetic_acceptance_rates": [
+    0.8,
+    0.6,
+    0.45,
+    0.35
+  ],
+  "speculative_tokens": 4,
+  "score_denominator": "formal start through final response including native drain",
+  "warmup_note": "10 is the requested per-lane warmup setting, not 960 successful responses. Errors and cancellation are retained in exported evidence.",
+  "tpot_definition": "Per-request full decode duration / (output tokens - 1), percentiles across successful requests; not percentiles of individual streaming gaps."
+}

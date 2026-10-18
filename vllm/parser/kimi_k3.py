@@ -23,6 +23,29 @@ if TYPE_CHECKING:
 class KimiK3Parser(DelegatingParser):
     """Compose the Kimi K3 reasoning and tool parsers for XTML output."""
 
+    _prompt_reasoning_ended: bool = False
+
+    def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
+        self._prompt_reasoning_ended = self.is_reasoning_end(list(prompt_token_ids))
+
+    def extract_reasoning(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> tuple[str | None, str | None]:
+        if self._prompt_reasoning_ended and isinstance(
+            self._reasoning_parser, KimiK3ReasoningParser
+        ):
+            return None, self._reasoning_parser._content_after_reasoning(
+                model_output, request
+            )
+        return super().extract_reasoning(model_output, request)
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if self._prompt_reasoning_ended:
+            return 0
+        return super().count_reasoning_tokens(token_ids)
+
     # TODO: Switch Kimi K3 to the parser engine once its XTML reasoning/tool
     # path is covered there.
     def _extract_tool_calls(
@@ -102,6 +125,11 @@ class KimiK3Parser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
+        if (
+            prompt_token_ids is not None
+            and not self._stream_state.prompt_reasoning_checked
+        ):
+            self.set_prompt_token_ids(prompt_token_ids)
         state = self._stream_state
         previous_content = state.previous_text if state.reasoning_ended else ""
         delta_message = super().parse_delta(

@@ -140,6 +140,25 @@ def _normalize_k3_tool_messages(
     return normalized
 
 
+def _validate_k3_partial(messages: list[ChatCompletionMessageParam]) -> bool:
+    for index, message in enumerate(messages):
+        if not message.get("partial", False):
+            continue
+        if index != len(messages) - 1 or message["role"] != "assistant":
+            raise VLLMValidationError(
+                "partial=true is only supported on the final assistant message",
+                parameter=f"messages[{index}].partial",
+            )
+        if not isinstance(message.get("content"), str) or message.get("tool_calls"):
+            raise VLLMValidationError(
+                "Kimi K3 Partial Mode requires a text content prefix "
+                "without tool_calls",
+                parameter=f"messages[{index}]",
+            )
+        return True
+    return False
+
+
 class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     """Render chat prompts with Kimi K3's Python XTML encoding.
 
@@ -169,14 +188,47 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
             kwargs["tool_choice"] = _dump_k3_template_value(params.tool_choice)
         if params.response_format is not None:
             kwargs["response_format"] = _dump_k3_template_value(params.response_format)
+        choice = kwargs.get("tool_choice")
+        if isinstance(choice, dict) and choice.get("type") == "function":
+            raise VLLMValidationError(
+                "tool_choice 'specified' is incompatible with thinking enabled",
+                parameter="tool_choice",
+            )
         kwargs["tokenize"] = True
-        return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
+        tokenizer = self.get_tokenizer()
+        if not conversation or not conversation[-1].get("partial", False):
+            return tokenizer.apply_chat_template(conversation, **kwargs)
+
+        # Render request-level instructions before the unfinished assistant turn.
+        # The frozen K3 tokenizer otherwise appends them after that turn and
+        # ignores continue_final_message. Preserve its segment-wise tokenization.
+        kwargs["add_generation_prompt"] = False
+        prefix = tokenizer.apply_chat_template(conversation[:-1], **kwargs)
+        final = tokenizer.apply_chat_template(
+            [conversation[-1]],
+            tokenize=True,
+            return_dict=False,
+            add_generation_prompt=False,
+            thinking=kwargs.get("thinking", True),
+            thinking_effort=None,
+        )
+        closing = tokenizer.encode(
+            "<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>",
+            add_special_tokens=False,
+        )
+        if not closing or final[-len(closing) :] != closing:
+            raise VLLMValidationError(
+                "Kimi K3 tokenizer does not expose the expected Partial Mode boundary",
+                parameter="messages[-1].partial",
+            )
+        return prefix + final[: -len(closing)]
 
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        partial = _validate_k3_partial(messages)
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
@@ -186,6 +238,8 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         )
 
         rendered_conversation = _normalize_k3_tool_messages(conversation)
+        if partial:
+            rendered_conversation[-1]["partial"] = True
         prompt = parse_dec_only_prompt(
             self._apply_chat_template(rendered_conversation, params)
         )
@@ -201,6 +255,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        partial = _validate_k3_partial(messages)
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
@@ -210,6 +265,8 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         )
 
         rendered_conversation = _normalize_k3_tool_messages(conversation)
+        if partial:
+            rendered_conversation[-1]["partial"] = True
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
         if mm_data is not None:

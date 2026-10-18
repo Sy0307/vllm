@@ -1,0 +1,9 @@
+{
+  "root": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019",
+  "serving_archive": "runtime-dependencies.tar.gz",
+  "serving_manifest": "environment-bundle.json",
+  "replay_archive": "replay-assets.tar.gz",
+  "replay_manifest": "replay-bundle.json",
+  "status": "asynchronous archiving; use the remote manifest only when environment-bundle-state.json stage is complete",
+  "restore_contract": "Fresh isolated Linux environment using the exact locked absolute prefixes. Existing environments must not be overwritten. Models, OS, driver and system CUDA toolkit are provisioned separately."
+}

@@ -4,6 +4,7 @@
 import asyncio
 import weakref
 from bisect import bisect_right
+import os
 from collections.abc import (
     AsyncGenerator,
     Callable,
@@ -139,6 +140,19 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 _language_model_by_module: "weakref.WeakKeyDictionary[nn.Module, VllmModel]" = (
     weakref.WeakKeyDictionary()
 )
+
+
+def _tower_unused_on_this_pp_rank() -> bool:
+    """Encoders only run where input embeddings are built (the first PP stage;
+    see GPUModelRunner.encoder_cache), so later stages need not hold towers."""
+    if os.environ.get("VLLM_SKIP_TOWER_ON_LATER_PP_RANKS", "1") != "1":
+        return False
+    from vllm.distributed.parallel_state import get_pp_group, model_parallel_is_initialized
+
+    if not model_parallel_is_initialized():
+        return False
+    pp = get_pp_group()
+    return pp.world_size > 1 and not pp.is_first_rank
 
 
 @runtime_checkable
@@ -378,6 +392,7 @@ class SupportsMultiModal(SupportsMultiModalEmbeddings, Protocol):
                     targets=targets,
                 )
                 if all(mm_config.get_limit_per_prompt(m) == 0 for m in modalities)
+                or _tower_unused_on_this_pp_rank()
                 else nullcontext()
             ):
                 yield

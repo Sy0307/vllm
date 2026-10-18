@@ -11,6 +11,7 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
+import json
 import math
 import os
 import queue
@@ -22,6 +23,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from typing import Any, TypeVar
 
+import numpy as np
 import torch
 import zmq
 
@@ -91,6 +93,24 @@ from vllm.v1.kv_cache_layout import KVCacheLayout
 from .metrics import MooncakeStoreConnectorStats
 
 logger = init_logger(__name__)
+
+# Probe only the part of the prompt beyond the scheduler's local prefix hit.
+_K3_LOOKUP_SKIP_LOCAL = os.environ.get("VLLM_K3_MOONCAKE_LOOKUP_SKIP_LOCAL", "0") == "1"
+# VLLM_K3_MC_EAGLE_TAIL_KEY is retired: upstream #60533/#60695 key the EAGLE
+# attention tail via boundary_puts. The name is still read (no effect).
+_K3_MC_EAGLE_TAIL_KEY = os.environ.get("VLLM_K3_MC_EAGLE_TAIL_KEY", "0") == "1"
+# Debug: while this file exists, each lookup also runs the full (unskipped)
+# probe and logs agreement statistics.
+_K3_LOOKUP_VERIFY_FILE = os.environ.get("VLLM_K3_MOONCAKE_LOOKUP_VERIFY_FILE", "")
+# Probe one rank namespace first, then all namespaces only below the pass-1 hit
+# bound. Same result as the single pass with far fewer keys on misses.
+_K3_LOOKUP_TWO_PASS = os.environ.get("VLLM_K3_MOONCAKE_LOOKUP_TWO_PASS", "0") == "1"
+# Debug: also run the single-pass probe and log result agreement.
+_K3_LOOKUP_TWO_PASS_VERIFY = (
+    os.environ.get("VLLM_K3_MOONCAKE_LOOKUP_TWO_PASS_VERIFY", "0") == "1"
+)
+# A/B within one session: JSON file whose "two_pass" key overrides the above.
+_K3_CTRL_FILE = os.environ.get("VLLM_K3_CTRL_FILE", "")
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
@@ -1503,6 +1523,8 @@ class MooncakeStoreWorker:
         )
 
         # Start lookup server on rank 0 for scheduler-side prefix queries
+        self._k3_verify_stats = {"n": 0, "same_effect": 0, "fast_higher": 0, "fast_lower": 0, "fast_s": 0.0, "full_s": 0.0}
+        self._k3_two_pass_stats = {"n": 0, "hit_diff": 0, "tail_diff": 0, "two_pass_s": 0.0, "single_pass_s": 0.0}
         self.lookup_server: LookupKeyServer | None = None
         if vllm_config.parallel_config.rank == 0:
             self.lookup_server = LookupKeyServer(self, vllm_config)
@@ -2118,17 +2140,105 @@ class MooncakeStoreWorker:
         return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
     def lookup(
-        self, num_tokens: int, block_hashes: Sequence[BlockHash]
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        skip_tokens: int = 0,
     ) -> MooncakeLookupResult:
         """Check how many prefix tokens exist in the store.
 
         Checks across all rank-specific key namespaces that may be loaded. A
         hit covering all ``num_tokens`` is re-derived below the request end so
         the last token is recomputed for sampling.
+
+        ``skip_tokens`` is the prefix the scheduler already holds in the local
+        GPU prefix cache. Units below it are only ever loaded locally, so they
+        are treated as present without probing the store; the scheduler
+        discards the result if its local hit shrinks below ``skip_tokens``.
         """
         if self._capacity_only:
             return MooncakeLookupResult(0)
+        if (
+            _K3_LOOKUP_VERIFY_FILE
+            and _K3_LOOKUP_SKIP_LOCAL
+            and skip_tokens > 0
+            and os.path.exists(_K3_LOOKUP_VERIFY_FILE)
+        ):
+            t0 = time.perf_counter()
+            fast = self._lookup_impl(num_tokens, block_hashes, skip_tokens)
+            t1 = time.perf_counter()
+            full = self._lookup_impl(num_tokens, block_hashes, 0)
+            t2 = time.perf_counter()
+            st = self._k3_verify_stats
+            st["n"] += 1
+            st["fast_s"] += t1 - t0
+            st["full_s"] += t2 - t1
+            if full.hit_length > skip_tokens and fast.hit_length < full.hit_length:
+                st["fast_lower"] += 1
+            elif fast.hit_length == full.hit_length or (
+                fast.hit_length <= skip_tokens and full.hit_length <= skip_tokens
+            ):
+                st["same_effect"] += 1
+            else:
+                st["fast_higher"] += 1
+            if st["n"] % 20 == 0:
+                logger.info("K3 Mooncake lookup verify: %s", dict(st))
+            return fast
+        if _K3_CTRL_FILE:
+            return self._lookup_impl(
+                num_tokens, block_hashes, skip_tokens, self._k3_ctrl_two_pass()
+            )
+        if _K3_LOOKUP_TWO_PASS and _K3_LOOKUP_TWO_PASS_VERIFY:
+            t0 = time.perf_counter()
+            fast = self._lookup_impl(num_tokens, block_hashes, skip_tokens, True)
+            t1 = time.perf_counter()
+            full = self._lookup_impl(num_tokens, block_hashes, skip_tokens, False)
+            t2 = time.perf_counter()
+            st = self._k3_two_pass_stats
+            st["n"] += 1
+            st["two_pass_s"] += t1 - t0
+            st["single_pass_s"] += t2 - t1
+            diff = fast != full
+            if fast.hit_length != full.hit_length:
+                st["hit_diff"] += 1
+            elif diff:
+                st["tail_diff"] += 1
+            if diff:
+                logger.warning(
+                    "K3 Mooncake two-pass mismatch: two-pass %s single-pass %s",
+                    fast,
+                    full,
+                )
+            if st["n"] % 50 == 0:
+                logger.info("K3 Mooncake two-pass verify: %s", dict(st))
+            return fast
+        return self._lookup_impl(num_tokens, block_hashes, skip_tokens)
 
+    def _k3_ctrl_two_pass(self) -> bool:
+        """Two-pass setting from VLLM_K3_CTRL_FILE, re-read at most every 2 s."""
+        now = time.monotonic()
+        cached = getattr(self, "_k3_ctrl_cache", None)
+        if cached is not None and now - cached[0] < 2.0:
+            return cached[1]
+        value = cached[1] if cached is not None else _K3_LOOKUP_TWO_PASS
+        try:
+            mtime = os.stat(_K3_CTRL_FILE).st_mtime_ns
+            if cached is None or mtime != cached[2]:
+                with open(_K3_CTRL_FILE) as f:
+                    value = bool(json.load(f).get("two_pass", _K3_LOOKUP_TWO_PASS))
+                logger.info("K3 ctrl applied: lookup two_pass=%s", value)
+        except (OSError, ValueError):
+            mtime = cached[2] if cached is not None else None
+        self._k3_ctrl_cache = (now, value, mtime)
+        return value
+
+    def _lookup_impl(
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        skip_tokens: int = 0,
+        two_pass: bool | None = None,
+    ) -> MooncakeLookupResult:
         token_len = self.coord.align_lookup_length(num_tokens)
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
@@ -2137,8 +2247,16 @@ class MooncakeStoreWorker:
         # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
+        # Per group: (group index, first candidate_meta index, unit count,
+        # namespaces per unit), for the vectorized existence check below.
+        candidate_groups: list[tuple[int, int, int, int]] = []
+        known_present: set[tuple[int, bytes]] = set()
+        skip_tokens = max(0, min(skip_tokens, token_len)) if _K3_LOOKUP_SKIP_LOCAL else 0
         fine_grained = self.coord.enable_partial_hash_hits
         lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
+        if two_pass is None:
+            two_pass = _K3_LOOKUP_TWO_PASS
+        two_pass_groups: list[tuple] = []
         for g_idx, db in enumerate(self.token_dbs):
             if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
                 continue
@@ -2146,7 +2264,9 @@ class MooncakeStoreWorker:
             key_prefixes = self._lookup_key_prefixes[g_idx]
             if fine_grained:
                 max_units = min(len(block_hashes), token_len // self.hash_block_size)
-                unit_ids: range | list[int] = range(max_units)
+                first = min(skip_tokens // self.hash_block_size, max_units)
+                unit_ids: range | list[int] = range(first, max_units)
+                known_ids: range | list[int] = range(first)
                 group_hashes: Sequence[BlockHash] = block_hashes
             else:
                 lookup_mask = lookup_masks[g_idx]  # type: ignore[index]
@@ -2159,21 +2279,59 @@ class MooncakeStoreWorker:
                     if lookup_mask is None
                     else min(max_chunks, len(lookup_mask))
                 )
+                first = min(skip_tokens // spec_block_size, mask_limit)
                 unit_ids = [
                     chunk_id
-                    for chunk_id in range(mask_limit)
+                    for chunk_id in range(first, mask_limit)
                     if lookup_mask is None or lookup_mask[chunk_id]
                 ]
-            for chunk_id in unit_ids:
-                h = group_hashes[chunk_id]
-                hash_hex = h.hex()
-                for key_prefix in key_prefixes:
-                    candidate_keys.append(
-                        PoolKey.build_key_string(key_prefix, hash_hex)
-                    )
-                candidate_meta.append((g_idx, bytes(h)))
+                known_ids = [
+                    chunk_id
+                    for chunk_id in range(first)
+                    if lookup_mask is None or lookup_mask[chunk_id]
+                ]
+            if known_ids:
+                known_present.update(
+                    (g_idx, bytes(group_hashes[chunk_id])) for chunk_id in known_ids
+                )
+            if not unit_ids:
+                continue
+            unit_hashes = [group_hashes[chunk_id] for chunk_id in unit_ids]
+            hexes = [h.hex() for h in unit_hashes]
+            if two_pass:
+                unit_size = self.hash_block_size if fine_grained else spec_block_size
+                two_pass_groups.append(
+                    (g_idx, unit_ids, unit_hashes, hexes, key_prefixes, unit_size)
+                )
+                continue
+            candidate_groups.append(
+                (g_idx, len(candidate_meta), len(unit_hashes), len(key_prefixes))
+            )
+            build_key = PoolKey.build_key_string
+            candidate_keys.extend(
+                [
+                    build_key(key_prefix, hash_hex)
+                    for hash_hex in hexes
+                    for key_prefix in key_prefixes
+                ]
+            )
+            candidate_meta.extend((g_idx, bytes(h)) for h in unit_hashes)
+
+        if two_pass:
+            if not two_pass_groups:
+                return MooncakeLookupResult(0)
+            two_pass_exists = self._k3_two_pass_exists(
+                block_hashes, token_len, known_present, two_pass_groups
+            )
+            if two_pass_exists is None:
+                return MooncakeLookupResult(0)
+            return self._finish_lookup(
+                num_tokens, block_hashes, token_len, two_pass_exists
+            )
 
         if not candidate_keys:
+            # Nothing beyond the local prefix to probe: the store cannot add
+            # anything the scheduler does not already hold.
             return MooncakeLookupResult(0)
 
         lookup_start = time.perf_counter()
@@ -2198,14 +2356,108 @@ class MooncakeStoreWorker:
         # A (group, hash) is "present" only when every namespace that will be
         # loaded has it (per-group count: sharded groups need every rank's
         # shard, replicated groups one namespace per unique KV head).
-        exists_set = set()
+        exists_set = set(known_present)
+        res_arr = np.asarray(res)
         pos = 0
-        for g_idx, hash_bytes in candidate_meta:
-            count = len(self._lookup_key_prefixes[g_idx])
-            if all(res[pos + j] == 1 for j in range(count)):
-                exists_set.add((g_idx, hash_bytes))
-            pos += count
+        for g_idx, meta_start, n_units, count in candidate_groups:
+            block = res_arr[pos : pos + n_units * count].reshape(n_units, count)
+            present = np.flatnonzero((block == 1).all(axis=1))
+            exists_set.update(candidate_meta[meta_start + int(i)] for i in present)
+            pos += n_units * count
 
+        return self._finish_lookup(num_tokens, block_hashes, token_len, exists_set)
+
+    def _k3_two_pass_exists(
+        self,
+        block_hashes: Sequence[BlockHash],
+        token_len: int,
+        known_present: set[tuple[int, bytes]],
+        groups: list[tuple],
+    ) -> set[tuple[int, bytes]] | None:
+        """K3: existence set equivalent to probing every rank namespace.
+
+        Pass 1 probes one namespace per unit. A unit missing there cannot be
+        present in all namespaces, so the hit computed from pass 1 bounds the
+        exact hit from above (the hit is monotone in the exists set). Pass 2
+        probes the remaining namespaces only for pass-1 units that start below
+        that bound plus two blocks, which covers the EAGLE drop and the tail
+        key search; units beyond it cannot change the hit or tail keys.
+        """
+        lookup_start = time.perf_counter()
+        build_key = PoolKey.build_key_string
+        keys1 = [
+            build_key(prefixes[0], hash_hex)
+            for _, _, _, hexes, prefixes, _ in groups
+            for hash_hex in hexes
+        ]
+        num_keys = len(keys1)
+        try:
+            res1 = np.asarray(self.store.batch_is_exist(keys1))
+            present1 = set(known_present)
+            first_pass = []
+            pos = 0
+            for g_idx, unit_ids, unit_hashes, _, _, _ in groups:
+                idx = np.flatnonzero(res1[pos : pos + len(unit_ids)] == 1)
+                pos += len(unit_ids)
+                first_pass.append(idx)
+                present1.update((g_idx, bytes(unit_hashes[int(i)])) for i in idx)
+            _, hit_bound = self.coord.find_longest_cache_hit(
+                block_hashes,
+                token_len,
+                ExternalCachedBlockPool(self.hash_block_size, present1),
+            )
+            exists_set = set(known_present)
+            if hit_bound > 0:
+                limit = hit_bound + 2 * max(db.block_size for db in self.token_dbs)
+                keys2: list[str] = []
+                pending: list[tuple[int, list[bytes], int]] = []
+                for (g_idx, unit_ids, unit_hashes, hexes, prefixes, unit_size), idx in zip(
+                    groups, first_pass
+                ):
+                    sel = [int(i) for i in idx if unit_ids[int(i)] * unit_size < limit]
+                    if not sel:
+                        continue
+                    rest = prefixes[1:]
+                    if not rest:
+                        exists_set.update((g_idx, bytes(unit_hashes[i])) for i in sel)
+                        continue
+                    keys2.extend(build_key(p, hexes[i]) for i in sel for p in rest)
+                    pending.append(
+                        (g_idx, [bytes(unit_hashes[i]) for i in sel], len(rest))
+                    )
+                if keys2:
+                    num_keys += len(keys2)
+                    res2 = np.asarray(self.store.batch_is_exist(keys2))
+                    pos = 0
+                    for g_idx, hashes, count in pending:
+                        block = res2[pos : pos + len(hashes) * count].reshape(
+                            len(hashes), count
+                        )
+                        pos += len(hashes) * count
+                        ok = np.flatnonzero((block == 1).all(axis=1))
+                        exists_set.update((g_idx, hashes[int(i)]) for i in ok)
+            self._record_kv_connector_operation(
+                "lookup_exists", time.perf_counter() - lookup_start, num_keys
+            )
+            return exists_set
+        except Exception as e:
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                num_keys,
+                status="error",
+                num_failed_keys=num_keys,
+            )
+            logger.error("Remote connection failed in lookup: %s", e)
+            return None
+
+    def _finish_lookup(
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        token_len: int,
+        exists_set: set[tuple[int, bytes]],
+    ) -> MooncakeLookupResult:
         cached_block_pool = ExternalCachedBlockPool(
             self.hash_block_size,
             exists_set,
@@ -2363,7 +2615,14 @@ class LookupKeyServer:
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(num_tokens, block_hashes)
+                    skip_tokens = (
+                        int.from_bytes(all_frames[4], byteorder="big")
+                        if len(all_frames) > 4
+                        else 0
+                    )
+                    result = self.store_worker.lookup(
+                        num_tokens, block_hashes, skip_tokens
+                    )
                     self.socket.send(encode_lookup_response(result))
 
                 elif msg_type == RESET_MSG:
@@ -2425,9 +2684,11 @@ class LookupKeyClient:
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
         self.futures: dict[str, Future[MooncakeLookupResult]] = {}
+        self._skips: dict[str, int] = {}
+        self._last_skip: dict[str, int] = {}
 
     def _lookup(
-        self, num_tokens: int, block_hashes: list[BlockHash]
+        self, num_tokens: int, block_hashes: list[BlockHash], skip_tokens: int = 0
     ) -> MooncakeLookupResult:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
@@ -2435,6 +2696,7 @@ class LookupKeyClient:
             num_tokens.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
+            max(0, skip_tokens).to_bytes(4, byteorder="big"),
         )
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
@@ -2446,13 +2708,23 @@ class LookupKeyClient:
         num_tokens: int,
         block_hashes: list[BlockHash],
         non_block: bool = False,
+        skip_tokens: int = 0,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
-        so the caller retries on a later step."""
+        so the caller retries on a later step.
+
+        ``skip_tokens`` (the local prefix hit) is fixed when the lookup is
+        submitted; ``lookup_skip_tokens(req_id)`` returns it for the caller's
+        validity check."""
+        if not _K3_LOOKUP_SKIP_LOCAL:
+            skip_tokens = 0
         future = self.futures.get(req_id)
         if future is None:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+            future = self.executor.submit(
+                self._lookup, num_tokens, list(block_hashes), skip_tokens
+            )
             self.futures[req_id] = future
+            self._skips[req_id] = skip_tokens
         if non_block and not future.done():
             return None
         try:
@@ -2462,9 +2734,16 @@ class LookupKeyClient:
             return MooncakeLookupResult(0)
         finally:
             del self.futures[req_id]
+            self._last_skip[req_id] = self._skips.pop(req_id, 0)
+
+    def lookup_skip_tokens(self, req_id: str) -> int:
+        """Local prefix length the last consumed lookup for ``req_id`` assumed."""
+        return self._last_skip.pop(req_id, 0)
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        self._skips.pop(req_id, None)
+        self._last_skip.pop(req_id, None)
         future = self.futures.pop(req_id, None)
         if future is not None:
             future.cancel()

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -21,6 +22,10 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+
+# VLLM_K3_NO_FORWARD_SAVE is retired: upstream #57775 always runs
+# wait_for_save() on no-forward steps. The name is still read (no effect).
+_K3_NO_FORWARD_SAVE = os.environ.get("VLLM_K3_NO_FORWARD_SAVE", "0") == "1"
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

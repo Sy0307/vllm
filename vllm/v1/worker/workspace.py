@@ -46,6 +46,10 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
         _workspace_lane.reset(token)
 
 
+# K3: reuse the views of get_simultaneous for identical specs on an unchanged
+# buffer (eager prefill layers request the same views every layer).
+_K3_WS_VIEW_CACHE = os.environ.get("VLLM_K3_WORKSPACE_VIEW_CACHE", "0") == "1"
+
 class WorkspaceManager:
     """Manager for workspace allocation.
 
@@ -74,6 +78,7 @@ class WorkspaceManager:
             {} for _ in self._current_workspaces
         ]
         self._locked: bool = False
+        self._k3_view_cache: dict = {}
 
     @staticmethod
     def _workspace_size_bytes(workspace: torch.Tensor | None) -> int:
@@ -190,6 +195,15 @@ class WorkspaceManager:
             List of tensor views into the workspace buffer, one per shape/dtype pair.
 
         """
+        if _K3_WS_VIEW_CACHE:
+            # Same specs on the same (unresized) buffer give the same views.
+            cache_key = (self._get_workspace_id(), shapes_and_dtypes)
+            cached = self._k3_view_cache.get(cache_key)
+            if (
+                cached is not None
+                and cached[0] is self._current_workspaces[cache_key[0]]
+            ):
+                return list(cached[1])
         actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
         aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
         total_bytes = sum(aligned_bytes)
@@ -199,12 +213,15 @@ class WorkspaceManager:
 
         current_workspace = self._ensure_workspace_size(total_bytes)
 
-        return [
+        views = [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
             .view(shapes_and_dtypes[i][1])
             .reshape(shapes_and_dtypes[i][0])
             for i in range(len(shapes_and_dtypes))
         ]
+        if _K3_WS_VIEW_CACHE:
+            self._k3_view_cache[cache_key] = (current_workspace, tuple(views))
+        return views
 
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
@@ -253,6 +270,9 @@ class WorkspaceManager:
             # old tensor when it still holds views into it (DBO leak).
             self._current_workspaces[workspace_id] = None
             del current_workspace
+            # K3 view cache entries pin the old buffer; drop them so the
+            # empty_cache() below can release it.
+            self._k3_view_cache.clear()
             # Release the freed segment back to CUDA so the caching
             # allocator can reuse the GPU memory for the larger
             # allocation below. Without this, each resize may leave a

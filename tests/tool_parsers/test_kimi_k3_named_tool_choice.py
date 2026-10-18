@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Named tool choice for Kimi K3: allowed when the XTML structural tag is
-attached (strict tool calling), rejected otherwise."""
+"""K3 rejects specified tools even when strict decoding is configured."""
 
 import pytest
 
@@ -53,14 +52,10 @@ def _parser():
     return KimiK3ToolParser(_DummyTokenizer())
 
 
-def test_named_choice_allowed_with_structural_tag():
-    req = _parser().adjust_request(_request(with_tag=True))
-    assert req.skip_special_tokens is False
-
-
-def test_named_choice_rejected_without_structural_tag():
-    with pytest.raises(VLLMValidationError):
-        _parser().adjust_request(_request(with_tag=False))
+@pytest.mark.parametrize("with_tag", [False, True])
+def test_named_choice_rejected_with_or_without_structural_tag(with_tag):
+    with pytest.raises(VLLMValidationError, match="specified.*thinking enabled"):
+        _parser().adjust_request(_request(with_tag=with_tag))
 
 
 def _custom_request(with_tag: bool) -> ResponsesRequest:
@@ -76,11 +71,7 @@ def _custom_request(with_tag: bool) -> ResponsesRequest:
     return req
 
 
-def test_named_custom_choice_allowed_with_structural_tag():
-    req = _parser().adjust_request(_custom_request(with_tag=True))
-    assert req.skip_special_tokens is False
-
-
-def test_named_custom_choice_rejected_without_structural_tag():
-    with pytest.raises(VLLMValidationError):
-        _parser().adjust_request(_custom_request(with_tag=False))
+@pytest.mark.parametrize("with_tag", [False, True])
+def test_named_custom_choice_rejected_with_or_without_structural_tag(with_tag):
+    with pytest.raises(VLLMValidationError, match="specified.*thinking enabled"):
+        _parser().adjust_request(_custom_request(with_tag=with_tag))

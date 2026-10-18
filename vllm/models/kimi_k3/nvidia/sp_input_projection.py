@@ -81,14 +81,30 @@ class KimiK3SPInputProjection:
         return projected[:num_tokens]
 
 
+def _env_shapes(name: str, default: str) -> tuple[int, ...]:
+    value = os.environ.get(name)
+    if value is None:
+        value = default
+    return tuple(int(x) for x in value.split(",") if x)
+
+
+# Multicast (multimem all-gather + matmul) shapes. The copy-engine fused
+# all-gather matmul has a ~0.4 ms floor from M=2560 on B200/TP8, so the
+# multimem path wins for most mixed-step sizes; the env lists override the
+# per-M choice. Multicast shapes are also eligible token shapes.
+_KDA_MC_SHAPES = _env_shapes("VLLM_K3_KDA_SP_MC_SHAPES", "")
+_SMLP_MC_SHAPES = _env_shapes("VLLM_K3_SMLP_SP_MC_SHAPES", "4096")
+
+
 class KimiK3ExtendedSPInputProjection(KimiK3SPInputProjection):
-    token_shapes = tuple(int(_x) for _x in (__import__('os').environ.get('VLLM_K3_KDA_SP_SHAPES') or '1536,3072,4096,6144,7680,7744,7808,8192').split(','))
+    multicast_shapes = _KDA_MC_SHAPES
+    token_shapes = tuple(sorted(set(_env_shapes('VLLM_K3_KDA_SP_SHAPES', '1536,3072,4096,6144,7680,7744,7808,8192')) | set(_KDA_MC_SHAPES)))
 
 
 class KimiK3SharedMLPInputProjection(KimiK3SPInputProjection):
-    token_shapes = tuple(int(_x) for _x in (__import__('os').environ.get('VLLM_K3_SMLP_SP_SHAPES') or '4096,6144,7680,7744,7808,8192').split(','))
+    multicast_shapes = _SMLP_MC_SHAPES
+    token_shapes = tuple(sorted(set(_env_shapes('VLLM_K3_SMLP_SP_SHAPES', '4096,6144,7680,7744,7808,8192')) | set(_SMLP_MC_SHAPES)))
     weight_shape = (1536, 7168)
-    multicast_shapes = (4096,)
 
 
 def maybe_init_kda_sp_input_projection(

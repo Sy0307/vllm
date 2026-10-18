@@ -472,6 +472,9 @@ class CommonAttentionMetadata:
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
+    # K3: per-``build_attn_metadata``-call scratch shared by the KV-cache groups'
+    # builders (same batch, different block tables); never outlives one call.
+    _k3_build_memo: dict | None = None
 
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]

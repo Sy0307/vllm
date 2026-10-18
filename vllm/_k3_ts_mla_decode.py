@@ -51,11 +51,234 @@ _K3_VAR_SPLIT_Q = _os.environ.get('VLLM_K3_TS_VAR_SPLIT_Q', '0') == '1'
 _K3_VS_ALPHA = float(_os.environ.get('VLLM_K3_TS_VS_ALPHA', '1.0'))
 _K3_VS_CEIL = _os.environ.get('VLLM_K3_TS_VS_CEIL', '1') == '1'
 _K3_SKIP_CORR = float(_os.environ.get('VLLM_K3_TS_SKIP_CORR', '0.0') or 0.0)
+# Static work order for the var-split persistent scheduler (needs the K3
+# tokenspeed_mla overlay whose scheduler reads block_split_kvs[B:]).
+_K3_WORK_PERM = _os.environ.get('VLLM_K3_TS_WORK_PERM', '0') == '1'
+# 'snake': longest-first snake over clusters; 'lpt': batched longest-processing-
+# time (least-loaded cluster first, Triton, falls back to snake if it cannot
+# place every item); 'auto': lpt from 56 requests of 96 heads x 5 tokens (B=64:
+# 1.11-1.15x over snake; at B<=48 it only adds ~45 us of ordering per step).
+_K3_WORK_ORDER = _os.environ.get('VLLM_K3_TS_WORK_ORDER', 'auto')
+_K3_LPT_MIN_ROWS = int(_os.environ.get('VLLM_K3_TS_LPT_MIN_ROWS', str(56 * 5 * 96)))
+# One Triton launch for split counts + work order (instead of ~15 torch ops).
+_K3_FUSED_ORDER = _os.environ.get('VLLM_K3_TS_FUSED_ORDER', '1') == '1'
+# Single-split requests write O/LSE from the split kernel (needs the overlay kernel).
+_K3_DIRECT_SINGLE = _os.environ.get('VLLM_K3_TS_DIRECT_SINGLE', '0') == '1'
+_K3_ORDER_MAX_ITEMS = 8192
 from tokenspeed_mla.utils import (
     get_max_active_clusters,
     get_num_sm,
     torch_to_cutlass_dtype,
 )
+
+
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _k3_lpt_kernel(
+    cost_ptr,  # fp32 [N] item costs in descending order (0 = empty item)
+    order_ptr,  # int32 [N] item ids in the same order
+    nne_ptr,  # int32 [1] number of non-empty items
+    perm_ptr,  # int32 [N] out: slot -> item
+    ok_ptr,  # int32 [1] out: 1 if every item was placed
+    N,
+    n_cl,
+    K: tl.constexpr,
+    BLOCK_C: tl.constexpr,
+    MAX_CAP: tl.constexpr,
+):
+    cl = tl.arange(0, BLOCK_C)
+    in_grid = cl < n_cl
+    # cluster cl owns slots cl, cl + n_cl, ... < N
+    cap = tl.where(in_grid, N // n_cl + (cl < N % n_cl).to(tl.int32), 0)
+    loads = tl.zeros([BLOCK_C], dtype=tl.float32)
+    cnt = tl.zeros([BLOCK_C], dtype=tl.int32)
+    kk = tl.arange(0, K)
+    n_ne = tl.load(nne_ptr)
+    for r in range(0, (n_ne + K - 1) // K):
+        idx = r * K + kk
+        valid = idx < n_ne
+        c = tl.load(cost_ptr + idx, mask=valid, other=0.0)
+        it = tl.load(order_ptr + idx, mask=valid, other=0)
+        open_ = cnt < cap
+        eff = tl.where(open_, loads, float("inf"))
+        less = (eff[None, :] < eff[:, None]) | (
+            (eff[None, :] == eff[:, None]) & (cl[None, :] < cl[:, None])
+        )
+        rank = tl.sum(less.to(tl.int32), axis=1)
+        # the j-th least-loaded open cluster takes the j-th largest item
+        sel = (rank[:, None] == kk[None, :]) & valid[None, :] & open_[:, None]
+        got = tl.sum(sel.to(tl.int32), axis=1) > 0
+        item = tl.sum(tl.where(sel, it[None, :], 0), axis=1)
+        tl.store(perm_ptr + cl + n_cl * cnt, item, mask=got)
+        loads += tl.sum(tl.where(sel, c[None, :], 0.0), axis=1)
+        cnt += got.to(tl.int32)
+    placed = tl.sum(cnt, axis=0)
+    tl.store(ok_ptr, (placed == n_ne).to(tl.int32))
+    # empty items fill the remaining slots of each cluster
+    free = cap - cnt
+    off = tl.cumsum(free, 0) - free
+    for t in range(0, MAX_CAP):
+        e = n_ne + off + t
+        m = (t < free) & (e < N)
+        item = tl.load(order_ptr + e, mask=m, other=0)
+        tl.store(perm_ptr + cl + n_cl * (cnt + t), item, mask=m)
+
+
+@triton.jit
+def _k3_order_kernel(
+    seqs_ptr,  # int32 [B] per-request cache lengths
+    out_ptr,  # int32 [B + N] out: split counts, then slot -> item
+    order_ptr,  # int32 [N] out (LPT only): items by descending cost
+    cost_ptr,  # fp32 [N] out (LPT only): their costs
+    nne_ptr,  # int32 [1] out (LPT only): non-empty items
+    B,
+    S,
+    s_cap,
+    n_cl,
+    split_num,  # q_len > 1: round(n_sm * alpha * 1024); q_len == 1: n_sm
+    split_den,  # q_len > 1: q_len_eff * 1024; q_len == 1: 1
+    k_tile,
+    CEIL: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    WRITE_SORTED: tl.constexpr,
+):
+    # Same integer math as the torch path: split = clamp(ceil(len * num / (sum * den)), 1, s_cap)
+    ob = tl.arange(0, BLOCK_B)
+    lens_b = tl.load(seqs_ptr + ob, mask=ob < B, other=0).to(tl.int64)
+    tot = tl.maximum(tl.sum(lens_b, axis=0), 1)
+    den = tot * split_den
+    nb = lens_b * split_num
+    sb = (nb + den - 1) // den if CEIL else nb // den
+    sb = tl.minimum(tl.maximum(sb, 1), s_cap)
+    tl.store(out_ptr + ob, sb.to(tl.int32), mask=ob < B)
+    # work items in cluster-batch order: index = (split * B + b) * S + s
+    N = s_cap * B * S
+    i = tl.arange(0, BLOCK_N)
+    valid = i < N
+    b = (i // S) % B
+    sp = (i // (S * B)).to(tl.int64)
+    li = tl.load(seqs_ptr + b, mask=valid, other=0).to(tl.int64)
+    ni = li * split_num
+    si = (ni + den - 1) // den if CEIL else ni // den
+    si = tl.minimum(tl.maximum(si, 1), s_cap)
+    kt = (li + k_tile - 1) // k_tile
+    per = (kt + si - 1) // si
+    cnt = tl.maximum(tl.minimum(kt, (sp + 1) * per) - sp * per, 0)
+    cnt = tl.where(sp < si, cnt, 0)
+    cost = tl.where(cnt > 0, cnt * 8 + 24, 0)
+    # stable descending sort by cost: key = cost << 14 | (16383 - i)
+    key = tl.where(valid, (tl.minimum(cost, 131071) << 14) | (16383 - i), -1).to(tl.int32)
+    key = tl.sort(key, descending=True)
+    item = 16383 - (key & 16383)
+    r = i
+    j = r // n_cl
+    p = r % n_cl
+    rev = (j % 2 == 1) & (j < N // n_cl)
+    slot = j * n_cl + tl.where(rev, n_cl - 1 - p, p)
+    tl.store(out_ptr + B + slot, item, mask=valid)
+    if WRITE_SORTED:
+        tl.store(order_ptr + r, item, mask=valid)
+        tl.store(cost_ptr + r, (key >> 14).to(tl.float32), mask=valid)
+        tl.store(nne_ptr, tl.sum((cnt > 0).to(tl.int32), axis=0))
+
+
+def _k3_split_and_order(
+    seqs: torch.Tensor,
+    B: int,
+    S: int,
+    s_cap: int,
+    n_cl: int,
+    k_tile: int,
+    split_num: int,
+    split_den: int,
+    use_lpt: bool,
+) -> torch.Tensor:
+    """[B split counts | slot -> item permutation] in one launch (two with LPT)."""
+    N = s_cap * B * S
+    n_cl = max(1, min(n_cl, N))
+    dev = seqs.device
+    out = torch.empty(B + N, dtype=torch.int32, device=dev)
+    lpt = use_lpt and n_cl >= 2
+    if lpt:
+        order = torch.empty(N, dtype=torch.int32, device=dev)
+        cost = torch.empty(N, dtype=torch.float32, device=dev)
+        nne = torch.empty(1, dtype=torch.int32, device=dev)
+    else:
+        order = cost = nne = out
+    _k3_order_kernel[(1,)](
+        seqs, out, order, cost, nne, B, S, s_cap, n_cl, split_num, split_den, k_tile,
+        CEIL=_K3_VS_CEIL, BLOCK_B=triton.next_power_of_2(B),
+        BLOCK_N=triton.next_power_of_2(N), WRITE_SORTED=lpt, num_warps=8,
+    )
+    if lpt:
+        perm = torch.empty(N, dtype=torch.int32, device=dev)
+        ok = torch.empty(1, dtype=torch.int32, device=dev)
+        _k3_lpt_kernel[(1,)](
+            cost, order, nne, perm, ok, N, n_cl,
+            K=16, BLOCK_C=triton.next_power_of_2(n_cl), MAX_CAP=N // n_cl + 1,
+            num_warps=4,
+        )
+        tail = out[B:]
+        tail.copy_(torch.where(ok.bool(), perm, tail))
+    return out
+
+
+@functools.cache
+def _k3_num_clusters(cluster_size: int) -> int:
+    # Persistent grid: cluster c takes cluster-batch slots c, c + n, ...
+    return get_max_active_clusters(cluster_size)
+
+
+def _k3_work_perm(
+    split: torch.Tensor,
+    seqs: torch.Tensor,
+    B: int,
+    S: int,
+    s_cap: int,
+    n_cl: int,
+    k_tile: int,
+    use_lpt: bool = False,
+) -> torch.Tensor:
+    """Longest-first snake order of the (split, b, s) work items over the
+    persistent clusters. Returns int32 [s_cap * B * S], a permutation of the
+    cluster-batch indices; device-only ops, so it is graph-capturable."""
+    dev = split.device
+    kt = (seqs.to(torch.int64) + k_tile - 1) // k_tile
+    n = split.to(torch.int64)
+    per = (kt + n - 1) // n
+    sp = torch.arange(s_cap, device=dev, dtype=torch.int64).view(-1, 1)
+    cnt = (torch.minimum(kt, (sp + 1) * per) - sp * per).clamp_(min=0)
+    cnt = torch.where(sp < n, cnt, 0)
+    # cluster-batch index = (split * B + b) * S + s, s fastest
+    cnt = cnt.unsqueeze(-1).expand(s_cap, B, S).reshape(-1)
+    # fixed per-item cost ~3 k-tiles (pipeline fill + epilogue); empty items 0
+    cost = torch.where(cnt > 0, cnt * 8 + 24, 0)
+    order = torch.argsort(cost, descending=True, stable=True)
+    N = cnt.numel()
+    n_cl = max(1, min(n_cl, N))
+    r = torch.arange(N, device=dev, dtype=torch.int64)
+    j, p = r // n_cl, r % n_cl
+    rev = (j % 2 == 1) & (j < N // n_cl)
+    slot = j * n_cl + torch.where(rev, n_cl - 1 - p, p)
+    perm = torch.empty(N, dtype=torch.int32, device=dev)
+    perm[slot] = order.to(torch.int32)
+    if not use_lpt or n_cl < 2:
+        return perm
+    order32 = order.to(torch.int32)
+    cost_sorted = cost[order].to(torch.float32)
+    n_ne = (cnt > 0).sum().to(torch.int32).view(1)
+    lpt = torch.empty(N, dtype=torch.int32, device=dev)
+    ok = torch.empty(1, dtype=torch.int32, device=dev)
+    _k3_lpt_kernel[(1,)](
+        cost_sorted, order32, n_ne, lpt, ok, N, n_cl,
+        K=16, BLOCK_C=triton.next_power_of_2(n_cl), MAX_CAP=N // n_cl + 1,
+        num_warps=4,
+    )
+    return torch.where(ok.bool(), lpt, perm)
 
 
 @functools.cache
@@ -170,6 +393,8 @@ def _get_compiled_mla_kernel(
     use_pdl: bool = False,
     return_lse: bool = False,  # DCP: enable LSE output
     compute_capability: tuple[int, int] = (0, 0),
+    use_work_perm: bool = False,
+    direct_single: bool = False,
 ) -> Callable:
     """Compile and cache an MLA decode kernel.
 
@@ -218,6 +443,10 @@ def _get_compiled_mla_kernel(
     if is_fp8:
         # DCP (cp_world) strided global-coordinate causal masking is fp8-only.
         kernel_kwargs["cp_world"] = cp_world
+    if use_work_perm:
+        kernel_kwargs["use_work_perm"] = True
+    if direct_single:
+        kernel_kwargs["k3_direct_single"] = True
     kernel_obj = KernelClass(**kernel_kwargs)
 
     # All dimensions as sym_int — this matches the original kernel's use of
@@ -310,7 +539,8 @@ def _get_compiled_mla_kernel(
     if is_var_split_kv:
         block_split_kvs_fake = cute.runtime.make_fake_compact_tensor(
             cutlass.Int32,
-            (sym_batch,),
+            # work order: [B split counts | cluster-batch permutation]
+            (cute.sym_int() if use_work_perm else sym_batch,),
             assumed_align=4,
         )
     else:
@@ -593,6 +823,7 @@ def tokenspeed_mla_decode(
 
     is_var_split_kv = False
     block_split_kvs = None
+    use_work_perm = False
     skip_correction_threshold = _K3_SKIP_CORR
 
     # For fixed-length input, set is_persistent to True; otherwise, set to False.
@@ -606,12 +837,29 @@ def tokenspeed_mla_decode(
     if is_var_seq and is_fp8 and _K3_VAR_SPLIT and (q_len == 1 or (_K3_VAR_SPLIT_Q and B >= 8)):
         per_split = B * H_eff * q_len_eff * (kv_lora_rank + 1) * 4
         s_cap = min(_K3_MAX_SPLITS, workspace_buffer.numel() // max(1, per_split))
+        # initialize_workspace places acc_lse at cosize(acc_o) * 32 // 8 in Int32:
+        # acc_o >= 2^26 floats (256 MB) wraps the offset negative and the LSE
+        # partials land before the workspace (seen as KV-cache corruption with a
+        # 512 MB workspace). The production workspace (222 MB at H=96) stays below.
+        s_cap = min(s_cap, ((1 << 31) - 1) // 32 // max(1, B * H_eff * q_len_eff * kv_lora_rank))
         if s_cap > split_kv:
             n_sm = max_active_blocks
             # k3_memo: per-step dict owned by the caller's decode metadata (one
             # object per step, shared by every MLA layer of the stage).
             memo_key = (id(cache_seqs), B, q_len_eff, s_cap, n_sm, _K3_VS_ALPHA, _K3_VS_CEIL)
             block_split_kvs = k3_memo.get(memo_key) if k3_memo is not None else None
+            k3_fused = (_K3_WORK_PERM and _K3_FUSED_ORDER
+                        and s_cap * B * q_len_eff <= _K3_ORDER_MAX_ITEMS)
+            if block_split_kvs is None and k3_fused:
+                k3_rows = B * q_len * H
+                block_split_kvs = _k3_split_and_order(
+                    cache_seqs, B, q_len_eff, s_cap,
+                    _k3_num_clusters(2 if mma_qk_tiler_mn[0] == 128 else 1),
+                    mma_qk_tiler_mn[1],
+                    n_sm if q_len == 1 else int(round(n_sm * _K3_VS_ALPHA * 1024)),
+                    1 if q_len == 1 else q_len_eff * 1024,
+                    _K3_WORK_ORDER == 'lpt' or (
+                        _K3_WORK_ORDER == 'auto' and k3_rows >= _K3_LPT_MIN_ROWS))
             tot = None if block_split_kvs is not None else torch.clamp(cache_seqs.sum(), min=1)
             if block_split_kvs is not None:
                 pass
@@ -631,6 +879,20 @@ def tokenspeed_mla_decode(
                 # graph records one computation that all layers read.
                 k3_memo[memo_key] = block_split_kvs
             split_kv = s_cap
+            if _K3_WORK_PERM and not k3_fused:
+                perm_key = ('k3_work_perm',) + memo_key
+                ordered = k3_memo.get(perm_key) if k3_memo is not None else None
+                if ordered is None:
+                    ordered = torch.cat((block_split_kvs, _k3_work_perm(
+                        block_split_kvs, cache_seqs, B, q_len_eff, s_cap,
+                        _k3_num_clusters(2 if mma_qk_tiler_mn[0] == 128 else 1),
+                        mma_qk_tiler_mn[1],
+                        use_lpt=_K3_WORK_ORDER == 'lpt' or (
+                            _K3_WORK_ORDER == 'auto' and B * q_len * H >= _K3_LPT_MIN_ROWS))))
+                    if k3_memo is not None:
+                        k3_memo[perm_key] = ordered
+                block_split_kvs = ordered
+            use_work_perm = _K3_WORK_PERM
             workspace_size = BlackwellMultiHeadLatentAttentionForwardFP8.get_workspace_size(
                 H_eff, q_len_eff, kv_lora_rank, B, split_kv, cutlass.Float32
             )
@@ -675,6 +937,8 @@ def tokenspeed_mla_decode(
         use_pdl=enable_pdl,
         return_lse=return_lse,
         compute_capability=compute_capability,
+        use_work_perm=use_work_perm,
+        direct_single=_K3_DIRECT_SINGLE and is_var_split_kv,
     )
 
     # DCP: allocate real LSE tensor when return_lse=True (DCP path). torch.zeros

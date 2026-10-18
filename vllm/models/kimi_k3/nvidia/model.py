@@ -3,6 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
+import os
 from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -135,6 +136,27 @@ logger = init_logger(__name__)
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
+# Overlap the shared experts with MegaMoE on the aux stream for batches with at
+# most this many local tokens (0 disables). MegaMoE is a whole-grid launch, so
+# it gives up _K3_MEGAMOE_RESERVED_SMS SMs for the shared-expert branch.
+_K3_SHARED_OVERLAP_MAX_TOKENS = int(
+    os.environ.get("VLLM_K3_SHARED_OVERLAP_MAX_TOKENS", "0")
+)
+_K3_MEGAMOE_RESERVED_SMS = int(os.environ.get("VLLM_K3_MEGAMOE_RESERVED_SMS", "16"))
+# Use the plain GEMM + lamport reduce-scatter instead of the fused GEMM+RS for
+# the overlapped shared experts (changes the reduction order, so off by default).
+_K3_SHARED_OVERLAP_PLAIN_RS = os.environ.get("VLLM_K3_SHARED_OVERLAP_PLAIN_RS") == "1"
+# Size the MegaMoE symmetric buffer for the SP-local token count instead of the
+# global batch budget (see KimiK3MegaMoEExperts.__init__).
+_K3_MEGAMOE_SP_LOCAL_CAPACITY = (
+    os.environ.get("VLLM_K3_MEGAMOE_SP_LOCAL_CAPACITY", "1") == "1"
+)
+# Write the last PP rank's gathered output of captured graphs into one shared
+# buffer (see KimiLinearModel._persist_captured_output).
+_K3_SHARED_CAPTURE_OUTPUT = os.environ.get("VLLM_K3_SHARED_CAPTURE_OUTPUT", "1") == "1"
+# Size non-first PP stages' receive buffers for SP-local rows.
+_K3_SP_LOCAL_PP_BUFFERS = os.environ.get("VLLM_K3_SP_LOCAL_PP_BUFFERS", "1") == "1"
+
 
 def use_kimi_k3_sequence_parallel(vllm_config: VllmConfig) -> bool:
     """Select Kimi K3's model-level sequence parallel path.
@@ -247,6 +269,7 @@ class KimiMLP(nn.Module):
         prefix: str = "",
         activation_situ_beta: float | None = None,
         activation_situ_linear_beta: float | None = None,
+        use_shared_tp: bool = False,
     ) -> None:
         super().__init__()
 
@@ -259,6 +282,22 @@ class KimiMLP(nn.Module):
         )
         replicate = use_sequence_parallel and not self.shard_sequence_parallel
 
+        from vllm.models.kimi_k3.nvidia.shared_tp import get_shared_tp_resources
+
+        resources = (
+            get_shared_tp_resources()
+            if self.shard_sequence_parallel and use_shared_tp
+            else None
+        )
+        self.shared_tp_group = None if resources is None else resources[0]
+        tp_kwargs = {}
+        if resources is not None:
+            self.sp_input_projection = resources[1]
+            tp_kwargs = {
+                "tp_rank": resources[0].rank_in_group,
+                "tp_size": resources[0].world_size,
+            }
+
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -266,6 +305,7 @@ class KimiMLP(nn.Module):
             quant_config=quant_config,
             disable_tp=replicate,
             prefix=f"{prefix}.gate_up_proj",
+            **tp_kwargs,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -277,8 +317,25 @@ class KimiMLP(nn.Module):
             reduce_results=False if self.shard_sequence_parallel else reduce_results,
             disable_tp=replicate,
             prefix=f"{prefix}.down_proj",
+            **tp_kwargs,
         )
+        if get_shared_tp_resources() is not None:
+            expected_tp = 4 if use_shared_tp else 8
+            assert self.gate_up_proj.tp_size == expected_tp
+            assert self.down_proj.tp_size == expected_tp
+            if not use_shared_tp:
+                logger.info(
+                    "K3 shared-only layout: dense %s retains TP%d, gate/up=%s, down=%s",
+                    prefix,
+                    expected_tp,
+                    tuple(self.gate_up_proj.weight.shape),
+                    tuple(self.down_proj.weight.shape),
+                )
         self.gemm_rs_ar = None
+        # Set while this MLP runs beside MegaMoE on the aux stream with
+        # VLLM_K3_SHARED_OVERLAP_PLAIN_RS: the fused GEMM+reduce-scatter is then
+        # skipped for the plain GEMM + lamport RS.
+        self._k3_overlapped = False
         # RS requires sequence sharding; AR operates on replicated tokens.
         use_gemm_rs_ar = self.shard_sequence_parallel or (
             not use_sequence_parallel and reduce_results
@@ -288,10 +345,10 @@ class KimiMLP(nn.Module):
                 get_gemm_rs_ar,
             )
 
-            gemm_rs_ar = get_gemm_rs_ar()
-            if gemm_rs_ar.can_run(self.down_proj):
+            gemm_rs_ar = get_gemm_rs_ar() if resources is None else resources[2]
+            if gemm_rs_ar is not None and gemm_rs_ar.can_run(self.down_proj):
                 self.gemm_rs_ar = gemm_rs_ar
-            else:
+            elif gemm_rs_ar is not None:
                 gemm_rs_ar.warn_incompatible_projection()
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
@@ -317,20 +374,38 @@ class KimiMLP(nn.Module):
                 gate_up = self.sp_input_projection.try_apply(
                     x,
                     self.gate_up_proj,
-                    x.shape[0] * get_tensor_model_parallel_world_size(),
+                    x.shape[0] * (
+                        self.shared_tp_group.world_size
+                        if self.shared_tp_group is not None
+                        else get_tensor_model_parallel_world_size()
+                    ),
                 )
             if gate_up is None:
-                x = sp_all_gather(x)
+                if self.shared_tp_group is None:
+                    x = sp_all_gather(x)
+                else:
+                    from vllm.models.kimi_k3.nvidia.shared_tp import shared_collective
+
+                    x = shared_collective(self.shared_tp_group, "all_gather", x)
         if gate_up is None:
             gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
 
-        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
+        if (
+            self.gemm_rs_ar is not None
+            and not self._k3_overlapped
+            and self.gemm_rs_ar.should_run(x)
+        ):
             return self.gemm_rs_ar.apply(x, self.down_proj)
 
         x, _ = self.down_proj(x)
         if self.shard_sequence_parallel:
-            x = sp_reduce_scatter(x)
+            if self.shared_tp_group is None:
+                x = sp_reduce_scatter(x)
+            else:
+                from vllm.models.kimi_k3.nvidia.shared_tp import shared_collective
+
+                x = shared_collective(self.shared_tp_group, "reduce_scatter", x)
         return x
 
 
@@ -384,6 +459,18 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
         self.activation = activation
         self.activation_beta = activation_beta
         self.activation_linear_beta = activation_linear_beta
+        # MegaMoE always runs under SP (use_kimi_k3_sequence_parallel), so a
+        # rank only ever dispatches cdiv(num_tokens, tp) rows. The base class
+        # sizes the per-rank buffer for the whole batch budget, and DeepGEMM's
+        # ring/combine regions grow linearly with it: at 9792 tokens that is
+        # ~7.2 GiB per GPU, versus ~1.3 GiB for the 1224 rows a rank can see.
+        vllm_config = args[0] if args else kwargs["vllm_config"]
+        if _K3_MEGAMOE_SP_LOCAL_CAPACITY and use_kimi_k3_sequence_parallel(
+            vllm_config
+        ):
+            self.max_num_tokens = cdiv(
+                self.max_num_tokens, get_tensor_model_parallel_world_size()
+            )
 
     def synchronize_first_launch(self) -> None:
         ep_group = get_ep_group()
@@ -626,6 +713,7 @@ class KimiMoE(nn.Module):
                 ),
                 run_gemm_rs_ar=run_gemm_rs_ar,
                 prefix=f"{prefix}.shared_experts",
+                use_shared_tp=True,
                 activation_situ_beta=activation_situ_beta,
                 activation_situ_linear_beta=activation_situ_linear_beta,
             )
@@ -670,6 +758,7 @@ class KimiMoE(nn.Module):
             # _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
             self._down_proj_stream: torch.cuda.Stream | None = aux_stream()
             self._down_proj_events = (torch.cuda.Event(), torch.cuda.Event())
+            self._shared_overlap_events = (torch.cuda.Event(), torch.cuda.Event())
         else:
             self.routed_expert_down_proj = None
             self.routed_expert_norm = None
@@ -801,6 +890,57 @@ class KimiMoE(nn.Module):
         )
         return routed_hidden_states, router_output, topk_ids
 
+    def _overlap_shared_with_mega_moe(
+        self,
+        hidden_states: torch.Tensor,
+        routed_hidden_states: torch.Tensor,
+        router_output: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the shared experts on the aux stream while MegaMoE runs.
+
+        MegaMoE is launched first with _K3_MEGAMOE_RESERVED_SMS fewer SMs, so
+        the shared-expert GEMMs and their SP all-gather / reduce-scatter find
+        free SMs instead of queueing behind the whole-grid launch. Both
+        branches run the same kernels on the same inputs as the sequential
+        path; with VLLM_K3_SHARED_OVERLAP_PLAIN_RS the fused GEMM+reduce-scatter
+        is replaced by the plain GEMM followed by the lamport reduce-scatter.
+        """
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        assert self.shared_experts is not None
+
+        def mega_moe() -> torch.Tensor:
+            full_sms = deep_gemm.get_num_sms()
+            budget = max(2, full_sms - _K3_MEGAMOE_RESERVED_SMS)
+            budget -= budget % 2
+            deep_gemm.set_num_sms(budget)
+            try:
+                return self.experts(
+                    routed_hidden_states,
+                    router_output,
+                    topk_ids,
+                    activation_clamp=None,
+                )
+            finally:
+                deep_gemm.set_num_sms(full_sms)
+
+        def shared() -> torch.Tensor:
+            self.shared_experts._k3_overlapped = _K3_SHARED_OVERLAP_PLAIN_RS
+            try:
+                return self.shared_experts(hidden_states)
+            finally:
+                self.shared_experts._k3_overlapped = False
+
+        return maybe_execute_in_parallel(
+            mega_moe,
+            shared,
+            self._shared_overlap_events[0],
+            self._shared_overlap_events[1],
+            self._down_proj_stream,
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
@@ -813,19 +953,30 @@ class KimiMoE(nn.Module):
         if self.use_mega_moe:
             assert self.routed_output_transform is not None
             assert topk_ids is not None
-            final_hidden_states = self.experts(
-                routed_hidden_states,
-                router_output,
-                topk_ids,
-                activation_clamp=None,
-            )
+            if (
+                self.shared_experts is not None
+                and getattr(self, "_down_proj_stream", None) is not None
+                and num_tokens <= _K3_SHARED_OVERLAP_MAX_TOKENS
+            ):
+                final_hidden_states, shared_output = (
+                    self._overlap_shared_with_mega_moe(
+                        hidden_states, routed_hidden_states, router_output, topk_ids
+                    )
+                )
+            else:
+                final_hidden_states = self.experts(
+                    routed_hidden_states,
+                    router_output,
+                    topk_ids,
+                    activation_clamp=None,
+                )
+                shared_output = (
+                    self.shared_experts(hidden_states)
+                    if self.shared_experts is not None
+                    else None
+                )
             # The shared output is folded into the up-projection GEMM's beta-add
             # epilogue, so combining the two branches costs no extra kernel.
-            shared_output = (
-                self.shared_experts(hidden_states)
-                if self.shared_experts is not None
-                else None
-            )
             final_hidden_states = self.routed_output_transform(
                 final_hidden_states, residual=shared_output
             )
@@ -1137,6 +1288,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             vllm_config, self.use_sequence_parallel
         )
 
+        from vllm.models.kimi_k3.nvidia.shared_tp import maybe_init_shared_tp
+
+        maybe_init_shared_tp(
+            vllm_config, self.use_sequence_parallel, self.run_gemm_rs_ar
+        )
+
         if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -1182,13 +1339,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         )
         if shared_mlp_projection is not None:
             for module in self.layers.modules():
-                if isinstance(module, KimiMLP) and module.shard_sequence_parallel:
+                if (
+                    isinstance(module, KimiMLP)
+                    and module.shard_sequence_parallel
+                    and module.shared_tp_group is None
+                ):
                     module.sp_input_projection = shared_mlp_projection
         self.num_attn_res_blocks = (
             cdiv(self.end_layer, self.attn_res_block_size)
             if self.attn_res_block_size is not None
             else 0
         )
+        self._k3_capture_output: torch.Tensor | None = None
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -1213,6 +1375,47 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+
+    def pp_intermediate_rows(self, num_tokens: int) -> int:
+        """Rows a non-first PP stage's persistent receive buffers need.
+
+        Under SP the stages exchange SP-local rows (see forward), and dummy
+        runs and graph capture narrow full-size slices to the same
+        ``cdiv(num_tokens, tp)`` rows, so the rest of a full-size buffer is
+        never read.
+        """
+        if self.use_sequence_parallel and _K3_SP_LOCAL_PP_BUFFERS:
+            return cdiv(num_tokens, get_tensor_model_parallel_world_size())
+        return num_tokens
+
+    def _persist_captured_output(self, packed: torch.Tensor) -> torch.Tensor:
+        """Route a captured graph's gathered output through one shared buffer.
+
+        Piecewise/breakable graphs keep their outputs alive for replay, so a
+        fresh ``[num_tokens, (1 + num_aux) * hidden]`` all-gather result per
+        capture size stays pinned in the graph pool: ~86 KB/token, ~6.5 GiB on
+        the last PP rank over K3's capture sizes. Copying into a buffer sized
+        by the first (largest) capture lets each graph's gather output be freed
+        and reused inside the pool. Eager forwards return ``packed`` unchanged.
+        """
+        if not (_K3_SHARED_CAPTURE_OUTPUT and torch.cuda.is_current_stream_capturing()):
+            return packed
+        buf = self._k3_capture_output
+        num_tokens, width = packed.shape
+        if (
+            buf is None
+            or buf.shape[0] < num_tokens
+            or buf.shape[1] != width
+            or buf.dtype != packed.dtype
+        ):
+            # Graphs are captured largest-first, so this allocates once.
+            buf = torch.empty(
+                (num_tokens, width), dtype=packed.dtype, device=packed.device
+            )
+            self._k3_capture_output = buf
+        out = buf[:num_tokens]
+        out.copy_(packed)
+        return out
 
     def make_empty_intermediate_tensors(
         self,
@@ -1433,6 +1636,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 )
                 packed_hidden_states = sp_all_gather(packed_hidden_states)
                 packed_hidden_states = packed_hidden_states[:full_num_tokens]
+                packed_hidden_states = self._persist_captured_output(
+                    packed_hidden_states
+                )
                 hidden_states, *aux_hidden_states = packed_hidden_states.split(
                     hidden_size, dim=-1
                 )

@@ -52,6 +52,82 @@ _fi_ar_workspace_failed = False
 _fi_ar_quant_workspace_failed = False
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
+# K3 overlapped drafter (VLLM_K3_DRAFT_OVERLAP): its duplicate TP group runs
+# concurrently with the target's, so it gets its own process-global workspace
+# instead of sharing the target's Lamport buffers. Sized like the target's
+# workspace so both admit the same tensors (same fused/unfused decisions).
+_k3_draft_fi_groups: dict[int, ProcessGroup] = {}
+_k3_draft_fi_ar_workspace = None
+_k3_draft_fi_ar_workspace_failed = False
+# (max_token_num, hidden_dim, dtype) the target workspace was created with.
+_fi_ar_workspace_shape: tuple[int, int, torch.dtype] | None = None
+
+
+def register_k3_draft_fi_group(group: ProcessGroup, disabled: bool = False) -> None:
+    """Give ``group`` (a K3 drafter duplicate) its own workspace; ``disabled``
+    makes every FlashInfer all-reduce on it fall back to the plain path."""
+    global _k3_draft_fi_ar_workspace_failed
+    _k3_draft_fi_groups[id(group)] = group
+    if disabled:
+        _k3_draft_fi_ar_workspace_failed = True
+
+
+def _is_k3_draft_fi_group(group: ProcessGroup) -> bool:
+    return _k3_draft_fi_groups.get(id(group)) is group
+
+
+def _k3_get_draft_fi_ar_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+):
+    """Drafter-private copy of get_fi_ar_workspace (same backend selection)."""
+    global _k3_draft_fi_ar_workspace, _k3_draft_fi_ar_workspace_failed
+    if _k3_draft_fi_ar_workspace is not None or _k3_draft_fi_ar_workspace_failed:
+        return _k3_draft_fi_ar_workspace
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend(group)
+    if backend is None:
+        return None
+    if backend == "trtllm" and _node_count(group) > 1:
+        raise ValueError(
+            "Flashinfer allreduce is not supported for multi-node allreduce with "
+            "'trtllm' backend. Please use 'mnnvl' backend instead."
+        )
+    if _fi_ar_workspace_shape is not None:
+        # Match the target workspace so buffer-size checks agree.
+        max_token_num, hidden_dim, dtype = _fi_ar_workspace_shape
+    elif (
+        envs.VLLM_ALLREDUCE_USE_FLASHINFER
+        and (max_size := _get_tuned_standalone_max_size(world_size, backend, group))
+        is not None
+    ):
+        element_size = torch.empty((), dtype=dtype, device="cpu").element_size()
+        max_token_num = max(max_token_num, max_size // (hidden_dim * element_size))
+    workspace = _create_workspace(
+        backend, world_size, rank, max_token_num, hidden_dim, dtype, group
+    )
+    if workspace is None and allow_trtllm_fallback and backend != "trtllm":
+        backend = "trtllm"
+        workspace = _create_workspace(
+            backend, world_size, rank, max_token_num, hidden_dim, dtype, group
+        )
+    if workspace is None:
+        _k3_draft_fi_ar_workspace_failed = True
+        logger.error_once(
+            "Failed to initialize the K3 drafter's FlashInfer Allreduce workspace "
+            f"with backend={backend}"
+        )
+    else:
+        logger.info_once(
+            "Initialized the K3 drafter's FlashInfer Allreduce workspace "
+            f"with backend={backend}"
+        )
+    _k3_draft_fi_ar_workspace = workspace
+    return workspace
+
 
 def _get_tuned_standalone_max_size(
     world_size: int,
@@ -190,7 +266,11 @@ def get_fi_ar_workspace(
     for standalone allreduce. Backend is controlled by
     VLLM_FLASHINFER_ALLREDUCE_BACKEND env var.
     """
-    global _fi_ar_workspace, _fi_ar_workspace_failed
+    if _k3_draft_fi_groups and _is_k3_draft_fi_group(group):
+        return _k3_get_draft_fi_ar_workspace(
+            world_size, rank, max_token_num, hidden_dim, dtype, group
+        )
+    global _fi_ar_workspace, _fi_ar_workspace_failed, _fi_ar_workspace_shape
     if _fi_ar_workspace is not None or _fi_ar_workspace_failed:
         return _fi_ar_workspace
 
@@ -221,6 +301,7 @@ def get_fi_ar_workspace(
             be, world_size, rank, max_token_num, hidden_dim, dtype, group
         )
 
+    _fi_ar_workspace_shape = (max_token_num, hidden_dim, dtype)
     _fi_ar_workspace = _get_or_create(backend)
     if _fi_ar_workspace is None and allow_trtllm_fallback and backend != "trtllm":
         logger.warning_once(
@@ -259,6 +340,11 @@ def get_fi_ar_quant_workspace(
     non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
+    if _k3_draft_fi_groups and _is_k3_draft_fi_group(group):
+        # The drafter has no quant fusion pattern; share its own workspace.
+        return _k3_get_draft_fi_ar_workspace(
+            world_size, rank, max_token_num, hidden_dim, dtype, group
+        )
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed
     if _fi_ar_quant_workspace is not None or _fi_ar_quant_workspace_failed:
         return _fi_ar_quant_workspace
@@ -328,6 +414,8 @@ _fi_ar_workspace_lock = threading.Lock()
 def destroy_fi_ar_workspace():
     global _fi_ar_workspace, _fi_ar_quant_workspace
     global _fi_ar_workspace_failed, _fi_ar_quant_workspace_failed
+    global _k3_draft_fi_ar_workspace, _k3_draft_fi_ar_workspace_failed
+    global _fi_ar_workspace_shape
     with _fi_ar_workspace_lock:
         is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
 
@@ -335,9 +423,14 @@ def destroy_fi_ar_workspace():
             _fi_ar_workspace.destroy()
         if _fi_ar_quant_workspace is not None and not is_alias:
             _fi_ar_quant_workspace.destroy()
+        if _k3_draft_fi_ar_workspace is not None:
+            _k3_draft_fi_ar_workspace.destroy()
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
         _fi_ar_workspace_failed = _fi_ar_quant_workspace_failed = False
+        _k3_draft_fi_ar_workspace = None
+        _k3_draft_fi_ar_workspace_failed = False
+        _fi_ar_workspace_shape = None
         _fi_ar_workspace_groups.clear()
 
 
@@ -345,6 +438,7 @@ def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
     workspaces = [_fi_ar_workspace]
     if _fi_ar_quant_workspace is not _fi_ar_workspace:
         workspaces.append(_fi_ar_quant_workspace)
+    workspaces.append(_k3_draft_fi_ar_workspace)
 
     group_workspaces = []
     for workspace in workspaces:

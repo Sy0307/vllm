@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import os
 from typing import Any
 
 import torch
@@ -30,6 +31,10 @@ from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+# K3: run the drafter on a side stream overlapping the next microbatch (see
+# GPUModelRunner.sample_tokens). Its graphs then need a private memory pool.
+_K3_DRAFT_OVERLAP = os.environ.get("VLLM_K3_DRAFT_OVERLAP", "0") == "1"
 
 
 class DFlashSpeculator(DraftModelSpeculator):
@@ -148,6 +153,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             cudagraph_mode,
             decode_query_len=self.num_query_per_req,
         )
+        if _K3_DRAFT_OVERLAP and self.query_cudagraph_manager.pool is not None:
+            # Overlapped draft graphs run concurrently with the target's graphs,
+            # so they must not alias the shared graph pool.
+            self.query_cudagraph_manager.pool = torch.cuda.graph_pool_handle()
 
     def capture(self) -> None:
         logger.info("Capturing model for %s speculator...", self._speculator_name)
@@ -451,6 +460,12 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.max_model_len,
                 self.sample_from_anchor,
             )
+
+        if _K3_DRAFT_OVERLAP and not dummy_run:
+            # Everything below reads only drafter-owned buffers; the target's
+            # next microbatch may now overwrite its inputs and outputs.
+            self._k3_inputs_consumed = torch.cuda.Event()
+            self._k3_inputs_consumed.record()
 
         batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(

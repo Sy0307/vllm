@@ -11,6 +11,8 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
+import dataclasses
+import os
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
@@ -18,6 +20,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -42,6 +45,93 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
         KDARecoverSSMCommitContext,
     )
+
+logger = init_logger(__name__)
+
+
+# K3: share the batch-only part of the metadata build across the KDA KV-cache
+# groups of one step (needs the runner's per-call memo, VLLM_K3_KDA_SHARED_META).
+_K3_KDA_SHARED_META_VERIFY = (
+    os.environ.get("VLLM_K3_KDA_SHARED_META_VERIFY", "0") == "1"
+)
+_K3_KDA_VERIFY_STATS = {"builds": 0, "mismatches": 0}
+
+
+@dataclass
+class _KDAPrelude:
+    num_spec_decodes: int
+    kind: str = "nospec"
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+    num_prefill_tokens: int = 0
+    num_spec_decode_tokens: int = 0
+    spec_query_start_loc: torch.Tensor | None = None
+    num_accepted_tokens: torch.Tensor | None = None
+    spec_idx_gpu: torch.Tensor | None = None
+    non_spec_idx_gpu: torch.Tensor | None = None
+    spec_request_indices: torch.Tensor | None = None
+    spec_token_indx: torch.Tensor | None = None
+    non_spec_token_indx: torch.Tensor | None = None
+    spec_token_start: int | None = None
+    non_spec_token_start: int | None = None
+    non_spec_query_start_loc: torch.Tensor | None = None
+    non_spec_query_start_loc_cpu: torch.Tensor | None = None
+    has_initial_state: torch.Tensor | None = None
+    nums_dict: dict | None = None
+    batch_ptr: torch.Tensor | None = None
+    token_chunk_offset_ptr: torch.Tensor | None = None
+    flashinfer_prefill_query_start_loc: torch.Tensor | None = None
+    flashinfer_prefill_seq_order: torch.Tensor | None = None
+    checkpoint_shared: tuple | None = None
+    has_checkpoint_rows: bool = False
+
+
+def _k3_same(a, b, path: str, bad: list[str]) -> None:
+    if isinstance(a, torch.Tensor) or isinstance(b, torch.Tensor):
+        if not (
+            isinstance(a, torch.Tensor)
+            and isinstance(b, torch.Tensor)
+            and a.shape == b.shape
+            and a.dtype == b.dtype
+            and a.device == b.device
+            and torch.equal(a, b)
+        ):
+            bad.append(path)
+    elif isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            bad.append(path)
+        for k in a.keys() & b.keys():
+            _k3_same(a[k], b[k], f"{path}.{k}", bad)
+    elif dataclasses.is_dataclass(a) and dataclasses.is_dataclass(b):
+        if type(a) is not type(b):
+            bad.append(path)
+            return
+        for f in dataclasses.fields(a):
+            if f.name == "recoverssm_context":
+                if getattr(a, f.name) is not getattr(b, f.name):
+                    bad.append(f"{path}.{f.name}")
+                continue
+            _k3_same(getattr(a, f.name), getattr(b, f.name), f"{path}.{f.name}", bad)
+    elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            bad.append(path)
+        for i, (x, y) in enumerate(zip(a, b)):
+            _k3_same(x, y, f"{path}[{i}]", bad)
+    elif a != b:
+        bad.append(path)
+
+
+def _k3_verify_kda_metadata(out: "KimiK3KDAMetadata", ref: "KimiK3KDAMetadata") -> None:
+    bad: list[str] = []
+    _k3_same(out, ref, "kda", bad)
+    _K3_KDA_VERIFY_STATS["builds"] += 1
+    if bad:
+        _K3_KDA_VERIFY_STATS["mismatches"] += 1
+        logger.warning("K3 shared KDA metadata differs from reference: %s", bad[:8])
+    n = _K3_KDA_VERIFY_STATS["builds"]
+    if n & (n - 1) == 0:
+        logger.info("K3 shared KDA metadata verify: %s", _K3_KDA_VERIFY_STATS)
 
 
 @cache
@@ -389,6 +479,407 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> KimiK3KDAMetadata:
+        memo = common_attn_metadata._k3_build_memo
+        if memo is None:
+            return self._build_ref(
+                common_prefix_len,
+                common_attn_metadata,
+                num_accepted_tokens,
+                num_decode_draft_tokens_cpu,
+                fast_build,
+            )
+        # The KDA groups of one step share the batch; only their block tables
+        # differ. Compute the batch-only part once per build_attn_metadata call.
+        key = ("kimi_k3_kda", self._k3_prelude_signature())
+        prelude = memo.get(key)
+        if prelude is None:
+            prelude = self._k3_prelude(
+                common_attn_metadata, num_accepted_tokens, num_decode_draft_tokens_cpu
+            )
+            memo[key] = prelude
+        out = self._k3_finish(prelude, common_attn_metadata)
+        if _K3_KDA_SHARED_META_VERIFY:
+            ref = self._build_ref(
+                common_prefix_len,
+                common_attn_metadata,
+                num_accepted_tokens,
+                num_decode_draft_tokens_cpu,
+                fast_build,
+            )
+            _k3_verify_kda_metadata(out, ref)
+        return out
+
+    def _k3_prelude_signature(self) -> tuple:
+        spec = self.kv_cache_spec
+        return (
+            type(self),
+            self.use_spec_decode,
+            self.use_recoverssm,
+            self.num_spec,
+            self.spec_state_slots,
+            self.use_flashinfer_prefill,
+            self.vllm_config.cache_config.mamba_cache_mode,
+            spec.block_size,
+            spec.num_prefill_checkpoint_blocks,
+            spec.prefill_checkpoint_alignment,
+        )
+
+    def _k3_prelude(
+        self,
+        m: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None,
+    ) -> "_KDAPrelude":
+        """Everything in ``_build_ref`` that does not read the block table."""
+        query_start_loc = m.query_start_loc
+        query_start_loc_cpu = m.query_start_loc_cpu
+        if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
+            spec_sequence_masks_cpu = None
+            num_spec_decodes = 0
+            active_non_spec_mask_cpu = None
+        else:
+            spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            active_non_spec_mask_cpu = None
+            if self.use_recoverssm:
+                assert m.is_prefilling is not None
+                assert m.is_prefilling.device.type == "cpu"
+                active_decode_mask_cpu = (~m.is_prefilling) & (
+                    query_start_loc_cpu.diff() > 0
+                )
+                spec_sequence_masks_cpu |= active_decode_mask_cpu
+                spec_sequence_masks_cpu &= (
+                    query_start_loc_cpu.diff() <= self.num_spec + 1
+                )
+            # Mirrors _build_ref (upstream #56531): a batch whose rows all
+            # drafted nothing still runs the speculative path.
+            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            if num_spec_decodes == 0:
+                spec_sequence_masks_cpu = None
+
+        P = _KDAPrelude(num_spec_decodes=num_spec_decodes)
+        if num_spec_decodes == 0:
+            assert m.seq_lens_cpu_upper_bound is not None
+            query_lens_cpu = query_start_loc_cpu.diff()
+            no_prior_state = (query_lens_cpu > 0) & (
+                m.seq_lens_cpu_upper_bound <= query_lens_cpu
+            )
+            if m.is_prefilling is not None:
+                no_prior_state &= m.is_prefilling
+            else:
+                no_prior_state = torch.zeros_like(no_prior_state)
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    m.replace(is_prefilling=no_prior_state),
+                    decode_threshold=1,
+                    treat_short_extends_as_decodes=False,
+                )
+            )
+            if num_prefills:
+                num_prefills -= int((query_lens_cpu[num_decodes:] == 0).sum())
+                num_prefill_tokens = (
+                    int(query_start_loc_cpu[num_decodes + num_prefills])
+                    - num_decode_tokens
+                )
+            P.kind = "nospec"
+            P.non_spec_query_start_loc = query_start_loc
+            P.non_spec_query_start_loc_cpu = query_start_loc_cpu
+        else:
+            assert spec_sequence_masks_cpu is not None
+            assert num_accepted_tokens is not None
+            query_lens_cpu = query_start_loc_cpu.diff()
+            if (
+                self.use_recoverssm
+                and torch.any(
+                    query_lens_cpu[spec_sequence_masks_cpu] > self.num_spec + 1
+                ).item()
+            ):
+                raise ValueError(
+                    "KDA RecoverSSM speculative decode query length exceeds "
+                    f"its activation capacity ({self.num_spec + 1})"
+                )
+            num_query_tokens = query_start_loc_cpu[-1].item()
+            active_non_spec_mask_cpu = (~spec_sequence_masks_cpu) & (query_lens_cpu > 0)
+            non_spec_query_lens_cpu = query_lens_cpu[active_non_spec_mask_cpu]
+            num_non_spec_requests = non_spec_query_lens_cpu.numel()
+            num_non_spec_tokens = non_spec_query_lens_cpu.sum().item()
+            assert m.is_prefilling is not None
+            assert m.is_prefilling.device.type == "cpu"
+            non_spec_is_prefilling = m.is_prefilling[active_non_spec_mask_cpu]
+            use_prefill = torch.any(
+                non_spec_is_prefilling | (non_spec_query_lens_cpu != 1)
+            ).item()
+            if use_prefill:
+                num_prefills = num_non_spec_requests
+                num_prefill_tokens = num_non_spec_tokens
+                num_decodes = 0
+                num_decode_tokens = 0
+            else:
+                num_prefills = 0
+                num_prefill_tokens = 0
+                num_decodes = num_non_spec_requests
+                num_decode_tokens = num_non_spec_tokens
+            P.num_spec_decode_tokens = num_query_tokens - num_non_spec_tokens
+
+            if num_prefills == 0 and num_decodes == 0:
+                P.kind = "spec_only"
+                P.spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
+                P.num_accepted_tokens = num_accepted_tokens[:num_spec_decodes]
+            else:
+                P.kind = "mixed"
+                query_lens = query_start_loc.diff()
+                spec_sequence_masks_gpu = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )
+                spec_idx_gpu = async_tensor_h2d(
+                    spec_sequence_masks_cpu.nonzero(as_tuple=True)[0],
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
+                non_spec_idx_gpu = async_tensor_h2d(
+                    active_non_spec_mask_cpu.nonzero(as_tuple=True)[0],
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
+                P.spec_idx_gpu, P.non_spec_idx_gpu = spec_idx_gpu, non_spec_idx_gpu
+                if self.use_recoverssm:
+                    P.spec_request_indices = spec_idx_gpu
+                spec_token_masks = torch.repeat_interleave(
+                    spec_sequence_masks_gpu,
+                    query_lens,
+                    output_size=num_query_tokens,
+                )
+                index = torch.argsort(spec_token_masks, stable=True)
+                num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+                P.non_spec_token_indx = index[:num_non_spec_tokens]
+                P.spec_token_indx = index[num_non_spec_tokens:]
+                active_spec_mask = spec_sequence_masks_cpu[query_lens_cpu > 0]
+                if (active_spec_mask[1:] != active_spec_mask[:-1]).sum().item() == 1:
+                    spec_first = active_spec_mask[0].item()
+                    P.spec_token_start = 0 if spec_first else num_non_spec_tokens
+                    P.non_spec_token_start = (
+                        P.num_spec_decode_tokens if spec_first else 0
+                    )
+                spec_query_lens = query_lens.index_select(0, spec_idx_gpu)
+                spec_query_start_loc = torch.zeros(
+                    num_spec_decodes + 1,
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
+                torch.cumsum(spec_query_lens, dim=0, out=spec_query_start_loc[1:])
+                P.spec_query_start_loc = spec_query_start_loc
+                if num_prefills > 0:
+                    non_spec_query_lens = query_lens.index_select(0, non_spec_idx_gpu)
+                    non_spec_query_start_loc = torch.zeros(
+                        non_spec_query_lens.size(0) + 1,
+                        dtype=torch.int32,
+                        device=query_start_loc.device,
+                    )
+                    torch.cumsum(
+                        non_spec_query_lens, dim=0, out=non_spec_query_start_loc[1:]
+                    )
+                    non_spec_query_start_loc_cpu = torch.zeros(
+                        non_spec_query_lens_cpu.size(0) + 1,
+                        dtype=torch.int32,
+                    )
+                    torch.cumsum(
+                        non_spec_query_lens_cpu,
+                        dim=0,
+                        out=non_spec_query_start_loc_cpu[1:],
+                    )
+                    P.non_spec_query_start_loc = non_spec_query_start_loc
+                    P.non_spec_query_start_loc_cpu = non_spec_query_start_loc_cpu
+                if not self.use_recoverssm:
+                    P.num_accepted_tokens = num_accepted_tokens.index_select(
+                        0, spec_idx_gpu
+                    )
+        P.num_decodes, P.num_prefills = num_decodes, num_prefills
+        P.num_decode_tokens, P.num_prefill_tokens = (
+            num_decode_tokens,
+            num_prefill_tokens,
+        )
+
+        if num_prefills > 0:
+            has_initial_state = m.compute_num_computed_tokens() > 0
+            if num_spec_decodes > 0:
+                has_initial_state = has_initial_state.index_select(
+                    0, P.non_spec_idx_gpu
+                )
+                assert P.non_spec_query_start_loc_cpu is not None
+            P.has_initial_state = has_initial_state
+            P.nums_dict, P.batch_ptr, P.token_chunk_offset_ptr = (
+                compute_causal_conv1d_metadata(
+                    P.non_spec_query_start_loc_cpu,
+                    device=query_start_loc.device,
+                )
+            )
+
+        if self.use_flashinfer_prefill and num_prefills > 0:
+            assert P.non_spec_query_start_loc is not None
+            P.flashinfer_prefill_query_start_loc = P.non_spec_query_start_loc.to(
+                torch.int64
+            )
+            num_non_spec_requests = P.non_spec_query_start_loc.shape[0] - 1
+            if num_prefill_tokens + num_decode_tokens > num_non_spec_requests:
+                P.flashinfer_prefill_seq_order = torch.argsort(
+                    P.flashinfer_prefill_query_start_loc.diff(), descending=True
+                ).to(torch.int32)
+
+        if num_prefills > 0:
+            request_rows = list(range(m.num_reqs))
+            if active_non_spec_mask_cpu is not None:
+                request_rows = active_non_spec_mask_cpu.nonzero().flatten().tolist()
+            P.checkpoint_shared = self.checkpoint_builder.build_shared(m, request_rows)
+            P.has_checkpoint_rows = True
+        return P
+
+    def _k3_finish(
+        self, P: "_KDAPrelude", m: CommonAttentionMetadata
+    ) -> KimiK3KDAMetadata:
+        """Per-group part of ``_build_ref``: state slots from this group's table."""
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            if self.mamba_aligned_state_indices is not None:
+                block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
+            else:
+                assert not self.vllm_config.use_v2_model_runner, (
+                    "Aligned Mamba state indices must be precomputed"
+                )
+                block_table_tensor = _mamba_get_block_table_tensor(
+                    m.block_table_tensor,
+                    m.seq_lens,
+                    self.kv_cache_spec,
+                    self.vllm_config.cache_config.mamba_cache_mode,
+                )
+        else:
+            block_table_tensor = m.block_table_tensor
+
+        num_spec_decodes = P.num_spec_decodes
+        num_decodes, num_prefills = P.num_decodes, P.num_prefills
+        num_spec_decode_tokens = P.num_spec_decode_tokens
+        spec_query_start_loc = P.spec_query_start_loc
+        num_accepted_tokens = P.num_accepted_tokens
+        if P.kind == "nospec":
+            spec_state_indices_tensor = None
+            non_spec_state_indices_tensor = block_table_tensor[:, 0]
+        elif P.kind == "spec_only":
+            spec_state_indices_tensor = block_table_tensor[
+                :num_spec_decodes, : self.spec_state_slots
+            ]
+            non_spec_state_indices_tensor = None
+        else:
+            spec_state_indices_tensor = block_table_tensor[
+                :, : self.spec_state_slots
+            ].index_select(0, P.spec_idx_gpu)
+            non_spec_state_indices_tensor = block_table_tensor[:, 0].index_select(
+                0, P.non_spec_idx_gpu
+            )
+        if self.use_recoverssm and num_spec_decodes > 0:
+            assert self.recoverssm_num_accepted_tokens is not None
+            num_accepted_tokens = self.recoverssm_num_accepted_tokens[
+                :num_spec_decodes
+            ]
+
+        batch_size = m.num_reqs
+        if (
+            self.use_full_cuda_graph
+            and num_spec_decodes > 0
+            and num_prefills == 0
+            and num_decodes == 0
+            and batch_size <= self.spec_state_indices_tensor.shape[0]
+            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+        ):
+            stage_spec_decode_metadata(
+                state_indices=spec_state_indices_tensor,
+                query_start_loc=spec_query_start_loc,
+                num_accepted_tokens=num_accepted_tokens,
+                staged_state_indices=self.spec_state_indices_tensor[:batch_size],
+                staged_query_start_loc=self.spec_query_start_loc[: batch_size + 1],
+                staged_num_accepted_tokens=self.num_accepted_tokens[:batch_size],
+                num_spec_decodes=num_spec_decodes,
+            )
+            spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
+            spec_query_start_loc = self.spec_query_start_loc[: batch_size + 1]
+            num_accepted_tokens = self.num_accepted_tokens[:batch_size]
+
+        if (
+            self.use_full_cuda_graph
+            and num_prefills == 0
+            and num_spec_decodes == 0
+            and num_decodes <= self.decode_cudagraph_max_bs
+        ):
+            self.non_spec_state_indices_tensor[:num_decodes].copy_(
+                non_spec_state_indices_tensor, non_blocking=True
+            )
+            self.non_spec_state_indices_tensor[num_decodes:batch_size].fill_(
+                NULL_BLOCK_ID
+            )
+            non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                :batch_size
+            ]
+
+        recoverssm_commit = None
+        if self.use_recoverssm and num_spec_decodes > 0:
+            assert spec_state_indices_tensor is not None
+            assert spec_query_start_loc is not None
+            align = None
+            if self.kv_cache_spec.mamba_cache_mode == "align":
+                align = KDARecoverSSMAlignMetadata(
+                    block_table=m.block_table_tensor,
+                    num_computed_tokens=m.compute_num_computed_tokens(),
+                    block_size=self.kv_cache_spec.block_size,
+                )
+            recoverssm_commit = KDARecoverSSMCommitMetadata(
+                state_indices=spec_state_indices_tensor,
+                query_start_loc=spec_query_start_loc,
+                request_indices=P.spec_request_indices,
+                align=align,
+            )
+
+        checkpoint = (
+            self.checkpoint_builder.finish(P.checkpoint_shared, m)
+            if P.has_checkpoint_rows
+            else None
+        )
+        return KimiK3KDAMetadata(
+            num_prefills=num_prefills,
+            num_prefill_tokens=P.num_prefill_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=P.num_decode_tokens,
+            num_spec_decodes=num_spec_decodes,
+            num_spec_decode_tokens=num_spec_decode_tokens,
+            num_actual_tokens=m.num_actual_tokens,
+            has_initial_state=P.has_initial_state,
+            spec_query_start_loc=spec_query_start_loc,
+            non_spec_query_start_loc=P.non_spec_query_start_loc,
+            spec_state_indices_tensor=spec_state_indices_tensor,
+            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
+            spec_sequence_masks=None,
+            spec_token_indx=P.spec_token_indx,
+            non_spec_token_indx=P.non_spec_token_indx,
+            num_accepted_tokens=num_accepted_tokens,
+            spec_token_start=P.spec_token_start,
+            non_spec_token_start=P.non_spec_token_start,
+            flashinfer_prefill_query_start_loc=P.flashinfer_prefill_query_start_loc,
+            flashinfer_prefill_seq_order=P.flashinfer_prefill_seq_order,
+            recoverssm_commit=recoverssm_commit,
+            recoverssm_context=(
+                self._get_recoverssm_context()
+                if recoverssm_commit is not None
+                else None
+            ),
+            nums_dict=P.nums_dict,
+            batch_ptr=P.batch_ptr,
+            token_chunk_offset_ptr=P.token_chunk_offset_ptr,
+            checkpoint=checkpoint,
+        )
+
+    def _build_ref(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+    ) -> KimiK3KDAMetadata:
         m = common_attn_metadata
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
@@ -546,12 +1037,22 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_gpu = async_tensor_h2d(
                     spec_sequence_masks_cpu, device=query_start_loc.device
                 )
+                # Index CUDA tensors with pinned, asynchronously copied index
+                # tensors. Indexing a CUDA tensor with a CPU bool mask makes
+                # PyTorch copy the derived indices with a blocking H2D copy,
+                # which synchronizes the stream and drains the in-flight step.
+                spec_idx_gpu = async_tensor_h2d(
+                    spec_sequence_masks_cpu.nonzero(as_tuple=True)[0],
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
+                non_spec_idx_gpu = async_tensor_h2d(
+                    active_non_spec_mask_cpu.nonzero(as_tuple=True)[0],
+                    dtype=torch.int32,
+                    device=query_start_loc.device,
+                )
                 if self.use_recoverssm:
-                    spec_request_indices = async_tensor_h2d(
-                        spec_sequence_masks_cpu.nonzero(as_tuple=True)[0],
-                        dtype=torch.int32,
-                        device=query_start_loc.device,
-                    )
+                    spec_request_indices = spec_idx_gpu
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks_gpu,
                     query_lens,
@@ -574,13 +1075,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 # Native spec uses one state slot per step. RecoverSSM keeps
                 # only the current checkpoint slot.
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.spec_state_slots
-                ]
+                    :, : self.spec_state_slots
+                ].index_select(0, spec_idx_gpu)
                 non_spec_state_indices_tensor = block_table_tensor[
-                    active_non_spec_mask_cpu, 0
-                ]
+                    :, 0
+                ].index_select(0, non_spec_idx_gpu)
 
-                spec_query_lens = query_lens[spec_sequence_masks_cpu]
+                spec_query_lens = query_lens.index_select(0, spec_idx_gpu)
                 spec_query_start_loc = torch.zeros(
                     num_spec_decodes + 1,
                     dtype=torch.int32,
@@ -592,7 +1093,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     out=spec_query_start_loc[1:],
                 )
                 if num_prefills > 0:
-                    non_spec_query_lens = query_lens[active_non_spec_mask_cpu]
+                    non_spec_query_lens = query_lens.index_select(0, non_spec_idx_gpu)
                     non_spec_query_start_loc = torch.zeros(
                         non_spec_query_lens.size(0) + 1,
                         dtype=torch.int32,
@@ -618,7 +1119,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     non_spec_query_start_loc = None
                     non_spec_query_start_loc_cpu = None
 
-                num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+                if not self.use_recoverssm:
+                    # RecoverSSM overwrites this below; skip the dead gather.
+                    num_accepted_tokens = num_accepted_tokens.index_select(
+                        0, spec_idx_gpu
+                    )
 
             if self.use_recoverssm:
                 assert self.recoverssm_num_accepted_tokens is not None
@@ -632,7 +1137,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         if num_prefills > 0:
             has_initial_state = m.compute_num_computed_tokens() > 0
             if num_spec_decodes > 0:
-                has_initial_state = has_initial_state[active_non_spec_mask_cpu]
+                has_initial_state = has_initial_state.index_select(
+                    0, non_spec_idx_gpu
+                )
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(

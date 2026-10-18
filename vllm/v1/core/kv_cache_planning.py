@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache planning: grouping, sizing, and memory-fit logic."""
 
+import os
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -487,6 +488,17 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    # K3: the group count of a type sets how many blocks each request's state
+    # takes (one per group), while a block costs the widest group's pages on
+    # every PP stage. With K3's 69 KDA / 24+5 MLA layers the default size 29
+    # gives 3 KDA groups of 11 layers on the last stage under its 17-layer
+    # MLA group; 35 gives 2 KDA groups that fill those blocks.
+    k3_group_size = int(os.environ.get("VLLM_K3_KV_GROUP_SIZE", "0"))
+    if k3_group_size > 0:
+        logger.info(
+            "Overriding KV cache group size %d with %d", group_size, k3_group_size
+        )
+        group_size = k3_group_size
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size

@@ -42,6 +42,11 @@ _K3_HEAD_FOLD = _k3hf_os.environ.get("VLLM_K3_TS_HEAD_FOLD", "0") == "1"
 _K3_HF_MAP = {int(_a): int(_b) for _a, _b in (x.split(":") for x in _k3hf_os.environ.get("VLLM_K3_TS_HEAD_FOLD_MAP", "5:4,4:3").split(",") if x)}
 _K3_HF_FASTCOPY = _k3hf_os.environ.get("VLLM_K3_HF_FASTCOPY", "0") == "1"
 _K3_HF_VALIDATE = _k3hf_os.environ.get("VLLM_K3_HF_VALIDATE", "0") == "1"
+# Folded batches through the K3 var-split wrapper (length-balanced splits +
+# static work order) instead of the stock single-pass kernel, whose long
+# requests each pin one cluster for their whole length.
+_K3_FOLD_VS = _k3hf_os.environ.get("VLLM_K3_TS_FOLD_VS", "0") == "1"
+_K3_FOLD_NONCAUSAL = _k3hf_os.environ.get("VLLM_K3_TS_FOLD_NONCAUSAL", "0") == "1"
 _K3_HF_CTRL = _k3hf_os.environ.get("VLLM_K3_HF_VALIDATE_CTRL", "0") == "1"
 _K3_HF_ERR: dict = {}
 
@@ -87,6 +92,22 @@ def _k3_pieces(q: int) -> list[tuple[int, int]]:
         n = 1 << ((q - a).bit_length() - 1)
         out.append((a, n)); a += n
     return out
+
+def _k3_decode_fn():
+    """MLA decode entry point: upstream tokenspeed-mla (>= 2.0.1, split_plan) through
+    the K3 per-step planner, the local K3 var-split fork, or stock tokenspeed."""
+    import os as _o
+    if _o.environ.get('VLLM_K3_TS_UPSTREAM', '0') == '1':
+        import functools
+        from tokenspeed_mla import tokenspeed_mla_decode as _upstream
+        from vllm import _k3_ts_plan
+        return functools.partial(_k3_ts_plan.decode, _upstream)
+    if _o.environ.get('VLLM_K3_TS_VAR_SPLIT', '0') == '1':
+        from vllm._k3_ts_mla_decode import tokenspeed_mla_decode as _fork
+        return _fork
+    from tokenspeed_mla import tokenspeed_mla_decode as _stock
+    return _stock
+
 
 _g_workspace: dict[torch.device, torch.Tensor] = {}
 
@@ -176,11 +197,7 @@ class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
     def _k3_warm_pieces(self, device) -> None:
         """Compile the piece kernels (q_len = 2^k <= T/2 .. and 1) up front."""
-        import os as _os
-        if _os.environ.get("VLLM_K3_TS_VAR_SPLIT", "0") == "1":
-            from vllm._k3_ts_mla_decode import tokenspeed_mla_decode
-        else:
-            from tokenspeed_mla import tokenspeed_mla_decode
+        tokenspeed_mla_decode = _k3_decode_fn()
         H, D, L = self._k3_heads, 576, 512
         page = self.page_size
         cache = torch.zeros(8, page, D, device=device, dtype=torch.float8_e4m3fn)
@@ -463,10 +480,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         import os as _os
-        if _os.environ.get('VLLM_K3_TS_VAR_SPLIT', '0') == '1':
-            from vllm._k3_ts_mla_decode import tokenspeed_mla_decode
-        else:
-            from tokenspeed_mla import tokenspeed_mla_decode
+        tokenspeed_mla_decode = _k3_decode_fn()
 
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -533,7 +547,10 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if k3_pieces:  # non-uniform decode set (small-q prefills present)
             return self._k3_forward_mqa_pieces(q, kv_c_and_k_pe_cache, attn_metadata, tokenspeed_mla_decode,
                                                return_lse, k3_pieces)
-        _hf_G = _K3_HF_MAP.get(q.shape[1], 0) if (_K3_HEAD_FOLD and q.dim() == 4 and attn_metadata.causal) else 0
+        # Non-causal multi-token decode (DSpark drafter, q=4) folds the same way:
+        # heads are independent and every query row sees the whole context.
+        _hf_G = _K3_HF_MAP.get(q.shape[1], 0) if (
+            _K3_HEAD_FOLD and q.dim() == 4 and (attn_metadata.causal or _K3_FOLD_NONCAUSAL)) else 0
         if _hf_G and self._k3_split_kwargs():
             _hf_G = 0  # fold path predates the split floor / KV interleave kwargs
         # Validated batch range only (B=36..64 sweep vs production path: <=6e-4 abs; small B
@@ -546,15 +563,35 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 _qg = _k3_fold_heads(q, _hf_G)
             else:
                 _qg = q.view(_B, _q, _hf_G, _hg, _D).permute(0, 2, 1, 3, 4).reshape(_B * _hf_G, _q, _hg, _D)
-            _cs = causal_seqs.repeat_interleave(_hf_G) if (self.dcp_world_size > 1 and causal_seqs is not None) else None
-            _ko = _ts_stock(
+            _fold_kw = {}
+            _fold_fn = _ts_stock
+            if _K3_FOLD_VS and not _K3_HF_CTRL and _os.environ.get('VLLM_K3_TS_VAR_SPLIT', '0') == '1':
+                # One set of folded inputs per step: the var-split memo is keyed
+                # on the seq_lens tensor, so every MLA layer must see the same one.
+                _memo = attn_metadata.decode.__dict__.setdefault('_k3_vs_memo', {})
+                _fk = ('k3_fold_inputs', _hf_G, id(seq_lens), id(block_tables))
+                _fin = _memo.get(_fk)
+                if _fin is None:
+                    _fin = (
+                        block_tables.repeat_interleave(_hf_G, 0),
+                        seq_lens.repeat_interleave(_hf_G),
+                        causal_seqs.repeat_interleave(_hf_G) if (self.dcp_world_size > 1 and causal_seqs is not None) else None,
+                    )
+                    _memo[_fk] = _fin
+                _btg, _slg, _cs = _fin
+                _fold_fn = tokenspeed_mla_decode
+                _fold_kw = {'k3_memo': _memo}
+            else:
+                _btg = _slg = None
+                _cs = causal_seqs.repeat_interleave(_hf_G) if (self.dcp_world_size > 1 and causal_seqs is not None) else None
+            _ko = _fold_fn(
                 query=(q if _K3_HF_CTRL else _qg),
                 kv_cache=kv_c_and_k_pe_cache,
                 workspace_buffer=self._workspace_buffer,
                 kv_lora_rank=self.kv_lora_rank,
                 qk_rope_head_dim=self.qk_rope_head_dim,
-                block_tables=(block_tables if _K3_HF_CTRL else block_tables.repeat_interleave(_hf_G, 0)),
-                seq_lens=(seq_lens if _K3_HF_CTRL else seq_lens.repeat_interleave(_hf_G)),
+                block_tables=(block_tables if _K3_HF_CTRL else (_btg if _btg is not None else block_tables.repeat_interleave(_hf_G, 0))),
+                seq_lens=(seq_lens if _K3_HF_CTRL else (_slg if _slg is not None else seq_lens.repeat_interleave(_hf_G))),
                 max_seq_len=attn_metadata.max_seq_len,
                 softmax_scale=self.softmax_scale,
                 output_scale=self.output_scale,
@@ -564,6 +601,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 causal_seqs=((causal_seqs if self.dcp_world_size > 1 else None) if _K3_HF_CTRL else _cs),
                 cp_world=self.dcp_world_size,
                 cp_rank=self.dcp_rank,
+                **_fold_kw,
             )
             _L = self.kv_lora_rank
             if return_lse:

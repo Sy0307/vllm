@@ -1,0 +1,24 @@
+VERIFIED_HOST: xb01-gpu-200b-0024 uid 1000 8 B200
+........................................................................ [ 61%]
+.............................................                            [100%]
+=============================== warnings summary ===============================
+../../../../k3-mm-main-e2e-20260917/baseline-env/lib/python3.12/site-packages/torch/jit/_script.py:365: 14 warnings
+  /gpfs/mszn/data/k3-benchmarks/k3-mm-main-e2e-20260917/baseline-env/lib/python3.12/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+overlay/tests/renderers/test_kimi_k3.py:294
+  /gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/renderers/test_kimi_k3.py:294: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+overlay/tests/renderers/test_kimi_k3.py:447
+  /gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/renderers/test_kimi_k3.py:447: PytestUnknownMarkWarning: Unknown pytest.mark.asyncio - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.asyncio
+
+overlay/tests/reasoning/test_kimi_k3_reasoning_parser.py:17
+  /gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/reasoning/test_kimi_k3_reasoning_parser.py:17: PytestUnknownMarkWarning: Unknown pytest.mark.skip_global_cleanup - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.skip_global_cleanup
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+117 passed, 17 warnings in 9.71s
+
+API_UNIT_RESULT:{"root": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5", "returncode": 0, "command": ["/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/.venv/bin/python", "-m", "pytest", "--noconftest", "-p", "async_test_support", "--rootdir", "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5", "-q", "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/renderers/test_kimi_k3.py", "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/reasoning/test_kimi_k3_reasoning_parser.py", "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/tool_use/test_kimi_k3_tool_parser.py", "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/api-unit-v5/overlay/tests/tool_parsers/test_kimi_k3_named_tool_choice.py"]}

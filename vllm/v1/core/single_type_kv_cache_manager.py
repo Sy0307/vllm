@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.utils.math_utils import cdiv
@@ -36,13 +37,26 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     get_mamba_prefill_checkpoint_position,
-    is_mamba_prefill_checkpoint_valid,
+    is_mamba_prefill_checkpoint_in_place,
+    resolve_mamba_prefill_checkpoint,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
+# K3: Mamba "align" checkpoints are released to the LRU queue as soon as prefill
+# moves past them, while the request's attention blocks stay referenced until it
+# finishes, so the one state block a later prefix hit needs is always evicted
+# before the attention prefix it gates. With this flag the manager remembers the
+# hashed states it released and the KV cache manager re-queues the ones still
+# cached at the LRU tail when the request is freed (no capacity is held).
+_K3_CKPT_REFRESH = os.environ.get("VLLM_K3_MAMBA_CKPT_REFRESH", "0") == "1"
+# K3: stronger variant -- keep the newest released (hashed) state block of a
+# request referenced until the request is freed, so it cannot be evicted while
+# the request decodes; one block per request and KDA group.
+_K3_CKPT_HOLD = os.environ.get("VLLM_K3_MAMBA_CKPT_HOLD", "0") == "1"
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -1417,6 +1431,19 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         return num_skipped_tokens
 
 
+class MambaPrefillCheckpoint(NamedTuple):
+    """Internal prefill checkpoint selected for a request's current allocation."""
+
+    # Token position whose state the backend exports.
+    position: int
+    # Block-table column that receives it.
+    block_idx: int
+    # True: the column is the query's initial-state column, whose private block
+    # is overwritten in place (mid-block start). False: a fresh block is
+    # allocated for the column.
+    in_place: bool
+
+
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
 
@@ -1449,14 +1476,61 @@ class MambaManager(SingleTypeKVCacheManager):
             self._num_retired_blocks: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
-            # checkpoint position and reserved block index for the current
-            # allocation.
-            self._checkpoints: dict[str, tuple[int, int]] = {}
+            # Internal prefill checkpoint for the current allocation.
+            self._checkpoints: dict[str, MambaPrefillCheckpoint] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
             # source directly.
             self._producer_partial_tail_reqs: dict[str, tuple[KVCacheBlock, int]] = {}
+            # K3: hashed states released before the request finished.
+            self._k3_released_states: dict[
+                str, list[tuple[KVCacheBlock, BlockHashWithGroupId]]
+            ] = {}
+            # K3: newest released state held until the request is freed.
+            self._k3_held_state: dict[str, KVCacheBlock] = {}
+
+    def _k3_note_released(self, request_id: str, blocks: list[KVCacheBlock]) -> None:
+        held = None
+        for block in blocks:
+            block_hash = block.block_hash
+            if block_hash is not None and not block.is_null:
+                if held is None:
+                    held = self._k3_released_states.setdefault(request_id, [])
+                held.append((block, block_hash))
+
+    def _k3_free_released(self, request_id: str, blocks: list[KVCacheBlock]) -> None:
+        """Return released state blocks to the pool (``blocks`` newest first);
+        with ``_K3_CKPT_HOLD`` the newest hashed one stays referenced and the
+        one it supersedes is released instead."""
+        if _K3_CKPT_HOLD:
+            newest = next(
+                (b for b in blocks if b.block_hash is not None and not b.is_null),
+                None,
+            )
+            if newest is not None:
+                blocks = [b for b in blocks if b is not newest]
+                previous = self._k3_held_state.get(request_id)
+                self._k3_held_state[request_id] = newest
+                if previous is not None:
+                    blocks.append(previous)
+        if _K3_CKPT_REFRESH:
+            self._k3_note_released(request_id, blocks)
+        if blocks:
+            self.block_pool.free_blocks(blocks)
+
+    def k3_pop_held_state(self, request_id: str) -> list[KVCacheBlock]:
+        if self.mamba_cache_mode != "align":
+            return []
+        held = self._k3_held_state.pop(request_id, None)
+        return [] if held is None else [held]
+
+    def k3_pop_released_states(
+        self, request_id: str
+    ) -> list[tuple[KVCacheBlock, BlockHashWithGroupId]]:
+        if self.mamba_cache_mode != "align":
+            return []
+        return self._k3_released_states.pop(request_id, [])
 
     @classmethod
     def find_longest_cache_hit(
@@ -1615,7 +1689,7 @@ class MambaManager(SingleTypeKVCacheManager):
             freed.append(blocks[i])
             blocks[i] = self._null_block
         if freed:
-            self.block_pool.free_blocks(freed)
+            self._k3_free_released(request_id, freed)
         self._num_retired_blocks[request_id] = last_block
 
     def remove_skipped_blocks(
@@ -1645,40 +1719,73 @@ class MambaManager(SingleTypeKVCacheManager):
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                    self._k3_free_released(request_id, [blocks[last_state_block_idx]])
                     blocks[last_state_block_idx] = self._null_block
 
-    def _needs_internal_checkpoint(
+    def _resolve_internal_checkpoint(
         self,
         request_id: str,
         query_start: int,
         query_end: int,
         checkpoint_position: int,
         prefill_end: int,
-    ) -> bool:
+    ) -> MambaPrefillCheckpoint | None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        checkpoint_idx = cdiv(query_end, self.block_size) - 2
+        if not self.has_prefill_checkpoint_blocks or query_end < prefill_end:
+            return None
+        # Same decision and column as the scheduler and the worker builder.
+        valid, checkpoint_idx = resolve_mamba_prefill_checkpoint(
+            query_start=query_start,
+            query_end=query_end,
+            checkpoint_position=checkpoint_position,
+            hash_block_size=self.block_pool.hash_block_size,
+            mamba_block_size=self.block_size,
+            checkpoint_alignment=(self.kv_cache_spec.prefill_checkpoint_alignment),
+        )
+        if not valid:
+            return None
+        if is_mamba_prefill_checkpoint_in_place(
+            query_start, checkpoint_idx, self.block_size
+        ):
+            # Reuses the initial-state block. Its privacy can only be checked
+            # once any partial-hit CoW is applied (allocate_new_blocks).
+            return MambaPrefillCheckpoint(checkpoint_position, checkpoint_idx, True)
         blocks = self.req_to_blocks[request_id]
-        return (
-            self.has_prefill_checkpoint_blocks
-            and query_end >= prefill_end
-            and is_mamba_prefill_checkpoint_valid(
-                query_start=query_start,
-                query_end=query_end,
-                checkpoint_position=checkpoint_position,
-                hash_block_size=self.block_pool.hash_block_size,
-                mamba_block_size=self.block_size,
-                checkpoint_alignment=(self.kv_cache_spec.prefill_checkpoint_alignment),
+        if (
+            checkpoint_idx >= len(blocks)
+            or blocks[checkpoint_idx].is_null
+            or (
+                request_id in self._allocated_block_reqs
+                and checkpoint_idx >= len(blocks) - self.num_speculative_blocks
             )
-            and checkpoint_idx >= 0
-            and (
-                checkpoint_idx >= len(blocks)
-                or blocks[checkpoint_idx].is_null
-                or (
-                    request_id in self._allocated_block_reqs
-                    and checkpoint_idx >= len(blocks) - self.num_speculative_blocks
-                )
-            )
+        ):
+            return MambaPrefillCheckpoint(checkpoint_position, checkpoint_idx, False)
+        return None
+
+    def _check_in_place_checkpoint(
+        self, request_id: str, checkpoint: MambaPrefillCheckpoint | None
+    ) -> None:
+        """Assert an in-place checkpoint overwrites a request-private block.
+
+        The exporter writes the checkpoint into the initial-state block during
+        the forward, after the align pre-copy moved its state into the running
+        column. By now a partial hit has been redirected to its CoW copy and a
+        producer's partial-tail hash has been moved off the block, so it must
+        carry no hash: nothing can newly hit it, and earlier hits only read it
+        through CoW copies queued no later than this step, which run before
+        the forward. (ref_cnt is not checked: those pending copies, and PP /
+        async steps still in flight, may legitimately hold references.)
+        """
+        if checkpoint is None or not checkpoint.in_place:
+            return
+        req_blocks = self.req_to_blocks[request_id]
+        assert checkpoint.block_idx < len(req_blocks)
+        block = req_blocks[checkpoint.block_idx]
+        assert not block.is_null and block.block_hash is None, (
+            f"Mamba prefill checkpoint for request {request_id} would overwrite "
+            f"block {block.block_id} in place (column {checkpoint.block_idx}, "
+            f"hashed at {block.block_hash_num_tokens} tokens, "
+            f"ref_cnt={block.ref_cnt}), which is not request-private"
         )
 
     def get_num_blocks_to_allocate(
@@ -1750,27 +1857,22 @@ class MambaManager(SingleTypeKVCacheManager):
             # The helper returns a boundary strictly below its input, so every
             # chunk has one; under sparse retention only the prefill-end chunk's
             # is kept, so `prefill_end` skips reserving blocks for the others.
-            checkpoint_position = get_mamba_prefill_checkpoint_position(
-                num_tokens,
-                self.cache_hit_alignment_tokens,
-                self.drop_eagle_checkpoint_block,
-            )
-            if not self._needs_internal_checkpoint(
+            checkpoint = self._resolve_internal_checkpoint(
                 request_id,
                 total_computed_tokens,
                 num_tokens,
-                checkpoint_position,
+                get_mamba_prefill_checkpoint_position(
+                    num_tokens,
+                    self.cache_hit_alignment_tokens,
+                    self.drop_eagle_checkpoint_block,
+                ),
                 prefill_end,
-            ):
-                checkpoint_position = 0
-            checkpoint_block = int(checkpoint_position > 0)
+            )
+            # An in-place checkpoint reuses the initial-state block.
+            checkpoint_block = int(checkpoint is not None and not checkpoint.in_place)
             if not apply_admission_cap:
-                if checkpoint_position > 0:
-                    checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
-                    self._checkpoints[request_id] = (
-                        checkpoint_position,
-                        checkpoint_idx,
-                    )
+                if checkpoint is not None:
+                    self._checkpoints[request_id] = checkpoint
                 else:
                     self._checkpoints.pop(request_id, None)
             if num_new_blocks > 0:
@@ -1810,7 +1912,11 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            checkpoint_block = int(request_id in self._checkpoints)
+            checkpoint = self._checkpoints.get(request_id)
+            # Only a checkpoint in a fresh column needs its own block. An
+            # in-place one behaves as "no new block" below (null padding,
+            # speculative-block relocation, block caps).
+            checkpoint_block = int(checkpoint is not None and not checkpoint.in_place)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
@@ -1821,6 +1927,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 and not checkpoint_block
             ):
                 self._allocated_block_reqs.add(request_id)
+                self._check_in_place_checkpoint(request_id, checkpoint)
                 return []
             else:
                 prev_block_len = len(req_blocks)
@@ -1913,6 +2020,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 self._allocated_block_reqs.add(request_id)
                 self._partial_hit_reqs.pop(request_id, None)
                 returned_blocks.extend(new_blocks)
+                self._check_in_place_checkpoint(request_id, checkpoint)
                 return returned_blocks
 
     def _relocate_speculative_block(
@@ -2025,10 +2133,14 @@ class MambaManager(SingleTypeKVCacheManager):
         retention_interval: int | None,
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
-        # Re-key the reserved block at its exported checkpoint boundary.
+        # Re-key the reserved block at its exported checkpoint boundary. For an
+        # in-place checkpoint this also drops the full-block hash this step's
+        # pass just gave the initial-state block (it never holds that state),
+        # before cache_blocks offers the block to a connector.
         checkpoint = self._checkpoints.get(request.request_id)
         if checkpoint is not None:
-            checkpoint_position, checkpoint_idx = checkpoint
+            checkpoint_position = checkpoint.position
+            checkpoint_idx = checkpoint.block_idx
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]

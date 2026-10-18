@@ -70,6 +70,12 @@ logger = init_logger(__name__)
 _KDA_GATE_LOGBOUND_MIN = -5.0
 
 
+def _heads_view(x: torch.Tensor, head_dim: int) -> torch.Tensor:
+    """``rearrange(x, "n (h d) -> 1 n h d")`` as a plain view (same storage and
+    strides); einops' per-call parsing is measurable on the eager prefill path."""
+    return x.unflatten(-1, (-1, head_dim)).unsqueeze(0)
+
+
 def a_log_weight_loader(
     shard_axis: int,
 ) -> Callable[[torch.Tensor, torch.Tensor], None]:
@@ -1105,7 +1111,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 out=spec_conv_out,
             )
             q_spec, k_spec, v_spec = (
-                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                _heads_view(x, self.head_dim)
                 for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
             )
             spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
@@ -1194,8 +1200,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
                 v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
-                    rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
-                    for x in (q_ns, k_ns, v_ns)
+                    _heads_view(x, self.head_dim) for x in (q_ns, k_ns, v_ns)
                 )
 
                 assert non_spec_state_indices_tensor is not None
