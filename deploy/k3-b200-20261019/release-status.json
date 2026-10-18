@@ -1,7 +1,7 @@
 {
-  "status": "source-frozen-pending-gpu-acceptance",
+  "status": "source-frozen-api-smoke-passed",
   "unit_tests_passed": 117,
-  "gpu_http_sse_acceptance": "asynchronously running after documentation completion",
+  "gpu_http_sse_acceptance": "12/12 passed with real block rejection sampling",
   "assembled_package_hour_score": "not run",
   "existing_async_run": "cx-final2costv2-candidate-h1-r1",
   "default_configuration": "baseline-reference",
@@ -12,5 +12,6 @@
   "dependency_resolution_verified_on_both_hosts": true,
   "serving_and_replay_archives": "complete",
   "api_run": "release-api-20261019",
-  "api_cleanup": "Owned sessions automatically stopped on completion or 30-minute deadline"
+  "api_cleanup": "Owned sessions automatically stopped on completion or 30-minute deadline",
+  "historical_fixes_audit": "13 source checks; no missing applicable patches found"
 }

@@ -1,0 +1,566 @@
+{
+  "cases": [
+    {
+      "name": "named_function_stream_False",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 1 + 1?"
+          }
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "get_weather"
+          }
+        }
+      },
+      "http_status": 400,
+      "elapsed_s": 0.027613162994384766,
+      "raw_response": "{\"error\":{\"message\":\"tool_choice 'specified' is incompatible with thinking enabled (parameter=tool_choice)\",\"type\":\"BadRequestError\",\"param\":\"tool_choice\",\"code\":400}}",
+      "error": {
+        "message": "tool_choice 'specified' is incompatible with thinking enabled (parameter=tool_choice)",
+        "type": "BadRequestError",
+        "param": "tool_choice",
+        "code": 400
+      }
+    },
+    {
+      "name": "partial_user_stream_False",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi",
+            "partial": true
+          }
+        ],
+        "stream": false
+      },
+      "http_status": 400,
+      "elapsed_s": 0.001958131790161133,
+      "raw_response": "{\"error\":{\"message\":\"partial=true is only supported on the final assistant message (parameter=messages[0].partial)\",\"type\":\"BadRequestError\",\"param\":\"messages[0].partial\",\"code\":400}}",
+      "error": {
+        "message": "partial=true is only supported on the final assistant message (parameter=messages[0].partial)",
+        "type": "BadRequestError",
+        "param": "messages[0].partial",
+        "code": 400
+      }
+    },
+    {
+      "name": "partial_nonfinal_stream_False",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "prefix",
+            "partial": true
+          },
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "stream": false
+      },
+      "http_status": 400,
+      "elapsed_s": 0.0015194416046142578,
+      "raw_response": "{\"error\":{\"message\":\"partial=true is only supported on the final assistant message (parameter=messages[0].partial)\",\"type\":\"BadRequestError\",\"param\":\"messages[0].partial\",\"code\":400}}",
+      "error": {
+        "message": "partial=true is only supported on the final assistant message (parameter=messages[0].partial)",
+        "type": "BadRequestError",
+        "param": "messages[0].partial",
+        "code": 400
+      }
+    },
+    {
+      "name": "partial_valid_stream_False",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 128,
+        "messages": [
+          {
+            "role": "user",
+            "content": "1 + 1 等于几？只说答案。"
+          },
+          {
+            "role": "assistant",
+            "content": "答案是",
+            "partial": true,
+            "reasoning_content": "1 加 1 等于 2。"
+          }
+        ],
+        "stream": false
+      },
+      "http_status": 200,
+      "elapsed_s": 1.0639164447784424,
+      "raw_response": "{\"id\":\"chatcmpl-b42b4dae7de5708b\",\"object\":\"chat.completion\",\"created\":1792352393,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\" 2。\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":163586,\"token_ids\":null,\"routed_experts\":null}],\"service_tier\":null,\"system_fingerprint\":\"vllm-0.32.0rc1.dev95+g2521446ac-tp8-pp2-ep-53eb0420\",\"usage\":{\"prompt_tokens\":116,\"total_tokens\":126,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":0,\"created_cache_tokens\":0,\"multimodal_tokens\":null},\"completion_tokens_details\":{\"reasoning_tokens\":0}},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"prompt_text\":null,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"metrics\":null}",
+      "message": {
+        "role": "assistant",
+        "content": " 2。",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "reasoning": null
+      },
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 116,
+        "total_tokens": 126,
+        "completion_tokens": 10,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "created_cache_tokens": 0,
+          "multimodal_tokens": null
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      }
+    },
+    {
+      "name": "tool_auto_stream_False",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "请调用 get_weather 查询 Beijing 的天气，等工具结果再回答。"
+          }
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto"
+      },
+      "http_status": 200,
+      "elapsed_s": 0.8432812690734863,
+      "raw_response": "{\"id\":\"chatcmpl-b26b5f619005328d\",\"object\":\"chat.completion\",\"created\":1792352394,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"我来为您查询北京的天气。\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[{\"id\":\"chatcmpl-tool-ad2af31f933ac6ff\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Beijing\\\"}\"}}],\"reasoning\":\"The user is asking me to call the get_weather tool to query Beijing's weather, and to wait for the tool result before answering. This is a straightforward request - I should call the get_weather function with \\\"Beijing\\\" as the city parameter.\"},\"logprobs\":null,\"finish_reason\":\"tool_calls\",\"stop_reason\":163586,\"token_ids\":null,\"routed_experts\":null}],\"service_tier\":null,\"system_fingerprint\":\"vllm-0.32.0rc1.dev95+g2521446ac-tp8-pp2-ep-53eb0420\",\"usage\":{\"prompt_tokens\":184,\"total_tokens\":293,\"completion_tokens\":109,\"prompt_tokens_details\":{\"cached_tokens\":0,\"created_cache_tokens\":0,\"multimodal_tokens\":null},\"completion_tokens_details\":{\"reasoning_tokens\":52}},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"prompt_text\":null,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"metrics\":null}",
+      "message": {
+        "role": "assistant",
+        "content": "我来为您查询北京的天气。",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-ad2af31f933ac6ff",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Beijing\"}"
+            }
+          }
+        ],
+        "reasoning": "The user is asking me to call the get_weather tool to query Beijing's weather, and to wait for the tool result before answering. This is a straightforward request - I should call the get_weather function with \"Beijing\" as the city parameter."
+      },
+      "finish_reason": "tool_calls",
+      "usage": {
+        "prompt_tokens": 184,
+        "total_tokens": 293,
+        "completion_tokens": 109,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "created_cache_tokens": 0,
+          "multimodal_tokens": null
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 52
+        }
+      }
+    },
+    {
+      "name": "tool_required_stream_False",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "请调用 get_weather 查询 Beijing 的天气，等工具结果再回答。"
+          }
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "required"
+      },
+      "http_status": 200,
+      "elapsed_s": 0.8753314018249512,
+      "raw_response": "{\"id\":\"chatcmpl-a2f0f7e37bf9621a\",\"object\":\"chat.completion\",\"created\":1792352395,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"我来为您查询北京的天气。\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[{\"id\":\"chatcmpl-tool-9a588fc7ee71db7b\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Beijing\\\"}\"}}],\"reasoning\":\"The user is asking me to call the get_weather tool to query Beijing's weather, and to wait for the tool result before answering. Let me call the tool.\"},\"logprobs\":null,\"finish_reason\":\"tool_calls\",\"stop_reason\":163586,\"token_ids\":null,\"routed_experts\":null}],\"service_tier\":null,\"system_fingerprint\":\"vllm-0.32.0rc1.dev95+g2521446ac-tp8-pp2-ep-53eb0420\",\"usage\":{\"prompt_tokens\":220,\"total_tokens\":311,\"completion_tokens\":91,\"prompt_tokens_details\":{\"cached_tokens\":0,\"created_cache_tokens\":0,\"multimodal_tokens\":null},\"completion_tokens_details\":{\"reasoning_tokens\":34}},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"prompt_text\":null,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"metrics\":null}",
+      "message": {
+        "role": "assistant",
+        "content": "我来为您查询北京的天气。",
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9a588fc7ee71db7b",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Beijing\"}"
+            }
+          }
+        ],
+        "reasoning": "The user is asking me to call the get_weather tool to query Beijing's weather, and to wait for the tool result before answering. Let me call the tool."
+      },
+      "finish_reason": "tool_calls",
+      "usage": {
+        "prompt_tokens": 220,
+        "total_tokens": 311,
+        "completion_tokens": 91,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "created_cache_tokens": 0,
+          "multimodal_tokens": null
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 34
+        }
+      }
+    },
+    {
+      "name": "named_function_stream_True",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "user",
+            "content": "What is 1 + 1?"
+          }
+        ],
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "get_weather"
+          }
+        }
+      },
+      "http_status": 400,
+      "elapsed_s": 0.0023453235626220703,
+      "raw_response": "{\"error\":{\"message\":\"tool_choice 'specified' is incompatible with thinking enabled (parameter=tool_choice)\",\"type\":\"BadRequestError\",\"param\":\"tool_choice\",\"code\":400}}",
+      "error": {
+        "message": "tool_choice 'specified' is incompatible with thinking enabled (parameter=tool_choice)",
+        "type": "BadRequestError",
+        "param": "tool_choice",
+        "code": 400
+      }
+    },
+    {
+      "name": "partial_user_stream_True",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hi",
+            "partial": true
+          }
+        ],
+        "stream": true
+      },
+      "http_status": 400,
+      "elapsed_s": 0.0019071102142333984,
+      "raw_response": "{\"error\":{\"message\":\"partial=true is only supported on the final assistant message (parameter=messages[0].partial)\",\"type\":\"BadRequestError\",\"param\":\"messages[0].partial\",\"code\":400}}",
+      "error": {
+        "message": "partial=true is only supported on the final assistant message (parameter=messages[0].partial)",
+        "type": "BadRequestError",
+        "param": "messages[0].partial",
+        "code": 400
+      }
+    },
+    {
+      "name": "partial_nonfinal_stream_True",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 512,
+        "messages": [
+          {
+            "role": "assistant",
+            "content": "prefix",
+            "partial": true
+          },
+          {
+            "role": "user",
+            "content": "hi"
+          }
+        ],
+        "stream": true
+      },
+      "http_status": 400,
+      "elapsed_s": 0.0018398761749267578,
+      "raw_response": "{\"error\":{\"message\":\"partial=true is only supported on the final assistant message (parameter=messages[0].partial)\",\"type\":\"BadRequestError\",\"param\":\"messages[0].partial\",\"code\":400}}",
+      "error": {
+        "message": "partial=true is only supported on the final assistant message (parameter=messages[0].partial)",
+        "type": "BadRequestError",
+        "param": "messages[0].partial",
+        "code": 400
+      }
+    },
+    {
+      "name": "partial_valid_stream_True",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 128,
+        "messages": [
+          {
+            "role": "user",
+            "content": "1 + 1 等于几？只说答案。"
+          },
+          {
+            "role": "assistant",
+            "content": "答案是",
+            "partial": true,
+            "reasoning_content": "1 加 1 等于 2。"
+          }
+        ],
+        "stream": true
+      },
+      "http_status": 200,
+      "elapsed_s": 0.10623550415039062,
+      "raw_response": "data: {\"id\":\"chatcmpl-96437b221a3ae707\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"prompt_token_ids\":null,\"prompt_text\":null}\n\ndata: {\"id\":\"chatcmpl-96437b221a3ae707\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-96437b221a3ae707\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"2。\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-96437b221a3ae707\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":163586,\"token_ids\":null}],\"system_fingerprint\":\"vllm-0.32.0rc1.dev95+g2521446ac-tp8-pp2-ep-53eb0420\"}\n\ndata: [DONE]\n\n",
+      "message": {
+        "content": " 2。",
+        "reasoning": "",
+        "tool_calls": []
+      },
+      "finish_reason": "stop"
+    },
+    {
+      "name": "tool_auto_stream_True",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "请调用 get_weather 查询 Beijing 的天气，等工具结果再回答。"
+          }
+        ],
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "auto"
+      },
+      "http_status": 200,
+      "elapsed_s": 0.6328835487365723,
+      "raw_response": "data: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"prompt_token_ids\":null,\"prompt_text\":null}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"The\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" user is\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" asking me to call the\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" get_weather tool to\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" query\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" Beijing\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"'s weather, and to\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" wait\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" for the tool result before\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" answering. This is a\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" straightforward\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" request -\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" I should call the get\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"_weather function with \\\"\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"Be\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"ijing\\\" as the city\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" parameter.\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"我来\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"为您\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"查询北京的\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"天气。\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"tool_calls\":[{\"id\":\"chatcmpl-tool-a4e1cf8d6f45f08e\",\"type\":\"function\",\"index\":0,\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Beijing\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-b595898158dc7dca\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\",\"stop_reason\":163586,\"token_ids\":null}],\"system_fingerprint\":\"vllm-0.32.0rc1.dev95+g2521446ac-tp8-pp2-ep-53eb0420\"}\n\ndata: [DONE]\n\n",
+      "message": {
+        "content": "我来为您查询北京的天气。",
+        "reasoning": "The user is asking me to call the get_weather tool to query Beijing's weather, and to wait for the tool result before answering. This is a straightforward request - I should call the get_weather function with \"Beijing\" as the city parameter.",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a4e1cf8d6f45f08e",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Beijing\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    },
+    {
+      "name": "tool_required_stream_True",
+      "request": {
+        "model": "kimi-k3",
+        "temperature": 0,
+        "max_tokens": 4096,
+        "messages": [
+          {
+            "role": "user",
+            "content": "请调用 get_weather 查询 Beijing 的天气，等工具结果再回答。"
+          }
+        ],
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Get the weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "city": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "city"
+                ]
+              }
+            }
+          }
+        ],
+        "tool_choice": "required"
+      },
+      "http_status": 200,
+      "elapsed_s": 0.5370156764984131,
+      "raw_response": "data: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"prompt_token_ids\":null,\"prompt_text\":null}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"The\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" user is\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" asking me to call the\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" get_weather tool to\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" query\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" Beijing\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"'s weather, and to\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" wait\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" for the tool\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" result before answering. Let\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" me call the tool.\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"我来\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"为您\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"查询北京的\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"天气。\"},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"tool_calls\":[{\"id\":\"chatcmpl-tool-98c496419c128e9b\",\"type\":\"function\",\"index\":0,\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\": \\\"Beijing\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":null,\"token_ids\":null}]}\n\ndata: {\"id\":\"chatcmpl-9e54f5d3ae71817b\",\"object\":\"chat.completion.chunk\",\"created\":1792352396,\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\",\"stop_reason\":163586,\"token_ids\":null}],\"system_fingerprint\":\"vllm-0.32.0rc1.dev95+g2521446ac-tp8-pp2-ep-53eb0420\"}\n\ndata: [DONE]\n\n",
+      "message": {
+        "content": "我来为您查询北京的天气。",
+        "reasoning": "The user is asking me to call the get_weather tool to query Beijing's weather, and to wait for the tool result before answering. Let me call the tool.",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-98c496419c128e9b",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Beijing\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "cleanup": {
+    "xb01-gpu-200b-0030": {
+      "time": 1792352490.257444,
+      "host": "xb01-gpu-200b-0030",
+      "run": "release-api-20261019",
+      "owned_remaining": [
+        3660638,
+        3660639,
+        3660640,
+        3660641
+      ],
+      "gpu_compute_pids": "3660638\n3660639\n3660640\n3660641"
+    },
+    "xb01-gpu-200b-0024": {
+      "time": 1792352482.1955652,
+      "host": "xb01-gpu-200b-0024",
+      "run": "release-api-20261019",
+      "owned_remaining": [],
+      "gpu_compute_pids": ""
+    }
+  },
+  "cleanup_followup": {
+    "host": "xb01-gpu-200b-0030",
+    "previously_recorded_remaining_pids_still_live": false,
+    "gpu_compute_pids": [],
+    "note": "Follow-up read-only check: all previously listed processes gone; stop snapshot preceded their final exit."
+  }
+}

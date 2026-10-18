@@ -1,0 +1,116 @@
+{
+  "scope": "Final branch runtime, checked against old deployment docs and original patches, not ancestry alone.",
+  "checks": [
+    {
+      "fix": "reasoning-token-accounting",
+      "source_commit": "7ef487078ccf4abc634773012caa2b53505ab1d1",
+      "file": "vllm/reasoning/kimi_k3_reasoning_parser.py",
+      "sha256": "c19ebe65d3a00a7abeef66b45971184d307563aca78b80512a1d4362ebe5b153",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "reasoning-history-alias",
+      "source_commit": "7ef487078ccf4abc634773012caa2b53505ab1d1",
+      "file": "vllm/entrypoints/openai/chat_completion/protocol.py",
+      "sha256": "055d3bd6f023ec17e8f25e9a324222faad67612f86e7d063717424ccf580a606",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "conv-logical-history",
+      "source_commit": "9b50e7657ecbda056923b62b4c84db1aee788cca",
+      "file": "vllm/models/kimi_k3/nvidia/kda.py",
+      "sha256": "a0386a64ac6d24783521b90be6f319421a9686fe2e3c4466998bcbdbadb3a299",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "conv-export-explicit-history",
+      "source_commit": "9b50e7657ecbda056923b62b4c84db1aee788cca",
+      "file": "vllm/model_executor/layers/mamba/kda_checkpoint.py",
+      "sha256": "561bc23d0d3691b154fdec0cd8990eff86521f843145dfab053684a3f1522eb0",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "accepted-state-boundary",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/models/kimi_k3/nvidia/ops/recoverssm.py",
+      "sha256": "504142e02119eca23d514f18a1ef2f05b3904cf1e9ef714952f1fcdb8709cda2",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "accepted-state-postprocess",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/worker/gpu/model_states/recoverssm.py",
+      "sha256": "c0391f60e3a1e0a0140379562124277456706787598a16e8e3c6a215e2a19a4a",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "persistent-state-tables",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/worker/gpu/model_runner.py",
+      "sha256": "143719e54018e05bc4290754081e3a7c387d58a35998241e35af9b107d747d2d",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "separate-metadata-and-no-double-copy",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/worker/gpu/model_states/mamba_hybrid.py",
+      "sha256": "5a8e717fe32da645f15380e6676ffd5badea1054f9ed53814ef5bd357c4557dd",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "reset-metadata-context",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/worker/gpu/cudagraph_utils.py",
+      "sha256": "ee84029533c21fb17aaf7c37d7b65785fc784380a04b87fd460dddfa32c233b3",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "zero-allocated-mamba-blocks",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/core/single_type_kv_cache_manager.py",
+      "sha256": "1ec83bf065391cf229594ae4579b56351cf9878ca037f1405475f6414be958a2",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "zero-all-state-tensors",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/worker/utils.py",
+      "sha256": "e1130588b9a341831ea30454e53f44ccc47d744de298ee48807c4ff34a878bc2",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "split-empty-segment-guard",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/v1/attention/backends/mla/prefill/trtllm_ragged.py",
+      "sha256": "eaee981700dd6d326da3b53d7c05fc97a8b53d700c6aad698860eae01fd1003b",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    },
+    {
+      "fix": "mooncake-duplicate-get",
+      "source_commit": "918d60999c3e4849319cffd487f7afd4b928ad73",
+      "file": "vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+      "sha256": "4180e0b6f129a3900bd72ef7123ddc61abb40269defd718d2b9395bab30373df",
+      "status": "present-in-frozen-runtime",
+      "review": "Compared original patch semantics and current call sites; source inspection, not new GPU regression coverage."
+    }
+  ],
+  "additional_verification": {
+    "reasoning_method_ast_matches_original": true,
+    "duplicate_get_destinations_isolated_check": "passed"
+  },
+  "missing_applicable_runtime_patches_found": 0,
+  "gateway_boundary": "AGW fixes reported in deployment chat belong to a separate repository; not claimed included in vLLM.",
+  "coverage_limit": "No claim that all historical platform bugs are closed; multimodal, gateway, semantic quality and full stability acceptance remain separate."
+}
