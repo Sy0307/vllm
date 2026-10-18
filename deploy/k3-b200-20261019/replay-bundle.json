@@ -1,0 +1,10 @@
+{
+  "archive": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/replay-assets.tar.gz",
+  "sha256": "5b8e55019fb64d746790fd2836b6f1ccd365aba3897dc8a01aa1295cda8f04ce",
+  "size": 938209675,
+  "paths": [
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/tokenizer-path-compat",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/hf-cache"
+  ],
+  "note": "mmap-cache is derived and regenerated offline from the frozen HF dataset cache; credentials are not included."
+}

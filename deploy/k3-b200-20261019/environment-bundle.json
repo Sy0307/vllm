@@ -1,0 +1,30 @@
+{
+  "archive": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/runtime-dependencies.tar.gz",
+  "sha256": "5df73b99f1f597d2ec94b3116c8447cf9b315cf796cc85efd076835cec01482f",
+  "size": 11386171046,
+  "paths": [
+    "/gpfs/mszn/data/k3-benchmarks/k3-pd-four-node-20260923/main-env",
+    "/gpfs/mszn/data/k3-benchmarks/k3-mm-main-e2e-20260917/baseline-env",
+    "/gpfs/mszn/data/k3-benchmarks/nightly-9521-env",
+    "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/up/deps",
+    "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/deps/cdsl48",
+    "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/campaigns/sy-final2-20261017/mgG",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/harness-venv",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/aiperf-source",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/inferencex-source",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/python",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/harness-freeze.txt",
+    "/gpfs/mszn/data/k3-benchmarks/ref440542/harness-requirements.txt",
+    "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/k3memext.py",
+    "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/k3opt_ext.py",
+    "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/stop2.py"
+  ],
+  "exclusions": [
+    "__pycache__",
+    "*.pyc",
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache"
+  ],
+  "restore_contract": "Only restore on a new isolated environment with these exact absolute prefixes; do not overwrite existing environments. OS, driver, CUDA toolkit, and separately provisioned model weights are prerequisites."
+}

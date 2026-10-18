@@ -1,0 +1,5 @@
+VERIFIED_HOST: xb01-gpu-200b-0024 uid 1000 8 B200
+{"verified": true, "runtime_files": 3563, "native_libraries": 17, "overlay": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/checkout/deploy/k3-b200-20261019/overlay"}
+{"environment_verified": true, "packages": 221, "torch": "2.13.0+cu130", "torch_cuda": "13.0", "python": "3.12.3"}
+STARTED {"pid": 290545, "pgid": 290545, "start_ticks": "556659721", "host": "xb01-gpu-200b-0024", "run": "release-api-20261019", "time": 1792351773.9442677}
+RELEASE_ACCEPTANCE_LAUNCHED:{"host": "xb01-gpu-200b-0024", "run": "release-api-20261019"}

@@ -104,7 +104,7 @@ TPOT 对应 full_response_inter_token_latency：每个成功请求的完整生�
 
 归档目录为 /gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019/。runtime-dependencies.tar.gz 保存上述服务依赖、原生运行时和 benchmark harness；replay-assets.tar.gz 保存离线数据缓存与 tokenizer 路径兼容层。模型权重、系统驱动、操作系统及 /usr/local/cuda 系统工具链由目标环境单独提供。mmap-cache 为派生缓存，可从归档的离线数据重新生成。
 
-环境压缩与 SHA256 计算作为后台收尾任务执行。只有 environment-bundle-state.json 的 stage=complete 且 environment-bundle.json 已生成，归档才算完成；校验归档文件与清单的 size、sha256。replay-bundle.json 同样记录数据归档大小和哈希。恢复目标应是新的隔离 Linux 环境并保持锁定绝对前缀；不要覆盖现有共享环境。跨机器从空环境恢复尚未完成验收。
+服务依赖与离线回放数据归档均已完成。runtime-dependencies.tar.gz 为 11,386,171,046 字节，SHA256 为 5df73b99f1f597d2ec94b3116c8447cf9b315cf796cc85efd076835cec01482f；replay-assets.tar.gz 为 938,209,675 字节，SHA256 为 5b8e55019fb64d746790fd2836b6f1ccd365aba3897dc8a01aa1295cda8f04ce。对应清单 environment-bundle.json、replay-bundle.json 已随分支保存。恢复目标应是新的隔离 Linux 环境并保持锁定绝对前缀；不要覆盖现有共享环境。跨机器从空环境恢复尚未完成验收。
 
 主模型目录 /gpfs/mszn/models/moonshotai/Kimi-K3；草稿目录 /gpfs/mszn/models/Inferact/Kimi-K3-DSpark。model.lock.json 记录配置、tokenizer Python 与 tiktoken.model 哈希，以及 96 个主模型分片、1 个草稿分片的文件名和大小。没有可核实的 Hub revision，未对所有权重内容做全量哈希；启动前的文件大小检查不等于权重内容完整性证明。
 
@@ -187,7 +187,7 @@ Partial 修复没有改写模型目录里的 tokenizer。renderer 保留其分�
 
 ## 文档完成后的验收与实验入口
 
-目前已完成：117 项 CPU 单测，包含实际 K3 tokenizer 的中文、空白、空前缀、控制标记和通道状态；锁定环境中 221 个有效包的解析、.pth 与 torch 导入核对；新增 API/部署文件检查。冻结的原始运行时与第三方代码仍有继承的 lint 问题，已记录并保留原字节，不宣称分支已满足上游 PR 的全量 lint 要求。
+目前已完成：117 项 CPU 单测，包含实际 K3 tokenizer 的中文、空白、空前缀、控制标记和通道状态；新建 overlay 的 3563 个运行时文件和 17 个原生库通过校验；两台主机各自通过 221 个有效包的解析、.pth 与 torch 导入核对；新增 API/部署文件检查通过。文档完成后已异步启动 release-api-20261019 做真实 HTTP/SSE 验收，结果尚未补录；本次自有服务在验收完成或 30 分钟到期后自动停止。冻结的原始运行时与第三方代码仍有继承的 lint 问题，已记录并保留原字节，不宣称分支已满足上游 PR 的全量 lint 要求。
 
 下一步先做真实 block 采样的隔离 HTTP/SSE 验收，再决定完整计分配置。probe_api.py 包含 12 项请求：指定 function 拒绝、两类错误 Partial 位置拒绝、有效 Partial 后缀续写、auto/required 工具调用，各覆盖流式与非流式。输出写入新文件，遇到任何断言失败即停止并保留已有响应。
 

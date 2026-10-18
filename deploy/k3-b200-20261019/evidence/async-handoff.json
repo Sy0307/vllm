@@ -1,0 +1,16 @@
+{
+  "updated_epoch": 1792352120.9371781,
+  "api_run": "release-api-20261019",
+  "release_root": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/releases/k3-b200-closeout-20261019",
+  "api_results": "api-http-sse.json",
+  "api_probe_log_local": "reports/2026-10-17/k3-final2-followup/closeout/release-probe.log",
+  "cleanup_results": [
+    "cleanup-acceptance-xb01-gpu-200b-0030.json",
+    "cleanup-acceptance-xb01-gpu-200b-0024.json"
+  ],
+  "cleanup_contract": "Automatically stop only the recorded release sessions when all 12 probe cases finish or within 30 minutes of server startup.",
+  "existing_async_score_run": "cx-final2costv2-candidate-h1-r1",
+  "existing_async_score_campaign": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/campaigns/codex-final2-prefill-cost-v2-score-20261019",
+  "new_performance_campaign_started": false,
+  "note": "Document and package delivered before waiting for experiments; final performance selection remains pending."
+}

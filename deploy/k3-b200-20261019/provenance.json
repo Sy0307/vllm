@@ -1700,5 +1700,6 @@
   },
   "reference_performance_is_not_release_measurement": true,
   "source_freeze_commit": "53710fce3d146b821edc4e059ffbf580287a813c",
-  "deployment_document": "https://acnc6zeentra.feishu.cn/docx/LE2mdI7ZUovrnGxBjKucKKDWn7S"
+  "deployment_document": "https://acnc6zeentra.feishu.cn/docx/LE2mdI7ZUovrnGxBjKucKKDWn7S",
+  "assembly_fix_commit": "32e932d13"
 }
