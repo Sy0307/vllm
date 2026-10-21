@@ -6,7 +6,7 @@
 
 ## 1. 环境与文件
 
-限定两台主机：prod30（`xb01-gpu-200b-0030`，PP0/API，10.18.1.30）和 prod24（`xb01-gpu-200b-0024`，PP1，10.18.1.24），各 8×B200，使用 UID 1000。启动前 GPU 和服务端口必须空闲。
+默认两台主机：prod30（`xb01-gpu-200b-0030`，PP0/API，10.18.1.30）和 prod24（`xb01-gpu-200b-0024`，PP1，10.18.1.24），各 8×B200，使用 UID 1000。启动前 GPU 和服务端口必须空闲。prod09/prod25 使用第 6 节的独立配置，不修改默认主机对。
 
 环境：Ubuntu 24.04.3、Python 3.12.3、驱动 590.48.01；torch 2.13.0+cu130、Triton 3.7.1、Transformers 5.17.0、FlashInfer 0.7.0.post1、CUTLASS DSL 4.8.0、DeepEP 2.0.0+local、Mooncake 0.3.13.post1。系统 nvcc 为 13.1.115。
 
@@ -51,6 +51,8 @@ ln -s /gpfs/mszn/data/k3-benchmarks/k3-pd-four-node-20260923/main-env .venv
 
 API 地址为 `http://10.18.1.30:18995/v1`，模型名 `kimi-k3`。启动器校验主机、UID、GPU 空闲、端口及依赖；分布式端口 29795，Mooncake 端口 18796/18797/19796。最终命令、环境、日志及进程身份保存在部署目录的 `state/runs/<RUN>/<HOST>/`。
 
+Mooncake 默认每 worker 的 store segment 为 160 GiB，单机 8 个 worker 共 1,280 GiB，另有每 worker 4 GiB 缓冲。启动器根据 `/proc/meminfo` 的 `MemAvailable` 检查上述分配并预留 64 GiB；不足时在加载权重前退出。该预检不预留内存，其他任务仍可能改变可用容量。
+
 ## 3. 默认配置
 
 TP8 / PP2（48/45 层）/ DCP8 / EP8；DSpark K4，真实 block 拒绝采样；服务端上限 192，调度/批量 token 预算 9216/9792；预填充配对 WAIT=16，共享专家 TP4；PP0/PP1 显存利用率 0.95/0.91。历史缓存、CuTe 历史注意力和预填充成本限制默认关闭。
@@ -84,3 +86,30 @@ K3 常开思考，不支持指定某个 function。`partial=true` 只用于最�
 只停止本 RUN 记录且进程身份匹配的会话。检查 `stopped.json` 中 `owned_remaining` 为空；验收失败时保留日志，修复后换新 RUN。旧环境与旧版本保留，尚未进行生产切流；本交付不是新的容器镜像或 Kubernetes 发布。
 
 测试和历史指标见 `evidence/`，当前验收状态见 `release-status.json`。
+
+## 6. prod09/prod25 部署与 JSON 验收（2026-10-21）
+
+使用更新后的发布分支；10 月 19 日的 r2 源码归档不包含本节新增的启动器和配置，原依赖与模型锁保持不变。
+
+prod09（`xb01-gpu-200b-0009`，10.18.1.9）为 PP0/API，prod25（`xb01-gpu-200b-0025`，10.18.1.25）为 PP1。在两台各执行：
+
+```bash
+.venv/bin/python deploy/k3-b200-20261019/launch.py json-api-new deploy/k3-b200-20261019/profiles/serving-prod09-prod25.json
+```
+
+仅 prod09 执行健康检查与 JSON 验收，输出目录必须不存在：
+
+```bash
+.venv/bin/python deploy/k3-b200-20261019/health.py json-api-new
+.venv/bin/python deploy/k3-b200-20261019/probe_json.py --output /tmp/k3-json-acceptance
+```
+
+该配置通过 `nodes` 显式选择这对主机，其余模型和采样设置继承 `serving.json`，仅将 Mooncake `mc_segment` 改为每 worker 64 GiB（单机共 512 GiB）。第一轮使用 160 GiB 时，prod09 的 worker 在挂载 segment 阶段被主机 OOM killer 杀死，尚未进入 HTTP 验收。较小的 store 会减少外部缓存容量；本次接口验证不证明吞吐或长时间缓存命中率与 160 GiB 相同。
+
+`probe_json.py` 包含普通请求对照，以及 JSON Object、strict JSON Schema、嵌套 Schema 和反向提示的流式/非流式检查，共 9 项。它保存原始请求、HTTP/SSE 响应和逐项结果；只解析最终 `message.content` 或拼接后的 `delta.content`，不将思考字段当作 JSON。任一检查失败时返回非零退出码。
+
+停止本次实例时，在两台各执行 `stop.py json-api-r2`；它仍只处理本 RUN 记录且身份匹配的进程。
+
+实测结果：`json-api-r2` 上两轮 JSON 验收各 9/9 通过，原有 HTTP/SSE 接口验收 12/12 通过，新增内存检查单测本地及远端均 3/3 通过。服务保留运行，API 为 `http://10.18.1.9:18995/v1`，模型名 `kimi-k3`。上述启动示例用新 RUN 名 `json-api-new`，不要重复使用已有 RUN。
+
+本轮未修改冻结的推理源码；JSON 模式本身已可用，修复范围是主机选择、Mooncake 容量和启动前内存检查。内存检查是在 r2 启动后加入并单测的，不声称 r2 已执行该预检。客户端应仅解析最终 `content`；流式先拼接 `delta.content`，思考字段单独处理。结果及原始响应见 `evidence/json-prod09-prod25-20261021/`。本次直接访问后端，不覆盖网关转发、全部 JSON Schema 关键字或性能与质量评估。

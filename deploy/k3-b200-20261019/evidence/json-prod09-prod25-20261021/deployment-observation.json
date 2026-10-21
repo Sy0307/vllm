@@ -1,0 +1,29 @@
+{
+  "time": 1792581002.832249,
+  "physical_gpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "run": "json-api-r2",
+  "oom_kernel": [
+    "[Wed Oct 21 18:55:56 2026] Out of memory: Killed process 1625719 (epp) total-vm:1401660kB, anon-rss:0kB, file-rss:1884kB, shmem-rss:0kB, UID:65532 pgtables:356kB oom_score_adj:969",
+    "[Wed Oct 21 18:55:58 2026] [ 233323]  1000 233323 575699786 42788193 42445078    58240    284875 351690752        0             0 VLLM::Worker_PP",
+    "[Wed Oct 21 18:55:58 2026] Out of memory: Killed process 1625873 (epp) total-vm:1421684kB, anon-rss:0kB, file-rss:92kB, shmem-rss:0kB, UID:65532 pgtables:488kB oom_score_adj:969",
+    "[Wed Oct 21 18:55:58 2026] Out of memory: Killed process 1625989 (epp) total-vm:1421684kB, anon-rss:0kB, file-rss:92kB, shmem-rss:0kB, UID:65532 pgtables:488kB oom_score_adj:969",
+    "[Wed Oct 21 18:55:59 2026] [ 233323]  1000 233323 575699786 42817313 42474198    58240    284875 351928320        0             0 VLLM::Worker_PP",
+    "[Wed Oct 21 18:55:59 2026] Out of memory: Killed process 2903859 (systemd) total-vm:21768kB, anon-rss:1792kB, file-rss:8960kB, shmem-rss:0kB, UID:1000 pgtables:84kB oom_score_adj:100",
+    "[Wed Oct 21 18:55:59 2026] [ 233323]  1000 233323 575699786 42817313 42474198    58240    284875 351928320        0             0 VLLM::Worker_PP",
+    "[Wed Oct 21 18:55:59 2026] Out of memory: Killed process 2903860 ((sd-pam)) total-vm:21152kB, anon-rss:0kB, file-rss:1792kB, shmem-rss:0kB, UID:1000 pgtables:80kB oom_score_adj:100",
+    "[Wed Oct 21 18:55:59 2026] [ 233323]  1000 233323 575699786 42819105 42475990    58240    284875 351940608        0             0 VLLM::Worker_PP",
+    "[Wed Oct 21 18:55:59 2026] oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=user.slice,mems_allowed=0-1,global_oom,task_memcg=/user.slice/user-1000.slice/session-56603.scope,task=VLLM::Worker_PP,pid=233323,uid=1000",
+    "[Wed Oct 21 18:55:59 2026] Out of memory: Killed process 233323 (VLLM::Worker_PP) total-vm:2302799144kB, anon-rss:169903960kB, file-rss:232960kB, shmem-rss:1139500kB, UID:1000 pgtables:343692kB oom_score_adj:0",
+    "[Wed Oct 21 18:56:07 2026] oom_reaper: reaped process 233323 (VLLM::Worker_PP), now anon-rss:0kB, file-rss:69856kB, shmem-rss:0kB"
+  ],
+  "health_http_status": 200
+}

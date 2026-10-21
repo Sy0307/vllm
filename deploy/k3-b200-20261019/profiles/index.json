@@ -19,6 +19,11 @@
       "benchmark.json",
       "serving.json",
       "9216/9792, C96/S192, prefill pairing + TP4; baseline reference 2228.93 tok/s"
+    ],
+    "prod09-prod25": [
+      "serving-prod09-prod25.json",
+      "serving",
+      "prod09 API / prod25 PP1; Mooncake 64 GiB per worker; JSON 9/9 twice and existing API 12/12; no throughput score"
     ]
   },
   "rule": "Profiles are alternatives, not additive. No speedups may be summed. Combined package not scored."

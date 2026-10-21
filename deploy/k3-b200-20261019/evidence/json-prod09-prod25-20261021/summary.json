@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-21",
+  "nodes": [
+    "xb01-gpu-200b-0009",
+    "xb01-gpu-200b-0025"
+  ],
+  "physical_gpus_per_node": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "run": "json-api-r2",
+  "endpoint": "http://10.18.1.9:18995/v1",
+  "model": "kimi-k3",
+  "frozen_runtime_release": "k3-b200-closeout-20261019",
+  "runtime_modified": false,
+  "profile": "profiles/serving-prod09-prod25.json",
+  "mooncake_segment_per_worker": "64 GiB",
+  "json_acceptance": "9/9 passed twice",
+  "existing_http_sse_acceptance": "12/12 passed",
+  "memory_guard_unit_tests": "3/3 passed locally and remotely",
+  "remote_campaign": "/gpfs/mszn/data/k3-benchmarks/k3-opt-20261013/campaigns/json-0925-20261021",
+  "baseline_probe_directory_note": "api-baseline-r1 is a probe label; both JSON rounds tested service json-api-r2.",
+  "startup_note": "r1 failed with host OOM at 160 GiB per worker. r2 used 64 GiB per worker. Memory guard was added and unit-tested after r2 launch; r2 itself did not run the new preflight.",
+  "scope": "Direct backend HTTP/SSE only; no gateway path, full JSON Schema vocabulary, throughput, or semantic quality equivalence claim."
+}

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Wait for the API on prod30; fail if its recorded server exits or is replaced."""
+"""Wait for the rank0 API; fail if its recorded server exits or is replaced."""
 
 import json
 import os
@@ -12,12 +12,11 @@ import urllib.request
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent
-assert socket.gethostname().split(".")[0] == "xb01-gpu-200b-0030"
+host = socket.gethostname().split(".")[0]
+assert host in ("xb01-gpu-200b-0030", "xb01-gpu-200b-0009")
 run = sys.argv[1]
 assert run.replace("-", "").replace("_", "").isalnum()
-record = json.loads(
-    (PACKAGE / "state/runs" / run / "xb01-gpu-200b-0030/process.json").read_text()
-)
+record = json.loads((PACKAGE / "state/runs" / run / host / "process.json").read_text())
 deadline = time.monotonic() + 1800
 while time.monotonic() < deadline:
     process = Path("/proc") / str(record["pid"])

@@ -16,7 +16,12 @@ PACKAGE = Path(__file__).resolve().parent
 run = sys.argv[1]
 assert run.replace("-", "").replace("_", "").isalnum()
 host = socket.gethostname().split(".")[0]
-assert host in ("xb01-gpu-200b-0030", "xb01-gpu-200b-0024")
+assert host in (
+    "xb01-gpu-200b-0030",
+    "xb01-gpu-200b-0024",
+    "xb01-gpu-200b-0009",
+    "xb01-gpu-200b-0025",
+)
 assert os.getuid() == PACKAGE.stat().st_uid == 1000
 node = PACKAGE / "state/runs" / run / host
 

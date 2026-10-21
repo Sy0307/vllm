@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Owned two-node K3 serving session (prod30 rank0 / prod24 rank1).
+"""Owned two-node K3 serving session (prod30/prod24 or prod09/prod25).
 
 usage: launch.py RUN VARIANT_JSON
 Loads the locked B200 runtime, applies the serving or benchmark variant, and
@@ -17,14 +17,13 @@ import sys
 import time
 from pathlib import Path
 
+from host_memory import check_mooncake_memory
+
 PACKAGE = Path(__file__).resolve().parent
 ROOT = PACKAGE / "state"
 assert os.getuid() == PACKAGE.stat().st_uid == 1000
 ROOT.mkdir(exist_ok=True)
 host = socket.gethostname().split(".")[0]
-RANK = {"xb01-gpu-200b-0030": 0, "xb01-gpu-200b-0024": 1}[host]
-SELF_IP = {"xb01-gpu-200b-0030": "10.18.1.30", "xb01-gpu-200b-0024": "10.18.1.24"}[host]
-RANK0_IP = "10.18.1.30"
 API_PORT, MASTER_PORT = 18995, 29795
 MODEL = "/gpfs/mszn/models/moonshotai/Kimi-K3"
 DRAFT = "/gpfs/mszn/models/Inferact/Kimi-K3-DSpark"
@@ -33,6 +32,18 @@ DEFAULT_OVERLAY = str(PACKAGE / "overlay")
 run, variant_path = sys.argv[1], sys.argv[2]
 assert run.replace("-", "").replace("_", "").isalnum(), run
 variant = json.loads(Path(variant_path).read_text())
+nodes = variant.get("nodes", ["xb01-gpu-200b-0030", "xb01-gpu-200b-0024"])
+assert nodes in (
+    ["xb01-gpu-200b-0030", "xb01-gpu-200b-0024"],
+    ["xb01-gpu-200b-0009", "xb01-gpu-200b-0025"],
+), nodes
+RANK = nodes.index(host)
+SELF_IP = f"10.18.1.{int(host.rsplit('-', 1)[1])}"
+RANK0_IP = f"10.18.1.{int(nodes[0].rsplit('-', 1)[1])}"
+memory_preflight = None
+if variant.get("mooncake", False):
+    memory_preflight = check_mooncake_memory(variant.get("mc_segment", "160GB"))
+    print("HOST_MEMORY", json.dumps(memory_preflight), flush=True)
 
 assert not subprocess.check_output(
     ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"], text=True
@@ -236,6 +247,7 @@ full = [sub(x).replace("{NODE}", str(node)) for x in prefix + args]
             "args": full,
             "env": env,
             "physical_gpus": list(range(8)),
+            "memory_preflight": memory_preflight,
             "time": time.time(),
         },
         indent=1,
