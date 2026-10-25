@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import trim_null_head
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -160,7 +161,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_num_computed_blocks = tuple(
                         sum(
                             block.block_hash is not None and not block.is_null
-                            for block in group
+                            for block in trim_null_head(group)
                         )
                         for group in blocks.blocks
                     )

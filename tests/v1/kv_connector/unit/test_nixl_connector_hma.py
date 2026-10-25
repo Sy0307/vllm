@@ -396,12 +396,16 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     def uncached(block_id):
         return KVCacheBlock(block_id=block_id)
 
+    null = KVCacheBlock(block_id=0, is_null=True)
+
     # Group 0 (full-attention): 2 of 3 blocks cached.
     # Group 1 (sliding-window): 1 of 3 blocks cached.
+    # Group 2 (sliding-window, prefix out of window): null blocks, then 1 cached.
     blocks = KVCacheBlocks(
         blocks=(
             [cached(0), cached(1), uncached(2)],
             [cached(10), uncached(11), uncached(12)],
+            [null, null, cached(20), uncached(21)],
         )
     )
 
@@ -412,7 +416,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     _, _, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
         request.request_id
     ]
-    assert local_num_computed_blocks == (2, 1)
+    assert local_num_computed_blocks == (2, 1, 1)
     # There are external tokens to pull, so the scheduler parks the request and
     # is waiting to see it in finished_recving.
     assert awaiting_kvs is True
