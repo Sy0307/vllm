@@ -4524,6 +4524,40 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
     assert worker.get_block_ids_with_load_errors() == set()
 
 
+@pytest.mark.cpu_test
+def test_poll_finished_recving_reports_each_load_once(recv_worker):
+    """An early-polled load is finished now and not reported by the step."""
+    worker = recv_worker
+    worker._recving_transfers["request"] = [101]
+    worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
+    worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
+    assert worker.poll_finished_recving() == set()
+    worker.nixl_wrapper.send_notif.assert_not_called()
+
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    assert worker.poll_finished_recving() == {"request"}
+    worker.nixl_wrapper.send_notif.assert_called_once_with(
+        "prefill", notif_msg=b"request:1"
+    )
+    assert "request" not in worker._recving_metadata
+    assert worker.poll_finished_recving() == set()
+    assert worker.get_transfer_results().finished_recving == set()
+
+
+@pytest.mark.cpu_test
+def test_poll_finished_recving_leaves_failures_to_the_step(recv_worker):
+    worker = recv_worker
+    worker._recving_transfers["request"] = [101]
+    worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
+    worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
+    assert worker.poll_finished_recving() == set()
+
+    results = worker.get_transfer_results()
+    assert results.finished_recving == results.failed_recving == {"request"}
+    assert worker.get_block_ids_with_load_errors() == {1, 2, 3}
+    worker.nixl_wrapper.send_notif.assert_not_called()
+
+
 def test_recv_failure_waits_for_unpollable_handle_to_be_released(recv_worker):
     """A polling exception and failed release do not prove that DMA has stopped."""
     worker = recv_worker

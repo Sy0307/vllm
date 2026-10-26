@@ -410,6 +410,21 @@ Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
 ```
 
+## Early receive reporting
+
+Set `"enable_early_recv": true` in the decoder's `--kv-transfer-config` to report
+completed KV loads with `--distributed-executor-backend mp` and async scheduling. TP workers
+must be on the same node and PP must be 1: NIXL pull does not support decoder PP.
+NIXL pull connectors support this path, including inside MultiConnector.
+Other connectors retain their normal behavior.
+Early and ordinary notifications share the same all-worker completion count.
+
+An idle worker polls once after a step output completes and reports successful
+receives through a separate channel. Notifications may reach the scheduler
+before its next step; this ordering is not guaranteed. Failed loads use the
+regular completion path. This feature is disabled by default and requires
+workload-specific latency and overhead validation.
+
 ## Metrics Reference
 
 vLLM periodically logs a `KV Transfer metrics` line summarising NIXL transfer
