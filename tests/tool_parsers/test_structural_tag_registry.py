@@ -628,6 +628,91 @@ def test_kimi_k3_registered_as_vllm_builtin():
     assert KimiK3ToolParser.structural_tag_model == "kimi_k3"
 
 
+def _k3_allowed_request(mode="auto", **kwargs):
+    return ChatCompletionRequest(
+        model="m",
+        messages=[],
+        tools=_k3_tools_by_name(),
+        tool_choice={
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": mode,
+                "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            },
+        },
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("mode", ["auto", "required"])
+def test_allowed_tools_constrains_k3_calls(mode, monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", True)
+    request = _k3_allowed_request(mode)
+    assert request.tool_choice == mode
+    assert [t.function.name for t in request.tools] == ["get_weather"]
+
+    grammar = _tool_calling_grammar("kimi_k3", request.tools, request)
+    assert grammar is not None
+    call = _k3_response() + _k3_tools(_k3_call("get_weather", ""))
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(
+        grammar, call.replace("get_weather", "run_command")
+    )
+    assert _is_grammar_accept_string(grammar, _k3_response("hello")) == (mode == "auto")
+
+
+@pytest.mark.parametrize(
+    "allowed",
+    [
+        {"mode": "auto", "tools": []},
+        {"mode": "auto", "tools": [{"type": "function", "name": "unknown"}]},
+        {"mode": "auto", "tools": [{"type": "custom", "name": "get_weather"}]},
+        {"mode": "always", "tools": [{"type": "function", "name": "get_weather"}]},
+    ],
+)
+def test_allowed_tools_rejects_invalid_subset(allowed):
+    with pytest.raises(VLLMValidationError) as exc:
+        ChatCompletionRequest(
+            model="m",
+            messages=[],
+            tools=_k3_tools_by_name(),
+            tool_choice={"type": "allowed_tools", "allowed_tools": allowed},
+        )
+    assert exc.value.parameter.startswith("tool_choice.allowed_tools.")
+
+
+@pytest.mark.parametrize("mode", ["auto", "required"])
+def test_allowed_tools_requires_enabled_grammar(mode, monkeypatch):
+    monkeypatch.setattr(envs, "VLLM_ENFORCE_STRICT_TOOL_CALLING", False)
+    request = _k3_allowed_request(mode)
+    with pytest.raises(VLLMValidationError, match="requires enabled structural-tag"):
+        _tool_calling_grammar("kimi_k3", request.tools, request)
+
+
+@pytest.mark.parametrize("mode", ["auto", "required"])
+def test_allowed_tools_rejects_beam_search(mode):
+    with pytest.raises(VLLMValidationError, match="beam search") as exc:
+        _k3_allowed_request(mode, use_beam_search=True)
+    assert exc.value.parameter == "use_beam_search"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {
+            "structured_outputs": {
+                "choice": [_k3_response() + _k3_tools(_k3_call("run_command", ""))]
+            }
+        },
+        {"response_format": {"type": "json_object"}},
+    ],
+)
+def test_allowed_tools_auto_rejects_output_constraints(kwargs):
+    request = _k3_allowed_request(**kwargs)
+    with pytest.raises(VLLMValidationError, match="cannot be combined"):
+        _tool_calling_grammar("kimi_k3", request.tools, request)
+
+
 def test_kimi_k3_auto_without_strict_is_unconstrained():
     # auto + no strict tool => no structural tag (matches the strict gate).
     tag = get_model_structural_tag(

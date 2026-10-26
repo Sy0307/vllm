@@ -350,12 +350,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | None
     ) = "none"
     enforce_tool_call_grammar: bool = Field(default=False, exclude=True)
-    """Internal: set when the request used ``tool_choice.allowed_tools``.
-
-    Forces the tool-call envelope grammar even when no declared tool is
-    ``strict`` so an ``auto`` request cannot emit a tool name outside the
-    allowed subset.
-    """
+    """Internal: allowed_tools requires a grammar for both auto and required."""
     reasoning_effort: (
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = Field(
@@ -1011,21 +1006,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of constraints for structured "
                 "outputs ('json', 'regex' or 'choice').",
             )
-        # An allowed-tools choice in "auto" mode behaves like plain "auto",
-        # so it can coexist with a structured-output constraint.
-        tool_choice = data.get("tool_choice", "none")
-        if isinstance(tool_choice, ChatCompletionAllowedToolChoiceParam):
-            if tool_choice.allowed_tools.mode == "auto":
-                tool_choice = "auto"
-        elif (
-            isinstance(tool_choice, dict) and tool_choice.get("type") == "allowed_tools"
-        ):
-            allowed = tool_choice.get("allowed_tools")
-            if isinstance(allowed, dict) and allowed.get("mode") == "auto":
-                tool_choice = "auto"
-
         # you can only either use structured outputs or tools, not both
-        if count > 0 and tool_choice not in (
+        if count > 0 and data.get("tool_choice", "none") not in (
             "none",
             "auto",
             "required",
@@ -1135,6 +1117,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         parameter="tool_choice",
                     )
         return data
+
+    @model_validator(mode="after")
+    def check_allowed_tools_beam_search(self) -> "ChatCompletionRequest":
+        if self.enforce_tool_call_grammar and self.use_beam_search:
+            raise VLLMValidationError(
+                "tool_choice.allowed_tools is not supported with beam search.",
+                parameter="use_beam_search",
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod

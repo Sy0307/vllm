@@ -195,6 +195,8 @@ def _unsupported_tool_guarantee(
 ) -> tuple[str, str] | None:
     """The first requested tool guarantee this parser cannot enforce, with the
     request parameter that asked for it."""
+    if getattr(request, "enforce_tool_call_grammar", False):
+        return "allowed_tools", "tool_choice.allowed_tools"
     if any(_tool_is_strict(tool) for tool in request.tools or ()):
         return "strict tools", "tools"
     if request.tool_choice == "required":

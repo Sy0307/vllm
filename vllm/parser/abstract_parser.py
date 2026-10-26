@@ -488,8 +488,8 @@ class DelegatingParser(Parser):
     ) -> ChatCompletionRequest | ResponsesRequest:
         if self._reasoning_parser is not None:
             request = self._reasoning_parser.adjust_request(request)
+        request = self._apply_structural_tag(request)
         if self._tool_parser is not None:
-            request = self._apply_structural_tag(request)
             request = self._tool_parser.adjust_request(request)
         return request
 
@@ -497,7 +497,13 @@ class DelegatingParser(Parser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         tool_parser = self._tool_parser
+        enforce_tool_call_grammar = getattr(request, "enforce_tool_call_grammar", False)
         if tool_parser is None or not request.tools:
+            if enforce_tool_call_grammar:
+                raise VLLMValidationError(
+                    "tool_choice.allowed_tools requires a tool parser and tools.",
+                    parameter="tool_choice.allowed_tools",
+                )
             return request
 
         need_tool_calling = (
@@ -517,6 +523,13 @@ class DelegatingParser(Parser):
 
         structured_outputs = request.extract_structured_outputs()
         is_auto = request.tool_choice == "auto"
+        if enforce_tool_call_grammar and is_auto and structured_outputs is not None:
+            # The output-format branch could also match a disallowed tool call.
+            raise VLLMValidationError(
+                'tool_choice.allowed_tools with mode="auto" cannot be combined '
+                "with structured outputs.",
+                parameter="tool_choice.allowed_tools",
+            )
         single_call = request.parallel_tool_calls is False
         strict_level = self.tool_strict_level
         if (
@@ -524,11 +537,7 @@ class DelegatingParser(Parser):
             and tool_parser.default_tool_strict_level is not None
         ):
             strict_level = tool_parser.default_tool_strict_level
-        if is_auto and getattr(request, "enforce_tool_call_grammar", False):
-            # ``tool_choice.allowed_tools`` with mode "auto": the model may
-            # answer in text, but any call it emits must name an allowed tool.
-            # Constrain the call envelope even when no tool is strict; the
-            # permissive argument tags keep the arguments unconstrained.
+        if is_auto and enforce_tool_call_grammar:
             strict_level = max(strict_level, ToolStrictLevel.FUNCTION)
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
@@ -578,6 +587,12 @@ class DelegatingParser(Parser):
             tools_structural_tag = None
 
         if tools_structural_tag is None:
+            if enforce_tool_call_grammar:
+                raise VLLMValidationError(
+                    "tool_choice.allowed_tools requires enabled structural-tag "
+                    "support for this tool parser.",
+                    parameter="tool_choice.allowed_tools",
+                )
             if is_auto and structured_outputs is not None:
                 logger.warning_once(
                     "Tool calls are not constrained for tool_choice=auto with "

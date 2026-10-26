@@ -11,6 +11,7 @@ from openai.types.responses import NamespaceTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
 from vllm.exceptions import VLLMValidationError
@@ -1241,6 +1242,27 @@ def test_unconstrained_tool_guarantees_are_rejected(req, match):
 
     with pytest.raises(VLLMValidationError, match=match):
         parser.adjust_request(req)
+
+
+@pytest.mark.parametrize("mode", ["auto", "required"])
+def test_allowed_tools_are_rejected(mode):
+    req = ChatCompletionRequest(
+        messages=[],
+        tools=TOOLS,
+        tool_choice={
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": mode,
+                "tools": [{"type": "function", "function": {"name": "set_alarm"}}],
+            },
+        },
+    )
+    parser_cls = ParserManager.get_parser(tool_parser_name="hf", enable_auto_tools=True)
+    parser = parser_cls(FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE), req.tools)
+
+    with pytest.raises(VLLMValidationError, match="allowed_tools") as exc:
+        parser.adjust_request(req)
+    assert exc.value.parameter == "tool_choice.allowed_tools"
 
 
 def test_tool_choice_none_does_not_require_structural_guarantees():
