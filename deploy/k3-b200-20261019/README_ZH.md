@@ -118,4 +118,4 @@ prod09（`xb01-gpu-200b-0009`，10.18.1.9）为 PP0/API，prod25（`xb01-gpu-200
 
 新增 `tool_choice.allowed_tools`，支持 `auto` 和 `required`，工具调用限定在请求指定的子集中。语法关闭、parser 不支持（包括 `hf`）、启用 beam search，或 `auto` 模式叠加额外输出约束时返回 400，避免接受请求后静默忽略限制。同时删除重复归一化，合并精简回归测试。
 
-代码见 [allowed_tools 修复分支](https://github.com/Sy0307/vllm/tree/k3/allowed-tools-20261026)；本次更新尚未部署。
+代码已合入原[发布分支](https://github.com/Sy0307/vllm/tree/k3/b200-tail-release-20261019)；本次更新尚未部署。
