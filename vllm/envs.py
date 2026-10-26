@@ -248,6 +248,7 @@ if TYPE_CHECKING:
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_KV_EARLY_RECV: bool = False
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: (
@@ -1851,6 +1852,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
     ),
+    # Report finished remote KV loads to the scheduler as each step's output is
+    # handed back, before the next schedule(), instead of in the output of the
+    # step that polled them (async scheduling, multiprocessing executor with one
+    # worker per engine).
+    "VLLM_KV_EARLY_RECV": lambda: bool(int(os.getenv("VLLM_KV_EARLY_RECV", "0"))),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
     # executor (only applies when TP > 1).
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
@@ -2354,6 +2360,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "VLLM_KV_EARLY_RECV",
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",

@@ -410,6 +410,20 @@ Support use case: Prefill with `LBHNC` and decode with `LBNHC` with experimental
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
 ```
 
+## Experimental early receive reporting
+
+`VLLM_KV_EARLY_RECV=1` on the decoder enables early reporting of completed KV
+loads with `--distributed-executor-backend mp`, async scheduling, and one worker
+per engine (`TP=PP=PCP=1`). Only `NixlConnector` and `NixlPullConnector` are
+supported; MultiConnector and multi-worker aggregation are not implemented.
+The multiprocessing executor rejects incompatible configurations on startup.
+
+An idle worker polls once after a step output completes and reports successful
+receives through a separate channel. Notifications may reach the scheduler
+before its next step; this ordering is not guaranteed. Failed loads use the
+regular completion path. This feature is disabled by default and requires
+workload-specific latency and overhead validation.
+
 ## Metrics Reference
 
 vLLM periodically logs a `KV Transfer metrics` line summarising NIXL transfer

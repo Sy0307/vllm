@@ -595,6 +595,63 @@ def test_cannot_recv():
     assert_scheduler_empty(scheduler)
 
 
+def test_early_finished_recving_runs_in_next_schedule():
+    """A load reported ahead of the step output runs in the next schedule()."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=int(BLOCK_SIZE * 2.5),
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    request_id = request.request_id
+
+    # Step 1 sends the load; its output, empty here, arrives after step 2 is
+    # scheduled, as under async scheduling.
+    output_1 = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.add_finished_recving({request_id})
+    assert _kv_fetch_stages(scheduler) == (0, 0, 1)
+    output_2 = scheduler.schedule()
+    assert request_id in output_2.num_scheduled_tokens
+    assert scheduler.running == [request]
+
+    scheduler.update_from_output(output_1, EMPTY_MODEL_RUNNER_OUTPUT)
+    scheduler.update_from_output(output_2, create_model_runner_output([request]))
+    output_3 = scheduler.schedule()
+    scheduler.update_from_output(
+        output_3, create_model_runner_output([request], use_eos=True)
+    )
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+def test_early_finished_recving_frees_aborted_request():
+    """An aborted request keeps its blocks until its early-reported load ends."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=int(BLOCK_SIZE * 2.5),
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id in scheduler.requests
+
+    scheduler.add_finished_recving({request.request_id})
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
 def test_kv_fetch_stages_cleared_on_abort():
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)

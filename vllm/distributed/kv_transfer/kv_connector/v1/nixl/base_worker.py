@@ -3236,6 +3236,39 @@ class NixlBaseConnectorWorker:
                 len(failed_recv_reqs),
             )
 
+        self._finish_recved(done_recving, failed_recv_reqs)
+
+        # Handle timeout to avoid stranding blocks on remote.
+        self._reap_expired_send_leases(done_sending)
+
+        self._cleanup_remote_engines()
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recv_reqs,
+        )
+
+    def poll_finished_recving(self) -> set[str]:
+        """Pop and post-process the receives that completed successfully.
+
+        They are not reported by `get_transfer_results()` again. A failed
+        request stays in `_recv_failures` for the regular path to report.
+        """
+        if not self._recving_transfers:
+            return set()
+        done_recving, newly_failed = self._pop_done_transfers(self._recving_transfers)
+        if newly_failed:
+            self._recv_failures.update(newly_failed)
+        done_recving -= self._recv_failures
+        if done_recving:
+            self._finish_recved(done_recving, set())
+        return done_recving
+
+    def _finish_recved(
+        self, done_recving: set[str], failed_recv_reqs: set[str]
+    ) -> None:
+        """Notify the producers and post-process the KV of finished receives."""
+        assert self.transfer_topo is not None
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
@@ -3318,16 +3351,6 @@ class NixlBaseConnectorWorker:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
         self._sync_device_after_direct_recv(direct_device_recving)
-
-        # Handle timeout to avoid stranding blocks on remote.
-        self._reap_expired_send_leases(done_sending)
-
-        self._cleanup_remote_engines()
-        return KVConnectorTransferResults(
-            finished_sending=done_sending,
-            finished_recving=done_recving,
-            failed_recving=failed_recv_reqs,
-        )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""
