@@ -524,6 +524,12 @@ class DelegatingParser(Parser):
             and tool_parser.default_tool_strict_level is not None
         ):
             strict_level = tool_parser.default_tool_strict_level
+        if is_auto and getattr(request, "enforce_tool_call_grammar", False):
+            # ``tool_choice.allowed_tools`` with mode "auto": the model may
+            # answer in text, but any call it emits must name an allowed tool.
+            # Constrain the call envelope even when no tool is strict; the
+            # permissive argument tags keep the arguments unconstrained.
+            strict_level = max(strict_level, ToolStrictLevel.FUNCTION)
         if single_call and not (is_auto and structured_outputs is not None):
             # Limiting the call count needs the call envelope in the grammar.
             # Auto with structured outputs keeps its format-only grammar, so the

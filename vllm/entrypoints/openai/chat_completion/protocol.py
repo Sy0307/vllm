@@ -215,6 +215,107 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+class ChatCompletionAllowedToolFunction(OpenAIBaseModel):
+    name: str
+
+
+class ChatCompletionAllowedToolRef(OpenAIBaseModel):
+    type: Literal["function"] = "function"
+    function: ChatCompletionAllowedToolFunction
+
+
+class ChatCompletionAllowedToolsParam(OpenAIBaseModel):
+    mode: Literal["auto", "required"]
+    tools: list[ChatCompletionAllowedToolRef]
+
+
+class ChatCompletionAllowedToolChoiceParam(OpenAIBaseModel):
+    type: Literal["allowed_tools"] = "allowed_tools"
+    allowed_tools: ChatCompletionAllowedToolsParam
+
+
+def _tool_choice_function_name(tool: Any) -> str | None:
+    """Return the function name declared by a tool entry, if it has one."""
+    function = tool.get("function") if isinstance(tool, dict) else None
+    if function is None:
+        function = getattr(tool, "function", None)
+    if isinstance(function, dict):
+        name = function.get("name")
+    else:
+        name = getattr(function, "name", None)
+    return name if isinstance(name, str) else None
+
+
+def _normalize_allowed_tools_choice(
+    tool_choice: dict[str, Any], tools: list[Any]
+) -> tuple[list[Any], str]:
+    """Validate an ``allowed_tools`` choice and collapse it to its mode.
+
+    Renderers and tool-call grammars already understand the plain
+    ``auto``/``required`` modes and the request's ``tools`` list, so rewrite
+    ``allowed_tools`` into that pair instead of teaching every layer a third
+    shape. Filtering the list keeps the model from seeing a tool it may not
+    call; ``enforce_tool_call_grammar`` additionally constrains the call
+    envelope for a non-strict ``auto`` request.
+    """
+    allowed = tool_choice.get("allowed_tools")
+    if not isinstance(allowed, dict):
+        raise VLLMValidationError(
+            "`tool_choice.allowed_tools` must be an object.",
+            parameter="tool_choice.allowed_tools",
+        )
+
+    mode = allowed.get("mode")
+    if mode not in ("auto", "required"):
+        raise VLLMValidationError(
+            '`tool_choice.allowed_tools.mode` must be "auto" or "required".',
+            parameter="tool_choice.allowed_tools.mode",
+            value=mode,
+        )
+
+    allowed_tools = allowed.get("tools")
+    if not isinstance(allowed_tools, list) or not allowed_tools:
+        raise VLLMValidationError(
+            "`tool_choice.allowed_tools.tools` must be a non-empty array.",
+            parameter="tool_choice.allowed_tools.tools",
+        )
+
+    allowed_names: set[str] = set()
+    for index, tool in enumerate(allowed_tools):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            raise VLLMValidationError(
+                "`tool_choice.allowed_tools.tools` only supports function tools.",
+                parameter=f"tool_choice.allowed_tools.tools[{index}].type",
+            )
+        function = tool.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        if name is None:
+            # Responses-style flat references are accepted for compatibility.
+            name = tool.get("name")
+        if not isinstance(name, str) or not name:
+            raise VLLMValidationError(
+                "`tool_choice.allowed_tools.tools` entries must name a function.",
+                parameter=f"tool_choice.allowed_tools.tools[{index}].function.name",
+            )
+        allowed_names.add(name)
+
+    declared_names = {
+        name for tool in tools if (name := _tool_choice_function_name(tool))
+    }
+    missing = allowed_names - declared_names
+    if missing:
+        raise VLLMValidationError(
+            "The tools specified in `tool_choice.allowed_tools` do not match "
+            "any of the specified `tools`: " + ", ".join(sorted(missing)),
+            parameter="tool_choice.allowed_tools.tools",
+        )
+
+    filtered_tools = [
+        tool for tool in tools if _tool_choice_function_name(tool) in allowed_names
+    ]
+    return filtered_tools, mode
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -244,9 +345,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Literal["none"]
         | Literal["auto"]
         | Literal["required"]
+        | ChatCompletionAllowedToolChoiceParam
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
+    enforce_tool_call_grammar: bool = Field(default=False, exclude=True)
+    """Internal: set when the request used ``tool_choice.allowed_tools``.
+
+    Forces the tool-call envelope grammar even when no declared tool is
+    ``strict`` so an ``auto`` request cannot emit a tool name outside the
+    allowed subset.
+    """
     reasoning_effort: (
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
     ) = Field(
@@ -902,8 +1011,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only use one kind of constraints for structured "
                 "outputs ('json', 'regex' or 'choice').",
             )
+        # An allowed-tools choice in "auto" mode behaves like plain "auto",
+        # so it can coexist with a structured-output constraint.
+        tool_choice = data.get("tool_choice", "none")
+        if isinstance(tool_choice, ChatCompletionAllowedToolChoiceParam):
+            if tool_choice.allowed_tools.mode == "auto":
+                tool_choice = "auto"
+        elif (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "allowed_tools"
+        ):
+            allowed = tool_choice.get("allowed_tools")
+            if isinstance(allowed, dict) and allowed.get("mode") == "auto":
+                tool_choice = "auto"
+
         # you can only either use structured outputs or tools, not both
-        if count > 0 and data.get("tool_choice", "none") not in (
+        if count > 0 and tool_choice not in (
             "none",
             "auto",
             "required",
@@ -949,6 +1071,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     parameter="tool_choice",
                 )
 
+            tool_choice = data["tool_choice"]
+            if isinstance(tool_choice, ChatCompletionAllowedToolChoiceParam):
+                tool_choice = tool_choice.model_dump(exclude_none=True)
+                data["tool_choice"] = tool_choice
+            if (
+                isinstance(tool_choice, dict)
+                and tool_choice.get("type") == "allowed_tools"
+            ):
+                data["tools"], data["tool_choice"] = _normalize_allowed_tools_choice(
+                    tool_choice, data["tools"]
+                )
+                data["enforce_tool_call_grammar"] = True
+
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
             if data["tool_choice"] not in ["auto", "required"] and not isinstance(
@@ -956,8 +1091,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ):
                 raise VLLMValidationError(
                     f"Invalid value for `tool_choice`: {data['tool_choice']}! "
-                    'Only named tools, "none", "auto" or "required" '
-                    "are supported.",
+                    'Only named tools, "none", "auto", "required" or '
+                    '"allowed_tools" are supported.',
                     parameter="tool_choice",
                 )
 
