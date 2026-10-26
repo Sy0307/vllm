@@ -161,6 +161,31 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
         module.autotune_kda_qkvg(model)
 
 
+def _run_indexer_q_projections(model: torch.nn.Module, num_tokens: int) -> None:
+    """Tune the indexer projection skipped by short-context dummy runs."""
+    from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+    from vllm.models.deepseek_v41.attention import (
+        DeepseekV4Attention as DeepseekV41Attention,
+    )
+
+    for layer in model.modules():
+        if not isinstance(layer, (DeepseekV4Attention, DeepseekV41Attention)):
+            continue
+        indexer = layer.indexer
+        if indexer is None:
+            continue
+        weight = indexer.wq_b.weight
+        qr_kv = torch.randn(
+            num_tokens,
+            layer.q_lora_rank + layer.head_dim,
+            dtype=layer.q_norm.weight.dtype,
+            device=weight.device,
+        )
+        # Match serving's normalization and activation quantization.
+        qr, qr_scale, _ = layer._split_qkv_and_norm(qr_kv)
+        indexer._wq_b_proj(qr, qr_scale)
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -383,6 +408,7 @@ def _run_flashinfer_autotune_dummy_runs(
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
+            _run_indexer_q_projections(runner.get_model(), max_tuning_tokens)
 
 
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
