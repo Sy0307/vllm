@@ -520,6 +520,7 @@ class DeepseekV41ModelState(DefaultModelState):
         pcp = input_batch.pcp
         kv_start: np.ndarray | None = None
         num_padded: int | None = None
+        keeps_dummy_row = False
         if pcp is not None:
             # Every trimmed request spans all ranks, so each rank can derive
             # the same global kept count from its local request segments.
@@ -549,6 +550,7 @@ class DeepseekV41ModelState(DefaultModelState):
             if is_dummy and capture_desc is None:
                 kept_lens = np.zeros_like(kept_lens)
                 kept_lens[0] = 1
+                keeps_dummy_row = True
             needs_replay_batch = force_replay_batch or bool(
                 (kept_lens < query_lens)[input_batch.is_prefilling_np[:num_reqs]].any()
             )
@@ -618,11 +620,12 @@ class DeepseekV41ModelState(DefaultModelState):
             model_specific_attn_metadata=ReplayAttnMetadata(replay_start),
         )[first_swa]
         is_padding = kept_batch.is_padding if self.pcp_size > 1 else None
-        if is_padding is None and run_graph is not None:
+        if is_padding is None and (run_graph is not None or keeps_dummy_row):
             # Rows past num_tokens pad the batch to the graph's size: keep them
-            # out of expert routing, like the outer batch's padding.
+            # out of expert routing, like the outer batch's padding. So is an
+            # idle rank's dummy row, which the outer batch marks as padding.
             is_padding = self._kept_is_padding[:num_padded]
-            is_padding[:num_tokens].fill_(False)
+            is_padding[:num_tokens].fill_(keeps_dummy_row)
             is_padding[num_tokens:].fill_(True)
         layers.replay_batch = ReplayBatch(
             self._kept_rows[:num_tokens],

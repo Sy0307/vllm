@@ -19,6 +19,12 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    _eplb_map_and_record_triton,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    fused_topk_bias,
+)
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.sampling_params import SamplingParams
@@ -457,6 +463,7 @@ def test_idle_dp_rank_dummy_trims_with_its_peers(dp_state):
     assert replay is not None and replay.rows.shape[0] == 1
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [1, 129]
+    assert replay.forward_context.is_padding.tolist() == [True]
 
 
 def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
@@ -553,3 +560,53 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert is_padding.tolist() == [False] * len(REPLAY_ROWS) + [True] * (
         512 - len(REPLAY_ROWS)
     )
+    # An idle rank's dummy row is padding as well.
+    dummy = _input_batch([256, 256], [256, 256], [False, False])
+    replay, _ = _prepare(dp_state, dummy, CUDAGraphMode.NONE)
+    assert replay.forward_context.is_padding.tolist() == [True] * 512
+
+
+def test_replay_graph_refreshes_padding_and_expert_load(dp_state):
+    dp_state.replay_cudagraphs = MagicMock()
+    dp_state.replay_cudagraphs.dispatch.return_value = BatchExecutionDescriptor(
+        CUDAGraphMode.PIECEWISE, 512, None
+    )
+    dp_state.other = (True, 300)
+    active = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    dummy = _input_batch([256, 256], [256, 256], [False, False])
+    replay, _ = _prepare(dp_state, active, CUDAGraphMode.NONE)
+    logits = torch.zeros(512, 256, device=DEVICE)
+    bias = torch.zeros(256, device=DEVICE)
+    mapping = torch.arange(256, device=DEVICE).view(-1, 1)
+    replicas = torch.ones(256, dtype=torch.int32, device=DEVICE)
+    load = torch.zeros(256, dtype=torch.int64, device=DEVICE)
+    recording = torch.ones((), dtype=torch.int32, device=DEVICE)
+
+    def route():
+        with override_forward_context(replay.forward_context):
+            _, ids = fused_topk_bias(logits, logits, "sqrtsoftplus", bias, 6, True)
+        return _eplb_map_and_record_triton(
+            ids, mapping, replicas, load, recording, None
+        )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            route()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        physical_ids = route()
+    # The captured consumer must see new contents at the original mask address.
+    for batch, real_rows in [
+        (active, len(REPLAY_ROWS)),
+        (dummy, 0),
+        (active, len(REPLAY_ROWS)),
+    ]:
+        _prepare(dp_state, batch, CUDAGraphMode.NONE)
+        load.zero_()
+        graph.replay()
+        assert (physical_ids[:real_rows] >= 0).all()
+        assert (physical_ids[real_rows:] == -1).all()
+        assert load.sum().item() == real_rows * 6
