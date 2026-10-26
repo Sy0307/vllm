@@ -113,3 +113,9 @@ prod09（`xb01-gpu-200b-0009`，10.18.1.9）为 PP0/API，prod25（`xb01-gpu-200
 实测结果：`json-api-r2` 上两轮 JSON 验收各 9/9 通过，原有 HTTP/SSE 接口验收 12/12 通过，新增内存检查单测本地及远端均 3/3 通过。服务保留运行，API 为 `http://10.18.1.9:18995/v1`，模型名 `kimi-k3`。上述启动示例用新 RUN 名 `json-api-new`，不要重复使用已有 RUN。
 
 本轮未修改冻结的推理源码；JSON 模式本身已可用，修复范围是主机选择、Mooncake 容量和启动前内存检查。内存检查是在 r2 启动后加入并单测的，不声称 r2 已执行该预检。客户端应仅解析最终 `content`；流式先拼接 `delta.content`，思考字段单独处理。结果及原始响应见 `evidence/json-prod09-prod25-20261021/`。本次直接访问后端，不覆盖网关转发、全部 JSON Schema 关键字或性能与质量评估。
+
+## 7. allowed_tools 更新（2026-10-26）
+
+新增 `tool_choice.allowed_tools`，支持 `auto` 和 `required`，工具调用限定在请求指定的子集中。语法关闭、parser 不支持（包括 `hf`）、启用 beam search，或 `auto` 模式叠加额外输出约束时返回 400，避免接受请求后静默忽略限制。同时删除重复归一化，合并精简回归测试。
+
+代码见 [allowed_tools 修复分支](https://github.com/Sy0307/vllm/tree/k3/allowed-tools-20261026)；本次更新尚未部署。
