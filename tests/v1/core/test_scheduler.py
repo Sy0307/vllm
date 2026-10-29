@@ -7551,6 +7551,128 @@ def test_waiting_encoder_stall_kv_holder_keeps_drain_priority():
     assert stalled in scheduler.kv_holding_waiting
 
 
+def _confirm_scheduled(scheduler: Scheduler, output: SchedulerOutput) -> None:
+    req_ids = list(output.num_scheduled_tokens)
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+            sampled_token_ids=[[0] for _ in req_ids],
+        ),
+    )
+
+
+def test_waiting_request_releases_encoder_cache_hits_on_kv_shortage():
+    """A request that hits the encoder cache but then cannot get KV blocks
+    must not keep the entry pinned while it waits."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf", num_blocks=4)
+    manager = scheduler.encoder_cache_manager
+    owner = _create_mm_request_with_embedding_positions("owner", "image", [True] * 4)
+    manager.allocate(owner, 0)
+    manager.free(owner)
+    freeable_slots = manager.num_freeable_slots
+    request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+        mm_hashes_list=[["image"]],
+        req_ids=["too-long"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert not output.num_scheduled_tokens
+    assert manager.get_cached_input_ids(request) == set()
+    assert manager.cached["image"] == set()
+    assert manager.num_freeable_slots == freeable_slots
+
+
+def test_release_encoder_cache_hits_keeps_references_held_before_the_pass():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    manager = scheduler.encoder_cache_manager
+    owner = _create_mm_request_with_embedding_positions("owner", "hit", [True] * 4)
+    manager.allocate(owner, 0)
+    manager.free(owner)
+    request = create_requests(
+        num_requests=1,
+        num_tokens=20,
+        mm_positions=[
+            [PlaceholderRange(offset=0, length=4), PlaceholderRange(offset=8, length=4)]
+        ],
+        mm_hashes_list=[["held", "hit"]],
+        req_ids=["resumed"],
+    )[0]
+    manager.allocate(request, 0)
+    held_input_ids = set(manager.get_cached_input_ids(request))
+    assert manager.check_and_update_cache(request, 1)
+
+    scheduler._release_encoder_cache_hits(request, held_input_ids)
+
+    assert manager.get_cached_input_ids(request) == {0}
+    assert manager.cached["held"] == {"resumed"}
+    assert manager.cached["hit"] == set()
+
+
+def test_waiting_encoder_decoder_request_does_not_credit_unallocated_slots():
+    """Only references this pass took are dropped. The encoder-decoder manager
+    takes none, and must not get slots back for inputs it never allocated."""
+    scheduler = _create_encoder_decoder_scheduler(max_num_batched_tokens=600)
+    first, *stalled = create_requests(
+        num_requests=4,
+        num_tokens=10,
+        mm_positions=[[PlaceholderRange(offset=0, length=600)]] * 4,
+    )
+    for request in (first, *stalled):
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert list(output.num_scheduled_tokens) == [first.request_id]
+    assert scheduler.encoder_cache_manager.num_free_slots == 0
+
+
+def test_k3_prefill_match_hold_releases_encoder_cache_hits(monkeypatch):
+    """A prompt held back by PP prefill matching must not pin the encoder
+    cache entries it hit, and reuses them once it is admitted."""
+    monkeypatch.setattr("vllm.v1.core.sched.scheduler._K3_PM_WAIT", 1)
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    manager = scheduler.encoder_cache_manager
+    decode = create_requests(num_requests=1, num_tokens=10, req_ids=["decode"])[0]
+    scheduler.add_request(decode)
+    _confirm_scheduled(scheduler, scheduler.schedule())
+    owner = _create_mm_request_with_embedding_positions("owner", "image", [True] * 4)
+    manager.allocate(owner, 0)
+    manager.free(owner)
+    freeable_slots = manager.num_freeable_slots
+    held = create_requests(
+        num_requests=1,
+        num_tokens=20,
+        mm_positions=[[PlaceholderRange(offset=0, length=4)]],
+        mm_hashes_list=[["image"]],
+        req_ids=["held"],
+    )[0]
+    scheduler.add_request(held)
+    # Prefill matching only runs with pipeline parallelism.
+    scheduler.use_pp = True
+
+    output = scheduler.schedule()
+
+    assert list(output.num_scheduled_tokens) == ["decode"]
+    assert scheduler._k3_pm_stats["held"] == 1
+    assert manager.get_cached_input_ids(held) == set()
+    assert manager.cached["image"] == set()
+    assert manager.num_freeable_slots == freeable_slots
+
+    _confirm_scheduled(scheduler, output)
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens["held"] == 20
+    assert "held" not in output.scheduled_encoder_inputs
+    assert manager.cached["image"] == {"held"}
+
+
 def test_encoder_cache_retained_across_preemption_and_resume():
     """Regression guard for issue #38551 (preemption path).
 

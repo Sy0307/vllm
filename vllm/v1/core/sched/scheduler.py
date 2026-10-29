@@ -1552,6 +1552,7 @@ class Scheduler(SchedulerInterface):
                 external_load_encoder_input = []
                 duplicate_encoder_inputs = []
                 new_encoder_compute_budget = encoder_compute_budget
+                held_encoder_input_ids: set[int] | None = None
                 pad_spec_decode = False
 
                 # SWA bounded replay: recompute the tail of the hit without
@@ -1652,6 +1653,9 @@ class Scheduler(SchedulerInterface):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
+                        held_encoder_input_ids = set(
+                            self.encoder_cache_manager.get_cached_input_ids(request)
+                        )
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1673,13 +1677,11 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled. Requeue it so it
-                        # does not stall the requests behind it, and drop the
-                        # encoder cache references taken above: a request left
-                        # waiting must not pin entries that the requests ahead
-                        # of it need.
-                        if request.has_encoder_inputs:
-                            self.encoder_cache_manager.free(request)
+                        # The request cannot be scheduled. Requeue it so it does
+                        # not stall the requests behind it.
+                        self._release_encoder_cache_hits(
+                            request, held_encoder_input_ids
+                        )
                         skip_request(request_queue)
                         continue
 
@@ -1698,8 +1700,9 @@ class Scheduler(SchedulerInterface):
                         elif _k3_pm_hold(_k3_pm_cost, _c, self._k3_pm_prev, _holds):
                             request._k3_pm_est = (_c, _holds + 1)
                             self._k3_pm_stats["held"] += 1
-                            if request.has_encoder_inputs:
-                                self.encoder_cache_manager.free(request)
+                            self._release_encoder_cache_hits(
+                                request, held_encoder_input_ids
+                            )
                             skip_request(request_queue)
                             continue
                         elif _k3_pm_cost + _c <= self._k3_pm_prev:
@@ -1766,11 +1769,7 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
-
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
+                    self._release_encoder_cache_hits(request, held_encoder_input_ids)
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -2329,6 +2328,27 @@ class Scheduler(SchedulerInterface):
         )
         self.encoder_cache_mismatch_reqs.add(request.request_id)
         return True
+
+    def _release_encoder_cache_hits(
+        self, request: Request, held_input_ids: set[int] | None
+    ) -> None:
+        """Drop the encoder cache references that _try_schedule_encoder_inputs
+        took for a waiting request that is not admitted in this pass.
+
+        A cache hit makes the entry unevictable. A request that stays waiting
+        must not keep that hold, or it can pin the space that the requests
+        ahead of it need. References held before the pass are kept, and a
+        request failed for an embedding mismatch is cleaned up when it
+        finishes.
+        """
+        if (
+            held_input_ids is None
+            or request.request_id in self.encoder_cache_mismatch_reqs
+        ):
+            return
+        manager = self.encoder_cache_manager
+        for input_id in manager.get_cached_input_ids(request) - held_input_ids:
+            manager.free_encoder_input(request, input_id)
 
     def _allocate_encoder_inputs(
         self,
