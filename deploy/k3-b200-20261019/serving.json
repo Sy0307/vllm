@@ -9,6 +9,11 @@
     "{PACKAGE}"
   ],
   "args_set": {
+    "--attention-config": {
+      "mla_prefill_backend": "TRTLLM_RAGGED",
+      "use_prefill_query_quantization": true,
+      "backend": "KIMI_K3_KV_BALANCED_MLA"
+    },
     "--max-num-scheduled-tokens": "9216",
     "--max-num-batched-tokens": "9792",
     "--compilation-config": {
