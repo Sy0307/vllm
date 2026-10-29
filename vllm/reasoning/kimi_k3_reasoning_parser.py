@@ -137,6 +137,12 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._response_open_ids = tokenizer.encode(
             self._response_open, add_special_tokens=False
         )
+        self._response_close_ids = tokenizer.encode(
+            self._response_close, add_special_tokens=False
+        )
+        self._tools_open_ids = tokenizer.encode(
+            "<|open|>tools<|sep|>", add_special_tokens=False
+        )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -213,6 +219,41 @@ class KimiK3ReasoningParser(ReasoningParser):
         if cached_delta_ids == tuple(input_ids) and cached_content_ids is not None:
             return cached_content_ids
         return self._extract_content_ids(input_ids)
+
+    def has_skipped_think_reply(self, token_ids: Sequence[int]) -> bool:
+        """Whether *token_ids* is a reply written into a skipped think channel.
+
+        On very long prompts K3 sometimes writes its reply straight into the
+        pre-filled think channel and closes it as a response, never emitting
+        ``<|close|>think<|sep|>`` or ``<|open|>response<|sep|>``::
+
+            reply<|close|>response<|sep|><|close|>message<|sep|>
+
+        A structural response-close before any think, response or tools marker
+        proves the preceding text was the reply. Matching token ids rather than
+        text keeps quoted marker strings (ordinary tokens) as reasoning, and
+        truncated reasoning has no close at all, so it stays reasoning too.
+        """
+        if not self._thinking_enabled:
+            return False
+        response_close = self._response_close_ids
+        boundaries = (
+            self._think_open_ids,
+            self._think_close_ids,
+            self._response_open_ids,
+            self._tools_open_ids,
+        )
+        first_ids = {m[0] for m in (response_close, *boundaries) if m}
+        n = len(token_ids)
+        for i in range(n):
+            if token_ids[i] not in first_ids:
+                continue
+            for marker in boundaries:
+                if i + len(marker) <= n and _match_at(token_ids, i, marker):
+                    return False
+            if i + len(response_close) <= n and _match_at(token_ids, i, response_close):
+                return True
+        return False
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if not self._thinking_enabled:

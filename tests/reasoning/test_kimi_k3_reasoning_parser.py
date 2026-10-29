@@ -23,9 +23,15 @@ SEP = "<|sep|>"
 THINK_OPEN = f"{OPEN}think{SEP}"
 THINK_CLOSE = f"{CLOSE}think{SEP}"
 RESPONSE_OPEN = f"{OPEN}response{SEP}"
+RESPONSE_CLOSE = f"{CLOSE}response{SEP}"
+MESSAGE_CLOSE = f"{CLOSE}message{SEP}"
+TOOLS_OPEN = f"{OPEN}tools{SEP}"
 OPEN_IDS = [1, 2, 3]
 CLOSE_IDS = [4, 2, 3]
 RESPONSE_OPEN_IDS = [ord(ch) for ch in RESPONSE_OPEN]
+RESPONSE_CLOSE_IDS = [4, 5, 3]
+MESSAGE_CLOSE_IDS = [4, 6, 3]
+TOOLS_OPEN_IDS = [ord(ch) for ch in TOOLS_OPEN]
 
 
 class DummyTokenizer:
@@ -40,6 +46,8 @@ class DummyTokenizer:
             return [1, 2, 3]
         if text == THINK_CLOSE:
             return [4, 2, 3]
+        if text == RESPONSE_CLOSE:
+            return RESPONSE_CLOSE_IDS
         return [ord(ch) for ch in text]
 
 
@@ -142,6 +150,92 @@ def test_closed_historical_reasoning_does_not_hide_new_reasoning():
     reasoning, content, _ = parser.parse("still thinking", request)
     assert reasoning == "still thinking" and content is None
     assert parser.count_reasoning_tokens([101, 102]) == 2
+
+
+@pytest.mark.parametrize(
+    ("text", "token_ids", "expected"),
+    [
+        pytest.param(
+            f"answer{RESPONSE_CLOSE}{MESSAGE_CLOSE}",
+            [9, *RESPONSE_CLOSE_IDS, *MESSAGE_CLOSE_IDS],
+            (None, "answer", 0),
+            id="skipped_think_reply_is_content",
+        ),
+        pytest.param(
+            "answer", [9], ("answer", None, 1), id="truncated_reasoning_stays_reasoning"
+        ),
+        pytest.param(
+            f"quoted {RESPONSE_CLOSE}",
+            [9, *(ord(ch) for ch in RESPONSE_CLOSE)],
+            (f"quoted {RESPONSE_CLOSE}", None, 1 + len(RESPONSE_CLOSE)),
+            id="quoted_marker_text_stays_reasoning",
+        ),
+        pytest.param(
+            f"step{TOOLS_OPEN}call{RESPONSE_CLOSE}",
+            [9, *TOOLS_OPEN_IDS, 10, *RESPONSE_CLOSE_IDS],
+            (f"step{TOOLS_OPEN}call{RESPONSE_CLOSE}", None, 2 + len(TOOLS_OPEN) + 3),
+            id="tools_channel_before_close_is_not_a_reply",
+        ),
+    ],
+)
+def test_parse_recovers_reply_written_into_skipped_think(text, token_ids, expected):
+    """K3 can write its reply into the pre-filled think channel and close it as
+    a response; only a structural response-close (by token id) with no earlier
+    channel marker makes the preceding text content."""
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    reasoning, content, _ = parser.parse(
+        text, request, model_output_token_ids=token_ids
+    )
+
+    assert (reasoning, content, parser.count_reasoning_tokens(token_ids)) == expected
+
+
+def test_parse_keeps_skipped_think_reply_as_reasoning_with_structured_outputs():
+    """The structured-output grammar engages only after the think channel
+    closes, so a skipped-think reply was never constrained."""
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(
+        model="test-model", messages=[], response_format={"type": "json_object"}
+    )
+    text = f"answer{RESPONSE_CLOSE}"
+    token_ids = [9, *RESPONSE_CLOSE_IDS]
+
+    reasoning, content, _ = parser.parse(
+        text, request, model_output_token_ids=token_ids
+    )
+
+    assert (reasoning, content) == (text, None)
+    assert parser.count_reasoning_tokens(token_ids) == len(token_ids)
+
+
+def test_streaming_reemits_skipped_think_reply_as_content():
+    parser = ReasoningOnlyParser(_dummy_tokenizer())
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    chunks = [
+        ("answer", [9], False),
+        (CLOSE, [4], False),
+        (f"response{SEP}", [5, 3], False),
+        (MESSAGE_CLOSE, MESSAGE_CLOSE_IDS, True),
+    ]
+
+    deltas = [
+        parser.parse_delta(
+            delta_text=text,
+            delta_token_ids=token_ids,
+            request=request,
+            prompt_token_ids=OPEN_IDS,
+            finished=finished,
+        )
+        for text, token_ids, finished in chunks
+    ]
+
+    assert [d.content for d in deltas if d is not None and d.content] == ["answer"]
+    assert deltas[-1] is not None
+    assert deltas[-1].content == "answer"
+    all_ids = [i for _, token_ids, _ in chunks for i in token_ids]
+    assert parser.count_reasoning_tokens(all_ids) == 0
 
 
 def test_is_reasoning_end_uses_full_input_ids():
