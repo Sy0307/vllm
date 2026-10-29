@@ -1673,8 +1673,13 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled. Requeue it so it does
-                        # not stall the requests behind it.
+                        # The request cannot be scheduled. Requeue it so it
+                        # does not stall the requests behind it, and drop the
+                        # encoder cache references taken above: a request left
+                        # waiting must not pin entries that the requests ahead
+                        # of it need.
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
                         skip_request(request_queue)
                         continue
 
@@ -1693,6 +1698,8 @@ class Scheduler(SchedulerInterface):
                         elif _k3_pm_hold(_k3_pm_cost, _c, self._k3_pm_prev, _holds):
                             request._k3_pm_est = (_c, _holds + 1)
                             self._k3_pm_stats["held"] += 1
+                            if request.has_encoder_inputs:
+                                self.encoder_cache_manager.free(request)
                             skip_request(request_queue)
                             continue
                         elif _k3_pm_cost + _c <= self._k3_pm_prev:
