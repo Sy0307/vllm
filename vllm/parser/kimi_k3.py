@@ -18,12 +18,14 @@ if TYPE_CHECKING:
         ChatCompletionRequest,
     )
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.parser.abstract_parser import StreamState
 
 
 class KimiK3Parser(DelegatingParser):
     """Compose the Kimi K3 reasoning and tool parsers for XTML output."""
 
     _prompt_reasoning_ended: bool = False
+    _reply_in_skipped_think: bool = False
 
     def set_prompt_token_ids(self, prompt_token_ids: Sequence[int]) -> None:
         self._prompt_reasoning_ended = self.is_reasoning_end(list(prompt_token_ids))
@@ -42,9 +44,82 @@ class KimiK3Parser(DelegatingParser):
         return super().extract_reasoning(model_output, request)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        if self._prompt_reasoning_ended:
+        if self._prompt_reasoning_ended or self._reply_in_skipped_think:
             return 0
         return super().count_reasoning_tokens(token_ids)
+
+    def _skipped_think_rest(
+        self,
+        model_output: str,
+        token_ids: Sequence[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        """Rewrap a reply written into a skipped think channel as a response.
+
+        Returns the post-reasoning text the normal path would have seen had the
+        model emitted ``<|close|>think<|sep|><|open|>response<|sep|>`` first, or
+        None when the output is not that shape. Structured-output requests keep
+        the reply as reasoning: their grammar engages only after the think
+        channel closes, so the reply was never constrained.
+        """
+        rp = self._reasoning_parser
+        if (
+            self._prompt_reasoning_ended
+            or not isinstance(rp, KimiK3ReasoningParser)
+            or not rp.has_skipped_think_reply(token_ids)
+            or request.extract_structured_outputs() is not None
+        ):
+            return None
+        return rp._response_open + model_output
+
+    def parse(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        rest = self._skipped_think_rest(model_output, model_output_token_ids, request)
+        self._reply_in_skipped_think = rest is not None
+        if rest is None:
+            return super().parse(
+                model_output, request, enable_auto_tools, model_output_token_ids
+            )
+        self._initialize_history_tool_call_cnt(request)
+        assert isinstance(self._reasoning_parser, KimiK3ReasoningParser)
+        content = self._reasoning_parser._content_after_reasoning(rest, request)
+        tool_calls, content = self._extract_tool_calls(
+            content=content,
+            request=request,
+            enable_auto_tools=enable_auto_tools,
+        )
+        return None, content, tool_calls
+
+    def finalize_generation(
+        self,
+        delta_message: DeltaMessage | None,
+        request: ChatCompletionRequest | ResponsesRequest,
+        state: StreamState,
+    ) -> DeltaMessage | None:
+        # The reply already streamed as reasoning and the closing marker only
+        # arrives at the end, so re-emit it once as content. Tool calls after
+        # it are not recovered while streaming.
+        rest = (
+            None
+            if state.reasoning_ended
+            else self._skipped_think_rest(
+                state.previous_text, state.previous_token_ids, request
+            )
+        )
+        self._reply_in_skipped_think = rest is not None
+        if rest is not None:
+            assert isinstance(self._reasoning_parser, KimiK3ReasoningParser)
+            content = self._reasoning_parser._strip_content_wrapper(rest)
+            if content:
+                if delta_message is None:
+                    delta_message = DeltaMessage()
+                delta_message.content = (delta_message.content or "") + content
+        return super().finalize_generation(delta_message, request, state)
 
     # TODO: Switch Kimi K3 to the parser engine once its XTML reasoning/tool
     # path is covered there.
