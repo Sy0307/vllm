@@ -1478,7 +1478,9 @@ class Scheduler(SchedulerInterface):
                             pad_spec_decode = False
 
                     # Schedule encoder inputs.
+                    encoder_limited = False
                     if request.has_encoder_inputs:
+                        num_tokens_before_encoder = num_new_tokens
                         (
                             encoder_inputs_to_schedule,
                             num_new_tokens,
@@ -1492,6 +1494,7 @@ class Scheduler(SchedulerInterface):
                             encoder_compute_budget,
                             shift_computed_tokens=self.num_prefill_lookahead,
                         )
+                        encoder_limited = num_new_tokens < num_tokens_before_encoder
 
                     # Multi-module MTP: avoid ending a prefill chunk within
                     # num_prefill_lookahead of the prefill end.
@@ -1500,7 +1503,19 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
+                        # The request cannot be scheduled. Drop the encoder
+                        # cache references taken above, as the allocation
+                        # failure path does: a request left waiting must not
+                        # pin entries that the requests ahead of it need.
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
+                        if encoder_limited:
+                            # Encoder cache or budget is short for this
+                            # request only. Like the running loop, let later
+                            # requests run instead of freezing the queue
+                            # behind it (kv_holding_waiting is scanned first).
+                            skip_request(request_queue)
+                            continue
                         break
 
                     if _k3_pm_track and num_new_tokens > 1 + self.num_spec_tokens:
@@ -1518,6 +1533,8 @@ class Scheduler(SchedulerInterface):
                         elif _k3_pm_hold(_k3_pm_cost, _c, self._k3_pm_prev, _holds):
                             request._k3_pm_est = (_c, _holds + 1)
                             self._k3_pm_stats["held"] += 1
+                            if request.has_encoder_inputs:
+                                self.encoder_cache_manager.free(request)
                             skip_request(request_queue)
                             continue
                         elif _k3_pm_cost + _c <= self._k3_pm_prev:
