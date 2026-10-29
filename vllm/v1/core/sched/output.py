@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -262,11 +262,10 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # Request-local CPU inputs whose placeholder ranges have been consumed.
-    # Unlike free_encoder_mm_hashes, these do not evict shared GPU embeddings.
-    free_encoder_input_ids: dict[str, list[int]] = field(default_factory=dict)
-    # Reinstall previously released inputs needed after a KV-load rollback.
-    restore_encoder_inputs: dict[str, dict[int, MultiModalFeatureSpec]] = field(
+    # Request-local CPU payload updates: None releases a consumed input; a
+    # payload restores it for re-encoding after KV-load rollback. GPU embeddings
+    # and the feature's identifier/placeholder metadata are unaffected.
+    encoder_input_updates: dict[str, dict[int, "MultiModalKwargsItem | None"]] = field(
         default_factory=dict
     )
 
@@ -319,6 +318,11 @@ class SchedulerOutput:
     # Deprecated: cascade attention has been removed, so this is always empty.
     # Kept for out-of-tree schedulers and workers.
     num_common_prefix_blocks: list[int] = field(default_factory=list)
+
+    # Whether no scheduled request can use the drafts proposed after this step
+    # (non-final prefill chunks, or requests sure to reach max_tokens), so the
+    # drafter can skip proposing them.
+    skip_drafts: bool = False
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

@@ -24,8 +24,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import (
-    eplb_map_to_physical_and_record,
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
+    MEGA_MOE_MXFP4,
+    DeepGemmMegaMoEExperts,
+    MegaMoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
@@ -37,6 +39,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
@@ -99,8 +102,6 @@ from vllm.models.common.ops.sequence_parallel import (
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.sp_input_projection import KimiK3SPInputProjection
-from vllm.models.deepseek_v4.nvidia.model import DeepseekV4MegaMoEExperts
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
@@ -119,13 +120,18 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream, is_meta_module
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.mm_preprocess import (
     KimiK3DummyInputsBuilder,
     KimiK3MultiModalProcessor,
     KimiK3ProcessingInfo,
 )
+from .specialized_decode.runtime import specialized_decode_config
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    from .specialized_decode.runtime.decode import SpecializedDecode
 
 logger = init_logger(__name__)
 
@@ -136,21 +142,6 @@ logger = init_logger(__name__)
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
-# Overlap the shared experts with MegaMoE on the aux stream for batches with at
-# most this many local tokens (0 disables). MegaMoE is a whole-grid launch, so
-# it gives up _K3_MEGAMOE_RESERVED_SMS SMs for the shared-expert branch.
-_K3_SHARED_OVERLAP_MAX_TOKENS = int(
-    os.environ.get("VLLM_K3_SHARED_OVERLAP_MAX_TOKENS", "0")
-)
-_K3_MEGAMOE_RESERVED_SMS = int(os.environ.get("VLLM_K3_MEGAMOE_RESERVED_SMS", "16"))
-# Use the plain GEMM + lamport reduce-scatter instead of the fused GEMM+RS for
-# the overlapped shared experts (changes the reduction order, so off by default).
-_K3_SHARED_OVERLAP_PLAIN_RS = os.environ.get("VLLM_K3_SHARED_OVERLAP_PLAIN_RS") == "1"
-# Size the MegaMoE symmetric buffer for the SP-local token count instead of the
-# global batch budget (see KimiK3MegaMoEExperts.__init__).
-_K3_MEGAMOE_SP_LOCAL_CAPACITY = (
-    os.environ.get("VLLM_K3_MEGAMOE_SP_LOCAL_CAPACITY", "1") == "1"
-)
 # Write the last PP rank's gathered output of captured graphs into one shared
 # buffer (see KimiLinearModel._persist_captured_output).
 _K3_SHARED_CAPTURE_OUTPUT = os.environ.get("VLLM_K3_SHARED_CAPTURE_OUTPUT", "1") == "1"
@@ -332,9 +323,8 @@ class KimiMLP(nn.Module):
                     tuple(self.down_proj.weight.shape),
                 )
         self.gemm_rs_ar = None
-        # Set while this MLP runs beside MegaMoE on the aux stream with
-        # VLLM_K3_SHARED_OVERLAP_PLAIN_RS: the fused GEMM+reduce-scatter is then
-        # skipped for the plain GEMM + lamport RS.
+        # Kept for the shared-expert overlap path's kill switch; the fused
+        # GEMM+reduce-scatter is skipped when this is set.
         self._k3_overlapped = False
         # RS requires sequence sharding; AR operates on replicated tokens.
         use_gemm_rs_ar = self.shard_sequence_parallel or (
@@ -429,165 +419,20 @@ class KimiRoutedOutputTransform(nn.Module):
         Args:
             hidden_states: Routed expert output in latent space.
             residual: Optional tensor of the up-projection's output shape to
-                accumulate into. It is consumed in the GEMM's beta-add
-                epilogue, so adding it costs no extra kernel.
+                accumulate into. Unquantized projections fuse the addition
+                into the GEMM epilogue.
 
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
-        if residual is not None:
+        if residual is not None and isinstance(
+            self.up_proj.quant_method, UnquantizedLinearMethod
+        ):
             return residual.addmm_(hidden_states, self.up_proj.weight.t())
         hidden_states, _ = self.up_proj(hidden_states)
+        if residual is not None:
+            return residual.add_(hidden_states)
         return hidden_states
-
-
-class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
-    """Kimi K3 adapter for the DeepGEMM MegaMoE kernel."""
-
-    _kimi_symm_buffer_cache: dict[tuple[object, ...], object] = {}
-    _synchronized_ep_groups: set[tuple[int, int]] = set()
-
-    def __init__(
-        self,
-        *args,
-        activation: str,
-        activation_beta: float | None,
-        activation_linear_beta: float | None,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self.activation = activation
-        self.activation_beta = activation_beta
-        self.activation_linear_beta = activation_linear_beta
-        # MegaMoE always runs under SP (use_kimi_k3_sequence_parallel), so a
-        # rank only ever dispatches cdiv(num_tokens, tp) rows. The base class
-        # sizes the per-rank buffer for the whole batch budget, and DeepGEMM's
-        # ring/combine regions grow linearly with it: at 9792 tokens that is
-        # ~7.2 GiB per GPU, versus ~1.3 GiB for the 1224 rows a rank can see.
-        vllm_config = args[0] if args else kwargs["vllm_config"]
-        if _K3_MEGAMOE_SP_LOCAL_CAPACITY and use_kimi_k3_sequence_parallel(
-            vllm_config
-        ):
-            self.max_num_tokens = cdiv(
-                self.max_num_tokens, get_tensor_model_parallel_world_size()
-            )
-
-    def synchronize_first_launch(self) -> None:
-        ep_group = get_ep_group()
-        device = torch.accelerator.current_device_index()
-        key = (id(ep_group.cpu_group), device)
-        if key in self._synchronized_ep_groups:
-            return
-        torch.accelerator.synchronize()
-        torch.distributed.barrier(group=ep_group.cpu_group)
-        self._synchronized_ep_groups.add(key)
-
-    def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-        backend = self.backend
-        group = get_ep_group().device_group
-        device = torch.accelerator.current_device_index()
-        key = (
-            id(group),
-            device,
-            self.num_experts,
-            self.max_num_tokens,
-            self.top_k,
-            self.hidden_size,
-            self.intermediate_size,
-            self.activation,
-            backend.mma_type,
-        )
-        symm_buffer = self._kimi_symm_buffer_cache.get(key)
-        if symm_buffer is None:
-            symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-                group,
-                self.num_experts,
-                self.max_num_tokens,
-                self.top_k,
-                self.hidden_size,
-                self.intermediate_size,
-                activation=self.activation,
-                mma_type=backend.mma_type,
-            )
-            self._kimi_symm_buffer_cache[key] = symm_buffer
-        return symm_buffer
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        *,
-        activation_clamp: float | None,
-        fast_math: bool = True,
-    ) -> torch.Tensor:
-        self.synchronize_first_launch()
-        if hidden_states.shape[0] > self.max_num_tokens:
-            raise ValueError(
-                f"Kimi K3 MegaMoE got {hidden_states.shape[0]} tokens, "
-                f"but its symmetric buffer supports {self.max_num_tokens}."
-            )
-        y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        num_tokens = hidden_states.shape[0]
-        is_padding = None
-        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-            is_padding = get_forward_context().is_padding
-            if is_padding is not None:
-                is_padding = is_padding[:num_tokens]
-
-        if self.capture_fn is not None:
-            self.capture_fn(topk_ids)
-
-        eplb_state = self.eplb_state
-        if eplb_state.logical_to_physical_map is not None:
-            assert eplb_state.expert_load_view is not None
-            assert eplb_state.logical_replica_count is not None
-            assert eplb_state.should_record_tensor is not None
-            if is_padding is not None:
-                topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
-            topk_ids = eplb_map_to_physical_and_record(
-                topk_ids=topk_ids,
-                expert_load_view=eplb_state.expert_load_view,
-                logical_to_physical_map=eplb_state.logical_to_physical_map,
-                logical_replica_count=eplb_state.logical_replica_count,
-                record_enabled=eplb_state.should_record_tensor,
-                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
-                    dbo_current_ubatch_id()
-                ]
-                if eplb_state.num_unpadded_tokens_tensors is not None
-                else None,
-            )
-
-        backend = self.backend
-        symm_buffer = self.get_symm_buffer()
-        prepare_megamoe_inputs(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-            is_padding=is_padding,
-            hidden_quant=backend.hidden_quant,
-        )
-        backend.run_mega_moe(
-            y=y,
-            l1_weights=self._transformed_l1_weights,
-            l2_weights=self._transformed_l2_weights,
-            symm_buffer=symm_buffer,
-            activation_clamp=activation_clamp,
-            fast_math=fast_math,
-            # DeepGEMM names the SiTU gate tanh scale `activation_alpha` and the
-            # linear/up tanh scale `activation_beta`; beta=0 leaves up untouched.
-            activation=self.activation,
-            activation_alpha=self.activation_beta or 1.0,
-            activation_beta=self.activation_linear_beta or 0.0,
-        )
-        return y
 
 
 def make_kimi_k3_mega_moe_expert_params_mapping(
@@ -758,7 +603,6 @@ class KimiMoE(nn.Module):
             # _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
             self._down_proj_stream: torch.cuda.Stream | None = aux_stream()
             self._down_proj_events = (torch.cuda.Event(), torch.cuda.Event())
-            self._shared_overlap_events = (torch.cuda.Event(), torch.cuda.Event())
         else:
             self.routed_expert_down_proj = None
             self.routed_expert_norm = None
@@ -775,18 +619,26 @@ class KimiMoE(nn.Module):
                     f"EP size {ep_size}."
                 )
             num_local_experts = num_experts // ep_size
-            self.experts = KimiK3MegaMoEExperts(
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            if use_sequence_parallel:
+                # The layer only sees this rank's shard of the batch.
+                max_num_tokens = cdiv(max_num_tokens, self.tp_size)
+            self.experts = DeepGemmMegaMoEExperts(
                 vllm_config,
+                max_num_tokens=max_num_tokens,
                 num_experts=num_experts,
                 num_local_experts=num_local_experts,
                 experts_start_idx=ep_rank * num_local_experts,
                 top_k=num_experts_per_token,
                 hidden_size=self.moe_hidden_size,
                 intermediate_size=self.padded_moe_intermediate_size,
+                activation=MegaMoEActivation(
+                    "situ",
+                    alpha=activation_situ_beta or 1.0,
+                    beta=activation_situ_linear_beta or 0.0,
+                ),
+                weight_format=MEGA_MOE_MXFP4,
                 prefix=f"{prefix}.experts",
-                activation="situ",
-                activation_beta=activation_situ_beta,
-                activation_linear_beta=activation_situ_linear_beta,
             )
         else:
             self.experts = FusedMoEFactory(
@@ -890,57 +742,6 @@ class KimiMoE(nn.Module):
         )
         return routed_hidden_states, router_output, topk_ids
 
-    def _overlap_shared_with_mega_moe(
-        self,
-        hidden_states: torch.Tensor,
-        routed_hidden_states: torch.Tensor,
-        router_output: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the shared experts on the aux stream while MegaMoE runs.
-
-        MegaMoE is launched first with _K3_MEGAMOE_RESERVED_SMS fewer SMs, so
-        the shared-expert GEMMs and their SP all-gather / reduce-scatter find
-        free SMs instead of queueing behind the whole-grid launch. Both
-        branches run the same kernels on the same inputs as the sequential
-        path; with VLLM_K3_SHARED_OVERLAP_PLAIN_RS the fused GEMM+reduce-scatter
-        is replaced by the plain GEMM followed by the lamport reduce-scatter.
-        """
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-        assert self.shared_experts is not None
-
-        def mega_moe() -> torch.Tensor:
-            full_sms = deep_gemm.get_num_sms()
-            budget = max(2, full_sms - _K3_MEGAMOE_RESERVED_SMS)
-            budget -= budget % 2
-            deep_gemm.set_num_sms(budget)
-            try:
-                return self.experts(
-                    routed_hidden_states,
-                    router_output,
-                    topk_ids,
-                    activation_clamp=None,
-                )
-            finally:
-                deep_gemm.set_num_sms(full_sms)
-
-        def shared() -> torch.Tensor:
-            self.shared_experts._k3_overlapped = _K3_SHARED_OVERLAP_PLAIN_RS
-            try:
-                return self.shared_experts(hidden_states)
-            finally:
-                self.shared_experts._k3_overlapped = False
-
-        return maybe_execute_in_parallel(
-            mega_moe,
-            shared,
-            self._shared_overlap_events[0],
-            self._shared_overlap_events[1],
-            self._down_proj_stream,
-        )
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
@@ -953,28 +754,16 @@ class KimiMoE(nn.Module):
         if self.use_mega_moe:
             assert self.routed_output_transform is not None
             assert topk_ids is not None
-            if (
-                self.shared_experts is not None
-                and getattr(self, "_down_proj_stream", None) is not None
-                and num_tokens <= _K3_SHARED_OVERLAP_MAX_TOKENS
-            ):
-                final_hidden_states, shared_output = (
-                    self._overlap_shared_with_mega_moe(
-                        hidden_states, routed_hidden_states, router_output, topk_ids
-                    )
-                )
-            else:
-                final_hidden_states = self.experts(
-                    routed_hidden_states,
-                    router_output,
-                    topk_ids,
-                    activation_clamp=None,
-                )
-                shared_output = (
-                    self.shared_experts(hidden_states)
-                    if self.shared_experts is not None
-                    else None
-                )
+            # The shared expert reads the un-projected hidden states, so it
+            # stays outside the latent-space MegaMoE launch.
+            final_hidden_states = self.experts(
+                routed_hidden_states, router_output, topk_ids
+            )
+            shared_output = (
+                self.shared_experts(hidden_states)
+                if self.shared_experts is not None
+                else None
+            )
             # The shared output is folded into the up-projection GEMM's beta-add
             # epilogue, so combining the two branches costs no extra kernel.
             final_hidden_states = self.routed_output_transform(
@@ -1844,8 +1633,34 @@ class KimiLinearForCausalLM(
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+        # The final norm is applied in compute_logits unless the specialized decode
+        # applies it in forward.
+        self.needs_norm_in_logits = True
+
+    def build_specialized_decode(self) -> None:
+        from .specialized_decode.runtime.decode import SpecializedDecode
+
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+        # From here on forward() returns normalized hidden states on every step: the
+        # specialized decode's last AttnRes applies the norm, and forward() applies it
+        # to each step that falls back to the stock forward (prefills, larger batches,
+        # PIECEWISE steps).
+        self.needs_norm_in_logits = False
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        from .model_state import KimiK3ModelState
+
+        return KimiK3ModelState
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.specialized_decode is not None:
+            return self.specialized_decode.embed_input_ids(input_ids)
         return self.model.embed_input_ids(input_ids)
 
     def make_empty_intermediate_tensors(
@@ -1864,25 +1679,29 @@ class KimiLinearForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        return self.model(
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
+        if not self.needs_norm_in_logits:
+            assert decode is not None
+            hidden_states = decode.normalize(hidden_states)
+        return hidden_states
 
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
-        dtypes = MambaStateDtypeCalculator.kda_state_dtype(
+        return MambaStateDtypeCalculator.kda_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-        if vllm_config.cache_config.use_kda_recoverssm:
-            dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
-                dtypes, vllm_config.model_config.dtype
-            )
-        return dtypes
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -1896,22 +1715,13 @@ class KimiLinearForCausalLM(
             if vllm_config.speculative_config
             else 0
         )
-        shapes = MambaStateShapeCalculator.kda_state_shape(
+        return MambaStateShapeCalculator.kda_state_shape(
             tp_size,
             hf_config.linear_attn_config["num_heads"],
             hf_config.linear_attn_config["head_dim"],
             conv_kernel_size=hf_config.linear_attn_config["short_conv_kernel_size"],
             num_spec=num_spec,
         )
-        if vllm_config.cache_config.use_kda_recoverssm:
-            return MambaStateShapeCalculator.append_kda_recoverssm_record(
-                shapes,
-                hf_config.linear_attn_config["num_heads"],
-                hf_config.linear_attn_config["head_dim"],
-                tp_world_size=tp_size,
-                spec_query_len=1 + num_spec,
-            )
-        return shapes
 
     @classmethod
     def get_mamba_state_copy_func(
@@ -1925,7 +1735,8 @@ class KimiLinearForCausalLM(
     ) -> torch.Tensor | None:
         # The model's final norm is applied here (not at the end of forward) so
         # that the pre-norm hidden states can be fed to the MTP draft model.
-        hidden_states = self.model.norm(hidden_states, None)
+        if self.needs_norm_in_logits:
+            hidden_states = self.model.norm(hidden_states, None)
         return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -2351,6 +2162,9 @@ class KimiK3ForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        return self.language_model.get_model_state_cls()
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(
