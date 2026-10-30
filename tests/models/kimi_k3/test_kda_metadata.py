@@ -706,6 +706,55 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
 
 
+def test_recoverssm_deferred_commit_restores_its_step_records():
+    # A non-last PP rank commits a step after the next microbatch's verify has
+    # rewritten the shared per-row records; the commit must fold in its own.
+    batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([True, True, False]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        use_recoverssm=True,
+    )
+    actual = builder.build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([3, 2, 2], dtype=torch.int32),
+    )
+    assert actual.num_spec_decodes == 1
+    correction = torch.zeros(4, 2, 3, 4)
+    key_gate = torch.zeros(4, 2, 3, 8)
+    seen: list[tuple[torch.Tensor, torch.Tensor]] = []
+    context = SimpleNamespace(
+        correction_caches=(correction,),
+        kg_caches=(key_gate,),
+        commit=Mock(
+            side_effect=lambda *args, **kwargs: seen.append(
+                (correction.clone(), key_gate.clone())
+            )
+        ),
+    )
+    actual.recoverssm_context = context
+    correction[0].fill_(1.0)
+    key_gate[0].fill_(2.0)
+
+    deferred = actual.snapshot_for_deferred_commit()
+    # The next microbatch's verify reuses row 0.
+    correction.fill_(7.0)
+    key_gate.fill_(7.0)
+    deferred.commit_recoverssm_state(torch.tensor([3, 2, 1], dtype=torch.int32))
+
+    assert len(seen) == 1
+    torch.testing.assert_close(seen[0][0][0], torch.full((2, 3, 4), 1.0))
+    torch.testing.assert_close(seen[0][1][0], torch.full((2, 3, 8), 2.0))
+    # Rows past this step's speculative requests are left alone.
+    torch.testing.assert_close(seen[0][0][1:], torch.full((3, 2, 3, 4), 7.0))
+
+
 def test_recoverssm_distinguishes_draftless_decode_from_one_token_prefill():
     batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
     common_attn_metadata = create_common_attn_metadata(

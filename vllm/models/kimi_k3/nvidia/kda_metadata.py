@@ -345,6 +345,10 @@ class KDARecoverSSMCommitMetadata:
     query_start_loc: torch.Tensor
     request_indices: torch.Tensor | None
     align: KDARecoverSSMAlignMetadata | None
+    # This step's verify records (correction, key/gate) per layer. A non-last PP
+    # rank commits a step after the next microbatch's verify has overwritten the
+    # shared records, so the deferred commit restores them first.
+    saved_records: tuple[tuple[torch.Tensor, torch.Tensor], ...] | None = None
 
 
 @dataclass
@@ -369,10 +373,21 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 block_table=align.block_table.clone(),
                 num_computed_tokens=align.num_computed_tokens.clone(),
             )
+        context = self.recoverssm_context
+        saved_records = None
+        if context is not None and self.num_spec_decodes > 0:
+            n = self.num_spec_decodes
+            saved_records = tuple(
+                (correction[:n].clone(), key_gate[:n].clone())
+                for correction, key_gate in zip(
+                    context.correction_caches, context.kg_caches
+                )
+            )
         return replace(
             self,
             recoverssm_commit=replace(
                 commit,
+                saved_records=saved_records,
                 state_indices=commit.state_indices.clone(),
                 query_start_loc=commit.query_start_loc.clone(),
                 request_indices=(
@@ -392,6 +407,12 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
             return None
         context = self.recoverssm_context
         assert context is not None
+        if commit.saved_records is not None:
+            for correction, key_gate, (saved_correction, saved_key_gate) in zip(
+                context.correction_caches, context.kg_caches, commit.saved_records
+            ):
+                correction[: saved_correction.shape[0]].copy_(saved_correction)
+                key_gate[: saved_key_gate.shape[0]].copy_(saved_key_gate)
         align = commit.align
         context.commit(
             num_accepted_tokens,
