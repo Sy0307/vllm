@@ -2366,10 +2366,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pending_aux_output=pending_aux_output,
         )
 
-        # Collect KV transfer results now; finalize saves after the drafter runs.
-        defer_kv_finalize = self.speculator is not None
+        # Collect KV transfer results now; finalize saves after the drafter and
+        # the K3 state commit below. Collect only once: the connector's results
+        # are drained on read, so a second collection would drop them.
         model_runner_output.kv_connector_output = self.kv_connector.post_forward(
-            finished_req_ids, defer_finalize=defer_kv_finalize
+            finished_req_ids, defer_finalize=True
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -2498,9 +2499,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if _k3_lp is not None:
             self._k3_late_ps = None
             self.model_state.postprocess_state(*_k3_lp)
-        # Post-step KV connector related operations. With an overlapped
-        # drafter, issue them on the draft stream: KV saves fence on the current
-        # stream, and the MLA group's blocks include the draft layers it writes.
+        # Finalize KV saves. With an overlapped drafter, issue them on the draft
+        # stream: KV saves fence on the current stream, and the MLA group's
+        # blocks include the draft layers it writes.
         with (
             torch.cuda.stream(self._k3_draft_stream)
             if k3_overlap
@@ -2511,11 +2512,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             _k3_done2 = getattr(self.model_state, "_k3_commit_done", None)
             if _k3_done2 is not None:
                 torch.cuda.current_stream().wait_event(_k3_done2)
-            kv_connector_output = self.kv_connector.post_forward(
-                finished_req_ids, defer_finalize=defer_kv_finalize
-            )
-        model_runner_output.kv_connector_output = kv_connector_output
-        if defer_kv_finalize:
             self.kv_connector.finalize_step()
         model_runner_output.ec_connector_output = ec_connector_output
 
