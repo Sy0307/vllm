@@ -613,6 +613,38 @@ def test_initial_constraint_activation(
         assert structured_req.reasoner is None
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_bitmask_survives_next_step_fill(tokenizer, backend: StructuredOutputsBackend):
+    """A sent bitmask must not change when the next step refills the buffer.
+
+    The message queue hands arrays of 1 MiB or more to remote workers without
+    copying, so a view of the manager's buffer would be sampled with the next
+    step's rows.
+    """
+    manager, request = _build_harness(
+        tokenizer, backend, use_reasoner=False, num_spec_tokens=1
+    )
+    open_brace = _single_token(tokenizer, "{")
+    sent = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: [-1]},
+    )
+    assert sent is not None
+    snapshot = sent.copy()
+
+    request.append_output_token_ids([open_brace])
+    assert manager.accept_tokens(request, [open_brace])
+    after = manager.grammar_bitmask(
+        requests={request.request_id: request},
+        structured_output_request_ids=[request.request_id],
+        scheduled_spec_decode_tokens={request.request_id: [-1]},
+    )
+    assert after is not None
+    assert not np.array_equal(after[0], snapshot[0])
+    np.testing.assert_array_equal(sent, snapshot)
+
+
 @pytest.mark.parametrize("backend", REGEX_BACKENDS)
 @pytest.mark.parametrize(
     ("raw_drafts", "expected_validated", "expected_row_pattern", "terminated"),

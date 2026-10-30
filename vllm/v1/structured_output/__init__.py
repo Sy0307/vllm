@@ -515,7 +515,9 @@ class StructuredOutputManager:
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
         # and deserialization when sending this to the GPU workers.
-        return bitmask_tensor.numpy()
+        # Copy it: the message queue sends arrays of 1 MiB or more to remote
+        # workers without copying, and the next step refills this buffer.
+        return bitmask_tensor.numpy().copy()
 
     def accept_tokens(self, request: "Request", new_token_ids: list[int]) -> bool:
         """Advance grammar with accepted tokens. Returns False on rejection."""
