@@ -10,6 +10,14 @@
 
 - **详细分位数**：[request_metrics.json](request_metrics.json) 保存两组正式全程的 per-user TPS、TTFT、ITL 和请求总耗时，含 p1/p5/p10/p25/p50/p75/p90/p95/p99。全程包含突发阶段，与稳态口径分开。
 
+## 性能图
+
+![B200 吞吐、用户生成速度与首 token 等待](figures/performance_overview.png)
+
+左图参考 [InferenceX](https://inferencex.semianalysis.com/inference) 的每卡吞吐与用户速度视角，横轴使用本报告的 per-user TPS 均值（不含首 token 等待），不是其默认端到端交互性口径。右图展示正式全程首 token 等待分位数。点对应不同实测配置，不是仅改变并发的扫描。
+
+[SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径。
+
 ## 优化与对应提交
 
 提交按归档文件主题分组；共享文件可能包含多个机制。表中提交是实测文件的归档入口，**不是独立消融或可逐项相加的性能补丁**。完整代码取分支最终版本。
