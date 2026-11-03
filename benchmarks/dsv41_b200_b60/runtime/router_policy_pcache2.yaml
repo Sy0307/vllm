@@ -1,0 +1,28 @@
+# B16: as B14 (router_policy_pcache.yaml) plus prefill_load_scale 10 for prefill ranks.
+# B14: best3's decode selection unchanged; prefill gets its own instance of the built-in cost function without the
+# per-active-request term. DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT=1e7 (best3 env) feeds the built-in default
+# parameters, so with no prefill instance every prefill rank was scored 1e7 x active requests + blocks, i.e. picked by
+# fewest in-flight requests with the cache only as a tie-break (B13: chosen rank's cached blocks p50 = 0; best3: 197).
+# B14 scored a prefill rank as (uncached prompt blocks + its in-flight uncached prefill blocks) + decode_cost_blocks; for
+# a prefill rank decode_cost_blocks is the full prompt blocks of its in-flight requests (~1,100 per AgentX request, cached
+# or not), so one extra in-flight request outweighed a whole cached prefix (43% of selections were not the max-overlap
+# rank). prefill_load_scale 10 weights the compute terms (uncached tokens, booked as effective prefill tokens) 10x: a
+# cached rank loses the request only when its queued uncached work exceeds the others' by about the prefix (~1 s of P).
+# router_ttl_secs: how long the router (no KV events) assumes routed blocks stay cached; 600 s covers AgentX idle gaps
+# up to the trace's 300 s cap.
+router:
+  router_ttl_secs: 600
+worker_selection:
+  prefill: prefill-cache-cost
+  decode: decode-least-loaded
+  instances:
+    - name: prefill-cache-cost
+      type: dynamo-default-cost-fn
+      parameters:
+        overlap_score_credit: 1.0
+        prefill_load_scale: 10.0
+        decode_active_request_weight: 0.0
+    - name: decode-least-loaded
+      type: dynamo-two-tier-cost-fn
+      parameters:
+        cache_threshold: 1.0

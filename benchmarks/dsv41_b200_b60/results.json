@@ -1,0 +1,60 @@
+{
+  "recorded_at": "2026-11-03",
+  "source": "Existing AgentX benchmark exports; no new benchmark in this archive",
+  "model": "DeepSeek-V4.1-Flash-1017",
+  "hardware": {
+    "gpu": "NVIDIA B200",
+    "count": 16,
+    "prefill": 8,
+    "decode": 8
+  },
+  "base_vllm_commit": "94a29d316e8c1d6dcf6ff75645c2e61c7e3c83fd",
+  "versions": {
+    "vllm": "0.32.1rc1.dev479+g94a29d316",
+    "torch": "2.14.0+cu130",
+    "triton": "3.8.0",
+    "flashinfer": "0.7.2.post1",
+    "nixl": "1.5.0",
+    "dynamo": "1.6.0.dev20261010",
+    "harness": "agentx-harness-89b2186",
+    "cuda_toolkit_path": "/usr/local/cuda-13.1"
+  },
+  "metrics": {
+    "official_throughput": "total_usage_completion_tokens / observed elapsed (~1840 s)",
+    "steady_throughput": "requests completed in [600,1800)",
+    "steady_ttft": "requests starting in [600,1800)"
+  },
+  "b60": {
+    "run": "pb-b60-1102a",
+    "concurrency": 2816,
+    "official_output_tok_s": 100225.93,
+    "steady_output_tok_s": 112512.96,
+    "steady_ttft_mean_s": 1.5545,
+    "steady_ttft_p90_s": 2.5075,
+    "steady_itl_ms": 10.7933,
+    "formal_errors": 0,
+    "formal_successful_requests": 191231,
+    "total_usage_completion_tokens": 184415935,
+    "whole_run_ttft_mean_s": 3.163,
+    "burst_ttft_mean_s": 11.555,
+    "adoption": "Candidate; preregistered aggregate efficiency criterion not met"
+  },
+  "b56_reference_only": {
+    "source_in_this_bundle": false,
+    "note": "B56 used ov-p84, not this B60 prefill snapshot",
+    "concurrency": 2048,
+    "official_output_tok_s": 83111.34,
+    "steady_output_tok_s": 91313.16,
+    "steady_ttft_mean_s": 0.7523,
+    "steady_ttft_p90_s": 1.1596,
+    "steady_itl_ms": 7.2982,
+    "formal_errors": 0
+  },
+  "constraints": [
+    "Synthetic speculative acceptance: dspark k=5, AL=3.51, adaptive verification false",
+    "U0 only restores P scheduler defaults; it is not vanilla upstream",
+    "B60/U0 used different hosts; throughput difference is not attributable",
+    "SJF 10-second hard aging hurts burst-recovery tails",
+    "NIXL recovery does not resolve the underlying network cause"
+  ]
+}
