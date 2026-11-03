@@ -8,6 +8,8 @@
 - **代码**：[P 的 45 个快照文件](overlays/prefill/vllm) + [D 的 38 个快照文件](overlays/decode/vllm)，来源和 SHA256 见 [source_manifest.json](source_manifest.json)。这是此前已核对的本地部署快照，本次未再次连接 GPU 节点。
 - **范围**：仅完整保存 B60。B56 指标是参考，它使用 `ov-p84`，不能把这里的 P 快照当成 B56 的精确代码。
 
+- **详细分位数**：[request_metrics.json](request_metrics.json) 保存两组正式全程的 per-user TPS、TTFT、ITL 和请求总耗时，含 p1/p5/p10/p25/p50/p75/p90/p95/p99。全程包含突发阶段，与稳态口径分开。
+
 ## 优化与对应提交
 
 提交按归档文件主题分组；共享文件可能包含多个机制。表中提交是实测文件的归档入口，**不是独立消融或可逐项相加的性能补丁**。完整代码取分支最终版本。
