@@ -1,4 +1,4 @@
-"""Render the B200 performance figure from existing benchmark summaries."""
+"""Render line charts from existing B200 benchmark summaries; no benchmark runs."""
 
 import argparse
 import json
@@ -9,9 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
-from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch
-from matplotlib.ticker import FuncFormatter
 
 
 def main():
@@ -35,7 +33,7 @@ def main():
 
     plt.rcParams.update({
         "font.family": family,
-        "font.size": 14,
+        "font.size": 13,
         "axes.unicode_minus": False,
         "axes.edgecolor": "#c8d0da",
         "axes.labelcolor": "#334155",
@@ -44,103 +42,100 @@ def main():
         "svg.fonttype": "path",
     })
     ink, muted, grid = "#0f172a", "#64748b", "#e5eaf0"
-    colors = {2048: "#7563d9", 2432: "#3291cf", 2816: "#049b82"}
-    runs = {r["concurrency"]: r for r in data["runs"]}
-    best = runs[2816]
-    fig = plt.figure(figsize=(14, 9.4), facecolor="white")
-    fig.text(.055, .945, "DeepSeek V4.1 Flash  /  B200 性能概览",
-             fontsize=26, fontweight="bold", color=ink)
-    fig.text(.055, .902, "AgentX  ·  16 GPU（8 Prefill + 8 Decode）  ·  2026-11-03 整理",
+    colors = {
+        "avg": "#049b82", "p10": "#94a3b8", "p50": "#3291cf",
+        "p90": "#7563d9", "p95": "#d38a28", "p99": "#ca5473",
+    }
+    runs = sorted(data["runs"], key=lambda r: r["concurrency"])
+    best = max(runs, key=lambda r: r["output_tps"])
+    xs = [r["concurrency"] for r in runs]
+    fig = plt.figure(figsize=(16, 9.8), facecolor="white")
+    fig.text(.05, .945, "DeepSeek V4.1 Flash  /  B200 性能趋势",
+             fontsize=27, color=ink)
+    fig.text(.05, .900, "AgentX  ·  16 GPU（8 Prefill + 8 Decode）  ·  2026-11-03 整理",
              fontsize=14, color=muted)
-    fig.text(.055, .852, "当前最高吞吐配置：并发 2816", fontsize=14,
-             color=colors[2816], fontweight="bold")
+    fig.text(.05, .852, "当前最高吞吐配置：并发 2816  ·  以下均为正式全程，包含突发阶段",
+             fontsize=14, color=colors["avg"])
 
     cards = [
-        ("100.2k", "全程输出 tok/s · 16 GPU"),
-        ("6,264", "全程输出 tok/s/GPU"),
-        ("112.45", "全程平均 per-user TPS"),
-        ("1.55 s", "稳态平均首 token 等待"),
+        (f"{best['output_tps']/1000:.1f}k", "整机输出 tok/s · 16 GPU"),
+        (f"{best['output_tps']/best['gpu_count']:,.0f}", "输出 tok/s/GPU · 按全部 16 卡"),
+        (f"{best['per_user_tps']['avg']:.2f}", "平均 per-user TPS"),
+        (f"{best['ttft_ms']['avg']/1000:.2f} s", "平均首 token 等待（TTFT）"),
     ]
     for i, (value, label) in enumerate(cards):
-        x = .055 + i * .235
-        patch = FancyBboxPatch((x, .737), .218, .09,
-                              boxstyle="round,pad=0.008,rounding_size=0.007",
-                              transform=fig.transFigure, facecolor="#f7f9fc",
-                              edgecolor="#e7ecf2", linewidth=.8)
-        fig.add_artist(patch)
-        fig.text(x + .015, .783, value, fontsize=27, fontweight="bold", color=ink)
-        fig.text(x + .015, .751, label, fontsize=12.5, color=muted)
+        x = .05 + i * .238
+        fig.add_artist(FancyBboxPatch(
+            (x, .735), .222, .09, transform=fig.transFigure,
+            boxstyle="round,pad=0.007,rounding_size=0.007",
+            facecolor="#f7f9fc", edgecolor="#e7ecf2", linewidth=.8,
+        ))
+        fig.text(x + .013, .780, value, fontsize=28, color=ink)
+        fig.text(x + .013, .748, label, fontsize=12, color=muted)
 
-    left = fig.add_axes([.088, .257, .47, .374])
-    right = fig.add_axes([.678, .257, .27, .374])
-    fig.text(.065, .681, "吞吐与用户生成速度", fontsize=19,
-             fontweight="bold", color=ink)
-    fig.text(.654, .681, "首 token 等待分位数", fontsize=19,
-             fontweight="bold", color=ink)
-
-    for ax in [left, right]:
+    axes = [fig.add_axes([x, .280, .232, .365]) for x in [.069, .393, .717]]
+    for ax in axes:
         ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(axis="both", labelsize=13, length=0, pad=8)
+        ax.tick_params(axis="both", labelsize=12.5, length=0, pad=8)
         ax.set_axisbelow(True)
-    left.grid(color=grid, linewidth=.8)
-    left.set_xlim(103, 158)
-    left.set_ylim(4650, 6680)
-    left.set_xticks([110, 120, 130, 140, 150])
-    left.set_yticks([5000, 5500, 6000, 6500])
-    left.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:,.0f}"))
-    left.set_xlabel("Per-user TPS（全程均值，tok/s/user）", labelpad=13, fontsize=14)
-    left.set_ylabel("输出吞吐（tok/s/GPU）", labelpad=12, fontsize=14)
-    left.text(.98, .98, "越往右上越好", ha="right", va="top",
-              transform=left.transAxes, color=muted, fontsize=12)
+        ax.grid(axis="y", color=grid, linewidth=.8)
+        ax.set_xlim(1990, 3240)
+        ax.set_xticks(xs, [f"{x}" + ("*" if x == 2432 else "") for x in xs])
+        ax.set_xlabel("客户端并发", labelpad=12, fontsize=13)
 
-    positions = {2048: (123, 4930), 2432: (132, 5800), 2816: (115.6, 6360)}
-    for concurrency in [2048, 2432, 2816]:
-        r = runs[concurrency]
-        x, y = r["per_user_tps"]["avg"], r["output_tps"] / 16
-        left.scatter(x, y, s=180 if concurrency == 2816 else 115,
-                     marker="D" if concurrency == 2816 else "o",
-                     color=colors[concurrency], edgecolor="white", linewidth=1.8, zorder=5)
-        label = f"并发 {concurrency}" + (" · 当前最高吞吐" if concurrency == 2816 else "")
-        if concurrency == 2432:
-            label += " *"
-        label += f"\n{r['output_tps']/1000:.1f}k tok/s · {x:.1f} TPS/user"
-        left.annotate(label, xy=(x, y), xytext=positions[concurrency],
-                      fontsize=13, color=colors[concurrency], fontweight="bold",
-                      ha="left", va="center", linespacing=1.7,
-                      arrowprops={"arrowstyle": "-", "color": colors[concurrency],
-                                  "lw": 1.0, "connectionstyle": "arc3,rad=0"})
+    throughput, user, ttft = axes
+    titles = ["整机输出吞吐 ↑", "用户生成速度 ↑", "首 token 等待 ↓"]
+    units = ["k tok/s", "tok/s/user · 不含 TTFT", "秒"]
+    for x, title, unit in zip([.069, .393, .717], titles, units):
+        fig.text(x, .688, title, fontsize=19, color=ink)
+        fig.text(x, .653, unit, fontsize=12, color=muted)
 
-    percentiles = ["p50", "p90", "p95", "p99"]
-    ys = [3, 2, 1, 0]
-    for y, stat in zip(ys, percentiles):
-        low = runs[2048]["ttft_ms"][stat] / 1000
-        high = runs[2816]["ttft_ms"][stat] / 1000
-        right.plot([low, high], [y, y], color=grid, lw=4.5, zorder=1)
-        for concurrency, value, offset in [(2048, low, -17), (2816, high, 12)]:
-            right.scatter(value, y, s=80, color=colors[concurrency], zorder=3)
-            right.annotate(f"{value:.2f}", (value, y), xytext=(0, offset),
-                           textcoords="offset points", ha="center", va="center",
-                           fontsize=12.5, color=colors[concurrency], fontweight="bold")
-    right.set_yticks(ys, [x.upper() for x in percentiles])
-    right.set_ylim(-.48, 3.48)
-    right.set_xlim(-.6, 26.7)
-    right.set_xticks([0, 5, 10, 15, 20, 25])
-    right.grid(axis="x", color=grid, linewidth=.8)
-    right.set_xlabel("首 token 等待（秒，越小越好）", labelpad=13, fontsize=13)
-    handles = [Line2D([], [], linestyle="", marker="o", markersize=7,
-                      color=colors[c], label=f"并发 {c}") for c in [2048, 2816]]
-    fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(.654, .636),
-               frameon=False, fontsize=11.8, handletextpad=.3, ncols=2,
-               columnspacing=1.2)
+    values = [r["output_tps"] / 1000 for r in runs]
+    throughput.plot(xs, values, color=colors["avg"], marker="o", markersize=8,
+                    linewidth=3, markeredgecolor="white", markeredgewidth=1.3)
+    throughput.set_ylim(0, 112)
+    throughput.set_yticks([0, 25, 50, 75, 100])
+    throughput.fill_between(xs, values, color=colors["avg"], alpha=.055)
+    for x, y in zip(xs, values):
+        throughput.annotate(f"{y:.1f}k", (x, y), xytext=(0, 13),
+                            textcoords="offset points", ha="center", fontsize=14,
+                            color=colors["avg"])
+    throughput.text(.05, .08, "83.1k → 100.2k tok/s", transform=throughput.transAxes,
+                    fontsize=13, color=ink)
 
-    fig.text(.065, .164, "读图：并发 2816 的整机吞吐更高；并发 2048 的用户生成速度更快、首 token 等待更短。",
-             fontsize=14, color=ink)
-    fig.text(.065, .119, "口径：图中散点与分位数均取正式全程；左图用户速度不含首 token 等待。稳态卡片取第 600–1800 秒。",
-             fontsize=11.8, color=muted)
-    fig.text(.065, .085, "* 并发 2432 该轮有 4 个正式错误。各点为不同实测配置，不是只改变并发的扫描；投机接受率采用固定模拟值。",
-             fontsize=11.8, color=muted)
-    fig.text(.065, .044, "图形视角参考 InferenceX  ·  数据：本项目 AIPerf 原始导出  ·  当前最高吞吐运行：pb-b60-1102a",
-             fontsize=10.8, color=muted)
+    # Low TPS percentiles describe slower requests. No smoothing/interpolation.
+    for stat in ["p99", "p90", "avg", "p50", "p10"]:
+        values = [r["per_user_tps"][stat] for r in runs]
+        user.plot(xs, values, color=colors[stat], marker="o", markersize=5.5,
+                  linewidth=2.5 if stat == "avg" else 1.8,
+                  linestyle="--" if stat == "p10" else "-")
+        label = "均值" if stat == "avg" else stat.upper()
+        user.annotate(f"{label} {values[-1]:.1f}", (xs[-1], values[-1]),
+                      xytext=(9, 0), textcoords="offset points", va="center",
+                      fontsize=11.5, color=colors[stat])
+    user.set_xlim(1990, 3240)
+    user.set_ylim(65, 265)
+    user.set_yticks([75, 100, 150, 200, 250])
+
+    for stat in ["p99", "p95", "p90", "p50"]:
+        values = [r["ttft_ms"][stat] / 1000 for r in runs]
+        ttft.plot(xs, values, color=colors[stat], marker="o", markersize=5.5,
+                  linewidth=2)
+        ttft.annotate(f"{stat.upper()} {values[-1]:.2f}", (xs[-1], values[-1]),
+                      xytext=(9, 0), textcoords="offset points", va="center",
+                      fontsize=11.5, color=colors[stat])
+    ttft.set_xlim(1990, 3240)
+    ttft.set_ylim(0, 27)
+    ttft.set_yticks([0, 5, 10, 15, 20, 25])
+
+    fig.text(.05, .175, "并发 2816：吞吐最高；并发 2048：用户生成更快，首 token 等待更短。",
+             fontsize=15, color=ink)
+    fig.text(.05, .123, "口径：均为正式全程。Per-user TPS 先逐请求计算，再汇总；低分位代表较慢请求。",
+             fontsize=12, color=muted)
+    fig.text(.05, .088, "* 并发 2432 有 4 个正式错误。各点对应不同实测配置，连线仅便于比较，不代表只改变并发的扫描。",
+             fontsize=12, color=muted)
+    fig.text(.05, .045, "视觉风格参考 InferenceX  ·  数据：本项目 AIPerf 原始导出  ·  投机接受率为固定模拟值，不代表质量评测。",
+             fontsize=11.5, color=muted)
 
     fig.savefig(here / "performance_overview.png", dpi=200, facecolor="white")
     fig.savefig(here / "performance_overview.svg", facecolor="white")

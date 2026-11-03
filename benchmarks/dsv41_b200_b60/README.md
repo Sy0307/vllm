@@ -14,7 +14,7 @@
 
 ![B200 吞吐、用户生成速度与首 token 等待](figures/performance_overview.png)
 
-左图参考 [InferenceX](https://inferencex.semianalysis.com/inference) 的每卡吞吐与用户速度视角，横轴使用本报告的 per-user TPS 均值（不含首 token 等待），不是其默认端到端交互性口径。右图展示正式全程首 token 等待分位数。点对应不同实测配置，不是仅改变并发的扫描。
+折线图按客户端并发展示整机吞吐、per-user TPS（均值及 p10/p50/p90/p99）和 TTFT（p50/p90/p95/p99）。全部采用正式全程口径，包含突发阶段。各点对应不同实测配置，连线仅便于比较，不代表仅改变并发的扫描。视觉风格参考 [InferenceX](https://inferencex.semianalysis.com/inference)；per-user TPS 不含首 token 等待，与其默认端到端交互性口径不同。
 
 [SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径。
 
