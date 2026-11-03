@@ -1,0 +1,28 @@
+{
+  "reference": "SemiAnalysisAI/InferenceX-app",
+  "reference_commit": "1924ceb68b0201e8daaa74edf5ee0acdb8380afb",
+  "visual_reference": "https://github.com/SemiAnalysisAI/InferenceX-app/blob/1924ceb68b0201e8daaa74edf5ee0acdb8380afb/docs/images/pareto/dark-log.png",
+  "source_files": {
+    "theme": "https://github.com/SemiAnalysisAI/InferenceX-app/blob/1924ceb68b0201e8daaa74edf5ee0acdb8380afb/packages/app/src/app/globals.css",
+    "vendor_colors": "https://github.com/SemiAnalysisAI/InferenceX-app/blob/1924ceb68b0201e8daaa74edf5ee0acdb8380afb/packages/app/src/lib/charts/dynamic-colors.ts",
+    "vendor_hue_zone": "https://github.com/SemiAnalysisAI/InferenceX-app/blob/1924ceb68b0201e8daaa74edf5ee0acdb8380afb/packages/constants/src/gpu-keys.ts",
+    "font": "https://github.com/SemiAnalysisAI/InferenceX-app/blob/1924ceb68b0201e8daaa74edf5ee0acdb8380afb/.claude/skills/write-inferencex-whitepaper/pipeline/fonts/DMSans-Regular.ttf"
+  },
+  "dark_theme": {
+    "background": "#131416",
+    "foreground": "#eaebec",
+    "muted_foreground": "#b4b9bc",
+    "border": "#656b72",
+    "grid": "#222426",
+    "highlight_primary": "#f7b041"
+  },
+  "series_colors_oklch": {
+    "B200": [0.64, 0.15, 145],
+    "TTFT_p50_overlay_run_1": [0.75, 0.2, 190],
+    "TTFT_p90_overlay_run_2": [0.78, 0.2, 90],
+    "TTFT_p95_overlay_run_3": [0.7, 0.22, 290],
+    "TTFT_p99_overlay_run_0": [0.72, 0.22, 25]
+  },
+  "B200_color_rule": "For one NVIDIA series in dark mode: midpoint of L=[0.5,0.78], C=0.15, midpoint of H=[120,170]. Converted to clipped sRGB by plot_performance.py.",
+  "adaptation": "Uses this project's benchmark data, Chinese labels, a two-panel static layout and a darker green label fill. No InferenceX benchmark data or endorsement is implied. The main x-axis is decode per-user TPS excluding TTFT, rather than InferenceX's default end-to-end interactivity."
+}
