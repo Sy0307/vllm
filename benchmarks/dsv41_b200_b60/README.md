@@ -14,11 +14,11 @@
 
 | 优化 | 做了什么 | 已有证据与限制 | 归档 commit |
 |---|---|---|---|
-| P 调度 | residual SJF、动态 token cap、上一轮 DP 共享整步预算；缩短排队与长步。 | 组合相对 U0 稳态 TTFT 均值约 −16%、p90 约 −23%；未拆出单项收益。 | [eb0e76832](https://github.com/Sy0307/vllm/commit/eb0e76832c31955a49bceb4fa3d54f212c55b7a2) |
-| KV 数据通路 | 输入线程 lookup prefetch、MultiConnector、early receive 通知线程、Mooncake load kick；把查找、加载及通知前移。 | 既有 B42b→B45 对照中 load kick 的 TTFT 约 −6.3%，吞吐基本不变。 | [af39cf4ce](https://github.com/Sy0307/vllm/commit/af39cf4ce163bddec144c9b0345152b74185fec5) |
-| Engram 主机行预取 | P 的 CPU offload 配合 8 线程行预取，与 GPU 执行重叠。 | 既有隔离 E2E 对照中 TTFT 约 −8.5%、P 延迟约 −10.6%、吞吐约 +0.33%。 | [a0af0237f](https://github.com/Sy0307/vllm/commit/a0af0237ff0e1c4b2ec007164c34f5aa7982b480) |
-| D 分配与准入 | 跳过无操作 KV allocation、defer promote；配合 host core 中的 input gate。 | 当前包未拆分独立 E2E 增益。 | [b6892dc74](https://github.com/Sy0307/vllm/commit/b6892dc748b592d106eee7fbce81c15ceeeb0a2f) |
-| 融合 draft sampling | 保留融合 kernel 与 NaN、边界修正，减少 draft 采样开销。 | 当前包未拆分独立 E2E 增益；synthetic 接受率不代表生成质量。 | [f29936ccc](https://github.com/Sy0307/vllm/commit/f29936cccce36c7ff931c02a4eb4697d33a5f56d) |
+| P 调度 | 短任务优先（residual SJF）、动态 token 上限、DP 共享整步预算，缩短排队和过长的计算步。 | 与默认先来先服务、关闭这三项优化相比，平均首 token 等待从 1.84 秒降到 1.55 秒，90% 请求的等待从 3.28 秒降到 2.51 秒。三项一起测试，各自贡献尚不清楚。 | [eb0e76832](https://github.com/Sy0307/vllm/commit/eb0e76832c31955a49bceb4fa3d54f212c55b7a2) |
+| KV 数据通路 | 输入线程 lookup prefetch、MultiConnector、early receive 通知线程、Mooncake load kick；把查找、加载及通知前移。 | 与关闭 load kick 相比，打开后平均首 token 等待降低约 6.3%，吞吐基本不变。 | [af39cf4ce](https://github.com/Sy0307/vllm/commit/af39cf4ce163bddec144c9b0345152b74185fec5) |
+| Engram 主机行预取 | P 的 CPU offload 配合 8 线程行预取，与 GPU 执行重叠。 | 在单独开关行预取的端到端测试中，平均首 token 等待降低约 8.5%，输入处理耗时降低约 10.6%，吞吐提高约 0.33%。 | [a0af0237f](https://github.com/Sy0307/vllm/commit/a0af0237ff0e1c4b2ec007164c34f5aa7982b480) |
+| D 分配与准入 | 跳过无操作 KV allocation、defer promote；配合 host core 中的 input gate。 | 在当前配置下，这一项能提升多少还没有单独测出。 | [b6892dc74](https://github.com/Sy0307/vllm/commit/b6892dc748b592d106eee7fbce81c15ceeeb0a2f) |
+| 融合 draft sampling | 保留融合 kernel 与 NaN、边界修正，减少 draft 采样开销。 | 在当前配置下，这一项能提升多少还没有单独测出；固定模拟接受率也不能说明生成质量。 | [f29936ccc](https://github.com/Sy0307/vllm/commit/f29936cccce36c7ff931c02a4eb4697d33a5f56d) |
 | MXFP8 预编译 | 提前编译可能使用的 GEMM tactic，避免服务中编译停顿。 | 已有运行时 compile stall 被消除的记录；没有独立吞吐结论。 | [597d66921](https://github.com/Sy0307/vllm/commit/597d6692195d1b831d0876dfe3aeb9dcde8cbadf) |
 | 主机与模型基础优化 | compact int32 TokenIds、fast hash、每 16 步同步 GC、input gate，以及模型/runner 配套文件。 | 包含继承的 Canlin 基础优化与其他同期文件；未拆分单项收益。 | [f184ccabf](https://github.com/Sy0307/vllm/commit/f184ccabfe55305c4aa9577b08ada0542e2cc15b) |
 | NIXL 断连恢复 | 失效 peer 清理、退避和重新握手，避免一次断连变成持续请求失败。 | 可靠性修正；网络根因未消除。 | [040885c57](https://github.com/Sy0307/vllm/commit/040885c570c0d5020dc950cda49260c6f5f837b0) |
@@ -50,8 +50,8 @@ $VENV/bin/python benchmarks/dsv41_b200_b60/materialize_overlay.py \
 
 ## 必须保留的限制
 
-- U0 只恢复 P 调度默认值，其他优化保留；它不是纯上游。B60/U0 使用不同机器，约 1.5% 吞吐差与节点差同量级，不能归因。
-- SJF 10 s 硬老化影响恢复段长尾：[600,1800) p99 为 11.05 对 6.12 s；去掉恢复段后 p99 为 5.43 对 5.72 s，但 p99.9 仍约差 38%。
+- 上述调度对照只关闭短任务优先、动态 token 上限和 DP 共享预算，其他优化保留，不能代表整套系统相对原版 vLLM 的收益。两次使用不同机器，约 1.5% 吞吐差与机器性能差接近，无法判断调度是否提高吞吐。
+- 尾延迟有代价：包含突发恢复期时，默认调度让 99% 请求在 6.12 秒内收到首 token，当前优化需 11.05 秒；与 SJF 等待满 10 秒才提权有关。去掉恢复期后，两者 p99 为 5.43 / 5.72 秒，但当前优化的 p99.9 仍高约 38%。
 - dspark k=5、synthetic AL=3.51、adaptive verification 关闭；这些成绩不证明真实接受率或输出质量。
 - B60 未满足原预注册聚合锁步效率门槛，采用仍待定；C2048 尚未测试该配置。
 - 保留源文件现状与哈希。本次只归档、检查打包一致性和发布链接，没有运行新性能、模型质量或功能测试，也未对快照自动格式化。
