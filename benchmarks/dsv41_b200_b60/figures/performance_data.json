@@ -3,9 +3,9 @@
   "hardware": "16 x B200, 8P + 8D",
   "workload": "AgentX",
   "scope": "Formal full run including burst; no warmup. Output TPS per GPU divides total system output TPS by all 16 GPUs.",
-  "x_axis": "Main panel: mean per-request output_token_throughput_per_user. TTFT panel: client concurrency. Lines connect measured configurations for comparison; not a concurrency-only sweep.",
+  "x_axis": "Main panel: p50 of per-request output_token_throughput_per_user (decode-only). TTFT panel: client concurrency for B56/B58/B57 with the same service configuration.",
   "per_user_tps_definition": "Per-request output_token_throughput_per_user, then aggregate; excludes TTFT. Not InferenceX default end-to-end normalized interactivity.",
-  "caveat": "Points use different measured configurations, not a concurrency-only sweep. Synthetic dspark k=5 AL=3.51; performance does not establish output quality.",
+  "caveat": "Client concurrency is the configured AgentX lane/session capacity, not the number simultaneously decoding. Per-request TPS means have extreme outliers; main plot uses p50. All points use synthetic dspark k=5 AL=3.51, without establishing quality.",
   "style_reference": "https://inferencex.semianalysis.com/inference",
   "current_best_steady_output_tps": 112512.96,
   "current_best_steady_ttft_s": 1.5545,
@@ -52,7 +52,8 @@
         "sum": 195836011.48022398
       },
       "source_sha256": "088e528cbe61463ce7c3e9ea89304a93958e50d07ea08c7c547dfd92a5b2dab7",
-      "formal_errors": 0
+      "formal_errors": 0,
+      "series": "same_configuration_concurrency_comparison"
     },
     {
       "run": "pb-b58-1031b",
@@ -96,7 +97,8 @@
         "sum": 389775116.924811
       },
       "source_sha256": "2100fbb57bcedaa9ec1e5a202d77bfb4417e35ba118eb253bb8fb37be1a1e914",
-      "formal_errors": 4
+      "formal_errors": 4,
+      "series": "same_configuration_concurrency_comparison"
     },
     {
       "run": "pb-b60-1102a",
@@ -140,7 +142,57 @@
         "sum": 604914689.5932859
       },
       "source_sha256": "dbac70c130724beabc75e0516e228ef6ef7e9b1a56c53962acab53639535c946",
-      "formal_errors": 0
+      "formal_errors": 0,
+      "series": "latest_configuration"
+    },
+    {
+      "run": "pb-b57-1031a",
+      "concurrency": 2816,
+      "gpu_count": 16,
+      "output_tps": 98832.63081927046,
+      "per_user_tps": {
+        "unit": "tokens/sec/user",
+        "avg": 114.83858670386252,
+        "p1": 81.01373782720906,
+        "p5": 85.61970058515227,
+        "p10": 89.3834002525203,
+        "p25": 93.36026643953309,
+        "p50": 100.1633746128783,
+        "p75": 112.37689197596956,
+        "p90": 178.4665369548474,
+        "p95": 186.4125470403152,
+        "p99": 207.45680218294,
+        "min": 20.228231494875004,
+        "max": 42672.58137065258,
+        "std": 173.79486834743798,
+        "count": 188307,
+        "sum": 21624909.74644424
+      },
+      "ttft_ms": {
+        "unit": "ms",
+        "avg": 3992.1091393796537,
+        "p1": 314.84820643999996,
+        "p5": 437.549403,
+        "p10": 578.5808314,
+        "p25": 944.471146,
+        "p50": 1523.253886,
+        "p75": 3852.3330419999998,
+        "p90": 12446.714361400009,
+        "p95": 15023.222708800005,
+        "p99": 23322.187912560003,
+        "min": 63.747699999999995,
+        "max": 57330.634648,
+        "std": 5500.696198021955,
+        "count": 188369,
+        "sum": 751989606.475806
+      },
+      "source_sha256": "0c530aa69968d754c668e6b0a574df008aed52e66f3f424483381f3d45b1241d",
+      "formal_errors": 0,
+      "series": "same_configuration_concurrency_comparison"
     }
-  ]
+  ],
+  "series_definition": {
+    "same_configuration_concurrency_comparison": "B56 C2048, B58 C2432, B57 C2816 use ov-p84 and the same service parameters; run IDs/log start times differ. B58 has four formal errors.",
+    "latest_configuration": "B60 C2816 uses changed P scheduler code/knobs (ov-p85 and shared step budget). Highlight separately; do not connect into the old-configuration concurrency curve."
+  }
 }

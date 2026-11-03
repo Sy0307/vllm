@@ -8,15 +8,23 @@
 - **代码**：[P 的 45 个快照文件](overlays/prefill/vllm) + [D 的 38 个快照文件](overlays/decode/vllm)，来源和 SHA256 见 [source_manifest.json](source_manifest.json)。这是此前已核对的本地部署快照，本次未再次连接 GPU 节点。
 - **范围**：仅完整保存 B60。B56 指标是参考，它使用 `ov-p84`，不能把这里的 P 快照当成 B56 的精确代码。
 
-- **详细分位数**：[request_metrics.json](request_metrics.json) 保存两组正式全程的 per-user TPS、TTFT、ITL 和请求总耗时，含 p1/p5/p10/p25/p50/p75/p90/p95/p99。全程包含突发阶段，与稳态口径分开。
+- **详细分位数**：[request_metrics.json](request_metrics.json) 保存 B56/B58/B57/B60 四组正式全程的 per-user TPS、TTFT、ITL 和请求总耗时，含 p1/p5/p10/p25/p50/p75/p90/p95/p99。全程包含突发阶段，与稳态口径分开。
 
 ## 性能图
 
 ![B200 吞吐、用户生成速度与首 token 等待](figures/performance_overview.png)
 
-主图按 [InferenceX](https://inferencex.semianalysis.com/inference) 常见的每卡吞吐—用户生成速度视角连线，右图展示 TTFT p50/p90/p95/p99。采用其官方深色主题、NVIDIA 绿色色域、金色高亮及对比色板；精确来源和颜色值见 [style_reference.json](figures/style_reference.json)。全部采用正式全程口径，包含突发阶段。各点配置不同，连线仅用于比较，不代表仅改变并发的扫描。Per-user TPS 不含 TTFT，与 InferenceX 默认端到端交互性口径不同。
+主图按 [InferenceX](https://inferencex.semianalysis.com/inference) 的每卡吞吐—用户生成速度视角绘制；使用官方深色主题、NVIDIA 绿色、金色及分位数色板，来源见 [style_reference.json](figures/style_reference.json)。绿线连接同代码、同服务参数的 B56/B58/B57；B60 改过 P 调度，用金点单列。右图仅展示绿线三组的 TTFT。全部采用正式全程口径，包含突发阶段。Per-user TPS 不含 TTFT，与 InferenceX 默认端到端交互性口径不同。
 
-主图坐标与点上标注统一为 tok/s/GPU（整机吞吐除以全部 16 卡）。2048/2432/2816 三组记录的坐标分别为 (147.14, 5194.46)、(129.34, 5776.64)、(112.45, 6264.12)。单用户速度来自逐请求生成速度的均值，不等于整机吞吐除以客户端并发；三组代码及参数不同，不能把速度下降归因于并发这一项。
+横轴改用逐请求 TPS 的 **P50**，降低极端值对均值的影响；纵轴及点上标注为 tok/s/GPU，整机吞吐除以全部 16 卡。同配置 2048/2432/2816 的坐标为 (138.04, 5194.46)、(114.98, 5776.64)、(100.16, 6177.04)；B60 为 (98.03, 6264.12)。客户端并发是 AgentX lane/session 容量，不是同时 decode 的请求数，不能用整机吞吐除以它来计算单用户速度。
+
+| 同配置并发 | 整机 tok/s | TPS 均值 | TPS P10 | TPS P50 | TPS P90 | TTFT P50（s） | TTFT P90（s） |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2048 | 83,111 | 147.14 | 118.44 | 138.04 | 194.26 | 0.637 | 1.854 |
+| 2432 | 92,426 | 129.34 | 105.03 | 114.98 | 195.22 | 0.894 | 5.724 |
+| 2816 | 98,833 | 114.84 | 89.38 | 100.16 | 178.47 | 1.523 | 12.447 |
+
+TPS 的 P10 表示较慢端，P90 表示较快端。B58 有 4 个正式错误，其余三组为 0。逐请求 token 总数 / 实际约 1840 秒可复现整机吞吐，但 TPS 均值存在极端值，客户端也有事件循环停顿记录；紧凑导出缺少完整 SSE 时间戳，不能据此认定测量完全无偏。核查依据与限制见 [metrics_audit.json](metrics_audit.json)，本次没有新跑分。
 
 [SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径，`--latin-font` 可指定 InferenceX 使用的 DM Sans 字体。
 

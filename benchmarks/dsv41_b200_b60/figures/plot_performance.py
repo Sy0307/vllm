@@ -79,7 +79,11 @@ def main():
         "svg.fonttype": "path",
         "savefig.facecolor": bg,
     })
-    runs = sorted(data["runs"], key=lambda r: r["concurrency"])
+    runs = data["runs"]
+    baseline = sorted(
+        [r for r in runs if r["series"] == "same_configuration_concurrency_comparison"],
+        key=lambda r: r["concurrency"],
+    )
     best = max(runs, key=lambda r: r["output_tps"])
     fig = plt.figure(figsize=(15, 9.6), facecolor=bg)
     fig.text(.055, .940, "DeepSeek V4.1 Flash  /  B200", fontsize=26, color=ink)
@@ -94,8 +98,8 @@ def main():
         (f"{best['output_tps']/1000:.1f}k", "整机输出 tok/s", green),
         (f"{best['output_tps']/best['gpu_count']:,.0f}",
          "输出 tok/s/GPU · 按全部 16 卡", green),
-        (f"{best['per_user_tps']['avg']:.2f}", "平均 per-user TPS", ink),
-        (f"{best['ttft_ms']['avg']/1000:.2f} s", "平均 TTFT", gold),
+        (f"{best['per_user_tps']['p50']:.2f}", "P50 per-user TPS", ink),
+        (f"{best['ttft_ms']['p50']/1000:.2f} s", "P50 TTFT", gold),
     ]
     for i, (value, label, color) in enumerate(stats):
         x = .055 + i * .235
@@ -108,7 +112,7 @@ def main():
              fontsize=10.5, color=muted, ha="right")
 
     fig.text(.080, .704, "实测配置对比：每卡吞吐 vs. 用户速度", fontsize=17, color=ink)
-    fig.text(.682, .704, "TTFT 延迟分位数", fontsize=18, color=ink)
+    fig.text(.682, .704, "同配置 TTFT 随并发变化", fontsize=16, color=ink)
     left = fig.add_axes([.080, .292, .470, .345])
     right = fig.add_axes([.682, .292, .263, .345])
     for ax in [left, right]:
@@ -119,51 +123,58 @@ def main():
             spine.set_linewidth(.7)
             spine.set_color(border)
 
-    curve = sorted(runs, key=lambda r: r["per_user_tps"]["avg"])
-    xs = [r["per_user_tps"]["avg"] for r in curve]
+    curve = baseline
+    xs = [r["per_user_tps"]["p50"] for r in curve]
     ys = [r["output_tps"] / r["gpu_count"] for r in curve]
-    left.plot(xs, ys, color=green, linewidth=2.6, linestyle="--", marker="o",
+    left.plot(xs, ys, color=green, linewidth=2.6, linestyle="-", marker="o",
               markersize=8, markeredgecolor=bg, markeredgewidth=1.4, zorder=3)
-    left.scatter([best["per_user_tps"]["avg"]],
+    left.scatter([best["per_user_tps"]["p50"]],
                  [best["output_tps"] / best["gpu_count"]],
-                 s=180, facecolors="none", edgecolors=gold, linewidths=1.5,
+                 s=100, marker="D", facecolors=gold, edgecolors=bg, linewidths=1.1,
                  zorder=4)
-    offsets = {2816: (15, 32), 2432: (-18, -8), 2048: (-12, 36)}
-    for r in curve:
+    offsets = {2816: (26, -30), 2432: (10, 18), 2048: (-12, 36)}
+    for r in [*curve, best]:
         concurrency = r["concurrency"]
+        latest = r is best
         suffix = "*" if r["formal_errors"] else ""
-        text = (f"并发 {concurrency}{suffix}\n"
+        note = " · 新调度" if latest else ""
+        text = (f"并发 {concurrency}{suffix}{note}\n"
                 f"{r['output_tps']/r['gpu_count']/1000:.2f}k tok/s/GPU")
         left.annotate(
-            text, (r["per_user_tps"]["avg"], r["output_tps"] / r["gpu_count"]),
-            xytext=offsets[concurrency], textcoords="offset points",
-            ha="right" if concurrency != 2816 else "left", va="center",
-            fontsize=12, color=ink, linespacing=1.5,
+            text, (r["per_user_tps"]["p50"], r["output_tps"] / r["gpu_count"]),
+            xytext=(16, 48) if latest else offsets[concurrency],
+            textcoords="offset points",
+            ha="right" if concurrency == 2048 else "left", va="center",
+            fontsize=11.5, color=ink, linespacing=1.5,
             bbox={"boxstyle": "round,pad=.35,rounding_size=.12",
-                  "facecolor": "#246c39", "edgecolor": gold if concurrency == 2816 else green,
-                  "linewidth": 1 if concurrency == 2816 else .6},
+                  "facecolor": bg if latest else "#246c39",
+                  "edgecolor": gold if latest else green, "linewidth": .8},
+            arrowprops={"arrowstyle": "-", "color": gold if latest else green,
+                        "linewidth": .8, "shrinkA": 4, "shrinkB": 6},
         )
-    left.set_xlim(103, 157)
-    left.set_ylim(4700, 6850)
-    left.set_xticks([110, 120, 130, 140, 150])
+    left.set_xlim(88, 150)
+    left.set_ylim(4700, 6950)
+    left.set_xticks([90, 100, 110, 120, 130, 140, 150])
     left.set_yticks([5000, 5500, 6000, 6500])
     left.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x/1000:g}k"))
-    left.set_xlabel("Per-user TPS（均值，tok/s/user）", labelpad=12, fontsize=13)
+    left.set_xlabel("Per-user TPS（P50，tok/s/user）", labelpad=12, fontsize=13)
     left.set_ylabel("Output token throughput（tok/s/GPU）", labelpad=12, fontsize=12)
     left.text(.98, .97, "越往右上越好", transform=left.transAxes,
               ha="right", va="top", color=muted, fontsize=10.5)
     left.legend(
         handles=[Line2D([], [], color=green, marker="o", linewidth=2.5,
-                        markersize=6, linestyle="--",
-                        label="B200  ·  8P + 8D  ·  三组配置不同")],
+                        markersize=6, linestyle="-",
+                        label="同代码、同服务参数，仅改变并发"),
+                 Line2D([], [], color=gold, marker="D", linestyle="none",
+                        markersize=6, label="新 P 调度 · 单独标出")],
         loc="lower left", bbox_to_anchor=(-.01, 1.025), frameon=False,
-        fontsize=11.5, labelcolor=ink, borderaxespad=0,
+        fontsize=10.5, labelcolor=ink, borderaxespad=0, ncol=1,
     )
 
-    cx = [r["concurrency"] for r in runs]
+    cx = [r["concurrency"] for r in baseline]
     for stat in ["p99", "p95", "p90", "p50"]:
-        values = [r["ttft_ms"][stat] / 1000 for r in runs]
-        right.plot(cx, values, color=colors[stat], marker="o", linestyle="--",
+        values = [r["ttft_ms"][stat] / 1000 for r in baseline]
+        right.plot(cx, values, color=colors[stat], marker="o", linestyle="-",
                    markersize=5.5, linewidth=2.1,
                    markeredgecolor=bg, markeredgewidth=.6)
         right.annotate(
@@ -183,20 +194,22 @@ def main():
     fig.add_artist(Line2D([.055, .945], [.205, .205],
                          transform=fig.transFigure, color=border, lw=.7))
     fig.text(.055, .163,
-             "并发 2816 吞吐最高；并发 2048 用户生成更快、首 token 等待更短。",
+             "同配置下，并发提高时整机吞吐上升、单用户速度下降；新调度另列比较。",
              fontsize=14, color=ink)
     fig.text(.055, .119,
-             "口径：Per-user TPS 不含 TTFT。每卡吞吐按全部 16 卡计算；点上标注与纵轴使用相同单位。",
+             "口径：用户速度用 P50，避免均值极端值的影响；不含 TTFT。每卡吞吐按全部 16 卡计算。",
              fontsize=11.5, color=muted)
     fig.text(.055, .084,
-             "三组代码及参数不同，虚线仅作对比，不能把差异只归因于并发。* 并发 2432 有 4 个正式错误。",
+             "绿线：B56 / B58 / B57。金点：B60 新 P 调度，不接入绿线。* 并发 2432 有 4 个正式错误。",
              fontsize=11.5, color=muted)
     fig.text(.055, .039, "InferenceX 深色主题 · 投机接受率为固定模拟值，非质量评测",
              fontsize=10.3, color=muted)
     fig.text(.945, .039, "数据：本项目 AIPerf 导出  ·  整理：2026-11-03",
              fontsize=10.3, color=muted, ha="right")
     fig.savefig(here / "performance_overview.png", dpi=220, facecolor=bg)
-    fig.savefig(here / "performance_overview.svg", facecolor=bg)
+    svg = here / "performance_overview.svg"
+    fig.savefig(svg, facecolor=bg)
+    svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
     plt.close(fig)
 
 

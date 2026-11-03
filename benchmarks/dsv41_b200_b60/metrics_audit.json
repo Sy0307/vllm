@@ -1,0 +1,316 @@
+{
+  "checked_at": "2026-11-03",
+  "method": "Read existing local AIPerf exports, compact per-request TSVs and source code. No new run or remote access.",
+  "limitations": [
+    "TSV end is metadata request_end_ns, mapped from last response SSE. It does not retain the exact last-content timestamp or explicit HTTP completion needed to independently reproduce the two AIPerf content/full-response TPS definitions. Proxy speed is labelled as such.",
+    "The 100 ms duration cutoff and 128-token cutoff are sensitivity checks, not corrected official metrics.",
+    "No new benchmark or remote access was performed.",
+    "Event-loop warnings document client stalls but do not establish that client capacity caused the throughput difference. The benchmark uses synthetic speculative acceptance."
+  ],
+  "runs": {
+    "b56-1030k": {
+      "concurrency": 2048,
+      "phases": {
+        "warmup": 22673,
+        "profiling": 155784
+      },
+      "formal_cancel_flags": {
+        "False": 155784
+      },
+      "formal_errors": 0,
+      "success_counts": [
+        155784,
+        155784
+      ],
+      "token_totals": [
+        152925071,
+        152925071.0
+      ],
+      "wall_elapsed_s": 1840.002525,
+      "tps_recomputed": 83111.33757819164,
+      "tps_exported": 83111.33758736096,
+      "content_per_user_tps_exported": {
+        "unit": "tokens/sec/user",
+        "avg": 147.1360508874156,
+        "p1": 108.95532464626883,
+        "p5": 115.45139418376428,
+        "p10": 118.44346745014661,
+        "p25": 129.48945163977652,
+        "p50": 138.04354955013446,
+        "p75": 143.15402989347655,
+        "p90": 194.2592210793882,
+        "p95": 206.83819467248122,
+        "p99": 243.71077675380988,
+        "min": 21.409755770566118,
+        "max": 111201.10231694701,
+        "std": 321.52009353821046,
+        "count": 155728,
+        "sum": 22913202.932595454
+      },
+      "last_sse_speed_proxy": {
+        "n": 155728,
+        "avg": 141.872450499843,
+        "p50": 137.93152003587176,
+        "p99": 229.57901051708532,
+        "max": 985.47459717494
+      },
+      "last_sse_speed_proxy_decode_ge_100ms": {
+        "n": 154282,
+        "avg": 141.98370447433106,
+        "p50": 137.97590822370933,
+        "p99": 227.7570611293584,
+        "max": 401.4931802511793
+      },
+      "last_sse_speed_proxy_osl_ge_128": {
+        "n": 134126,
+        "avg": 142.29903383313268,
+        "p50": 138.378339393896,
+        "p99": 228.38788722676045,
+        "max": 401.4931802511793
+      },
+      "last_sse_speed_proxy_steady_osl_ge_128": {
+        "n": 92075,
+        "avg": 138.26616241518104,
+        "p50": 139.508051302424,
+        "p99": 148.90218471042564,
+        "max": 214.67109139156034
+      },
+      "steady_output_tps": 91313.16416666667,
+      "steady_ttft_mean_s": 0.7523003758220865,
+      "effective_decode_concurrency_avg": 597.3038483966808,
+      "formal_eventloop_warning_count": 544,
+      "formal_eventloop_warning_max_ms": 1270.76,
+      "client_credit_delay_p99_ms": 118.9055897600016,
+      "export_sha256": "088e528cbe61463ce7c3e9ea89304a93958e50d07ea08c7c547dfd92a5b2dab7",
+      "requests_gzip_sha256": "7c2819231d29e4de3aab28cfcf1f707d8420c6a8759d84868a62a56f6fca695d"
+    },
+    "b58-1031b": {
+      "concurrency": 2432,
+      "phases": {
+        "warmup": 26927,
+        "profiling": 174840
+      },
+      "formal_cancel_flags": {
+        "False": 174840
+      },
+      "formal_errors": 4,
+      "success_counts": [
+        174836,
+        174836
+      ],
+      "token_totals": [
+        170064466,
+        170064466.0
+      ],
+      "wall_elapsed_s": 1840.00287,
+      "tps_recomputed": 92426.1960526181,
+      "tps_exported": 92426.19608170218,
+      "content_per_user_tps_exported": {
+        "unit": "tokens/sec/user",
+        "avg": 129.33992675823097,
+        "p1": 96.35870052192358,
+        "p5": 102.18536376330566,
+        "p10": 105.02515744411845,
+        "p25": 111.0747965835172,
+        "p50": 114.98256996693878,
+        "p75": 119.32999437007683,
+        "p90": 195.2169859961749,
+        "p95": 204.19371993002383,
+        "p99": 228.40231317709137,
+        "min": 22.437672744837755,
+        "max": 77072.18163704844,
+        "std": 277.02920203143066,
+        "count": 174774,
+        "sum": 22605256.359243058
+      },
+      "last_sse_speed_proxy": {
+        "n": 174775,
+        "avg": 124.18689629811531,
+        "p50": 114.93231778270113,
+        "p99": 215.38144637660588,
+        "max": 3843.5425602331165
+      },
+      "last_sse_speed_proxy_decode_ge_100ms": {
+        "n": 173443,
+        "avg": 124.22684178887131,
+        "p50": 114.9446092964352,
+        "p99": 214.02296529300554,
+        "max": 530.876132439447
+      },
+      "last_sse_speed_proxy_osl_ge_128": {
+        "n": 150385,
+        "avg": 124.46355713722104,
+        "p50": 115.0958631637069,
+        "p99": 213.8521453832934,
+        "max": 530.876132439447
+      },
+      "last_sse_speed_proxy_steady_osl_ge_128": {
+        "n": 105045,
+        "avg": 113.55241238388216,
+        "p50": 114.36455542923876,
+        "p99": 127.44429653971358,
+        "max": 197.41492487710627
+      },
+      "steady_output_tps": 102659.01416666666,
+      "steady_ttft_mean_s": 1.1601416337061337,
+      "effective_decode_concurrency_avg": 773.059444749869,
+      "formal_eventloop_warning_count": 639,
+      "formal_eventloop_warning_max_ms": 2200.22,
+      "client_credit_delay_p99_ms": 138.97163775999917,
+      "export_sha256": "2100fbb57bcedaa9ec1e5a202d77bfb4417e35ba118eb253bb8fb37be1a1e914",
+      "requests_gzip_sha256": "a156acc3460284a71abfd20eb4cf51a34c5059252d15e3afe064a384fece0b81"
+    },
+    "b57-1031a": {
+      "concurrency": 2816,
+      "phases": {
+        "warmup": 31187,
+        "profiling": 188369
+      },
+      "formal_cancel_flags": {
+        "False": 188369
+      },
+      "formal_errors": 0,
+      "success_counts": [
+        188369,
+        188369
+      ],
+      "token_totals": [
+        181852404,
+        181852404.0
+      ],
+      "wall_elapsed_s": 1840.003676,
+      "tps_recomputed": 98832.63081046149,
+      "tps_exported": 98832.63081927046,
+      "content_per_user_tps_exported": {
+        "unit": "tokens/sec/user",
+        "avg": 114.83858670386252,
+        "p1": 81.01373782720906,
+        "p5": 85.61970058515227,
+        "p10": 89.3834002525203,
+        "p25": 93.36026643953309,
+        "p50": 100.1633746128783,
+        "p75": 112.37689197596956,
+        "p90": 178.4665369548474,
+        "p95": 186.4125470403152,
+        "p99": 207.45680218294,
+        "min": 20.228231494875004,
+        "max": 42672.58137065258,
+        "std": 173.79486834743798,
+        "count": 188307,
+        "sum": 21624909.74644424
+      },
+      "last_sse_speed_proxy": {
+        "n": 188308,
+        "avg": 111.0770490424403,
+        "p50": 100.07431893248263,
+        "p99": 203.32676249896141,
+        "max": 451.64380986732766
+      },
+      "last_sse_speed_proxy_decode_ge_100ms": {
+        "n": 187127,
+        "avg": 111.04180633596361,
+        "p50": 100.0753210838967,
+        "p99": 202.94704930683682,
+        "max": 362.6378882615104
+      },
+      "last_sse_speed_proxy_osl_ge_128": {
+        "n": 162092,
+        "avg": 111.25468951689551,
+        "p50": 100.2699661762509,
+        "p99": 202.92910954980422,
+        "max": 362.6378882615104
+      },
+      "last_sse_speed_proxy_steady_osl_ge_128": {
+        "n": 115002,
+        "avg": 96.57043005274849,
+        "p50": 96.31352389517008,
+        "p99": 111.66078253637588,
+        "max": 183.15506409984548
+      },
+      "steady_output_tps": 110988.55333333333,
+      "steady_ttft_mean_s": 2.4693332758547037,
+      "effective_decode_concurrency_avg": 940.1469103587498,
+      "formal_eventloop_warning_count": 767,
+      "formal_eventloop_warning_max_ms": 2821.77,
+      "client_credit_delay_p99_ms": 173.87602944000002,
+      "export_sha256": "0c530aa69968d754c668e6b0a574df008aed52e66f3f424483381f3d45b1241d",
+      "requests_gzip_sha256": "aab00b8ce5a2e42b7082e3594e7786e2b7a9c01cc76d5f37ae405f8190252c2b"
+    },
+    "b60-1102a": {
+      "concurrency": 2816,
+      "phases": {
+        "warmup": 31187,
+        "profiling": 191231
+      },
+      "formal_cancel_flags": {
+        "False": 191231
+      },
+      "formal_errors": 0,
+      "success_counts": [
+        191231,
+        191231
+      ],
+      "token_totals": [
+        184415935,
+        184415935.0
+      ],
+      "wall_elapsed_s": 1840.002202,
+      "tps_recomputed": 100225.93168614045,
+      "tps_exported": 100225.93168276327,
+      "content_per_user_tps_exported": {
+        "unit": "tokens/sec/user",
+        "avg": 112.45374123436294,
+        "p1": 79.13872220140613,
+        "p5": 83.21707178887847,
+        "p10": 84.77247775766054,
+        "p25": 90.93629459414969,
+        "p50": 98.02528714804868,
+        "p75": 106.76055007860006,
+        "p90": 177.49049790090706,
+        "p95": 187.12457410842572,
+        "p99": 208.89210855397738,
+        "min": 13.354334537885405,
+        "max": 80650.16723478297,
+        "std": 244.99436338361497,
+        "count": 191166,
+        "sum": 21497331.896808226
+      },
+      "last_sse_speed_proxy": {
+        "n": 191167,
+        "avg": 108.31141772206944,
+        "p50": 97.94654931339836,
+        "p99": 204.1591788299206,
+        "max": 36335.88895752335
+      },
+      "last_sse_speed_proxy_decode_ge_100ms": {
+        "n": 190041,
+        "avg": 108.06766235449635,
+        "p50": 97.95211099886512,
+        "p99": 203.77019594090348,
+        "max": 473.93535035220333
+      },
+      "last_sse_speed_proxy_osl_ge_128": {
+        "n": 164588,
+        "avg": 108.27047239418079,
+        "p50": 98.17188541890579,
+        "p99": 203.78940778559328,
+        "max": 473.93535035220333
+      },
+      "last_sse_speed_proxy_steady_osl_ge_128": {
+        "n": 116602,
+        "avg": 93.76345473207382,
+        "p50": 94.05621837078763,
+        "p99": 108.82366886157986,
+        "max": 181.55010739348768
+      },
+      "steady_output_tps": 112512.96416666667,
+      "steady_ttft_mean_s": 1.554474650335766,
+      "effective_decode_concurrency_avg": 983.6413822771241,
+      "formal_eventloop_warning_count": 752,
+      "formal_eventloop_warning_max_ms": 2671.21,
+      "client_credit_delay_p99_ms": 150.8263680000015,
+      "export_sha256": "dbac70c130724beabc75e0516e228ef6ef7e9b1a56c53962acab53639535c946",
+      "requests_gzip_sha256": "b74bd4b6ed38d79182d3b20ac619ae38e494b491b2dc3fb7a50dca054c425fc2"
+    }
+  }
+}
