@@ -107,7 +107,7 @@ def main():
     fig.text(.945, .851, "以上指标：当前最高吞吐配置 · 并发 2816",
              fontsize=10.5, color=muted, ha="right")
 
-    fig.text(.080, .704, "每卡吞吐 vs. 用户生成速度", fontsize=18, color=ink)
+    fig.text(.080, .704, "实测配置对比：每卡吞吐 vs. 用户速度", fontsize=17, color=ink)
     fig.text(.682, .704, "TTFT 延迟分位数", fontsize=18, color=ink)
     left = fig.add_axes([.080, .292, .470, .345])
     right = fig.add_axes([.682, .292, .263, .345])
@@ -122,21 +122,22 @@ def main():
     curve = sorted(runs, key=lambda r: r["per_user_tps"]["avg"])
     xs = [r["per_user_tps"]["avg"] for r in curve]
     ys = [r["output_tps"] / r["gpu_count"] for r in curve]
-    left.plot(xs, ys, color=green, linewidth=3.2, marker="o",
+    left.plot(xs, ys, color=green, linewidth=2.6, linestyle="--", marker="o",
               markersize=8, markeredgecolor=bg, markeredgewidth=1.4, zorder=3)
     left.scatter([best["per_user_tps"]["avg"]],
                  [best["output_tps"] / best["gpu_count"]],
                  s=180, facecolors="none", edgecolors=gold, linewidths=1.5,
                  zorder=4)
-    offsets = {2816: (15, 32), 2432: (-10, -45), 2048: (-12, 36)}
+    offsets = {2816: (15, 32), 2432: (-18, -8), 2048: (-12, 36)}
     for r in curve:
         concurrency = r["concurrency"]
         suffix = "*" if r["formal_errors"] else ""
-        text = f"并发 {concurrency}{suffix}\n{r['output_tps']/1000:.1f}k tok/s"
+        text = (f"并发 {concurrency}{suffix}\n"
+                f"{r['output_tps']/r['gpu_count']/1000:.2f}k tok/s/GPU")
         left.annotate(
             text, (r["per_user_tps"]["avg"], r["output_tps"] / r["gpu_count"]),
             xytext=offsets[concurrency], textcoords="offset points",
-            ha="right" if concurrency == 2048 else "left", va="center",
+            ha="right" if concurrency != 2816 else "left", va="center",
             fontsize=12, color=ink, linespacing=1.5,
             bbox={"boxstyle": "round,pad=.35,rounding_size=.12",
                   "facecolor": "#246c39", "edgecolor": gold if concurrency == 2816 else green,
@@ -153,7 +154,8 @@ def main():
               ha="right", va="top", color=muted, fontsize=10.5)
     left.legend(
         handles=[Line2D([], [], color=green, marker="o", linewidth=2.5,
-                        markersize=6, label="B200  ·  8P + 8D")],
+                        markersize=6, linestyle="--",
+                        label="B200  ·  8P + 8D  ·  三组配置不同")],
         loc="lower left", bbox_to_anchor=(-.01, 1.025), frameon=False,
         fontsize=11.5, labelcolor=ink, borderaxespad=0,
     )
@@ -161,7 +163,7 @@ def main():
     cx = [r["concurrency"] for r in runs]
     for stat in ["p99", "p95", "p90", "p50"]:
         values = [r["ttft_ms"][stat] / 1000 for r in runs]
-        right.plot(cx, values, color=colors[stat], marker="o",
+        right.plot(cx, values, color=colors[stat], marker="o", linestyle="--",
                    markersize=5.5, linewidth=2.1,
                    markeredgecolor=bg, markeredgewidth=.6)
         right.annotate(
@@ -184,12 +186,12 @@ def main():
              "并发 2816 吞吐最高；并发 2048 用户生成更快、首 token 等待更短。",
              fontsize=14, color=ink)
     fig.text(.055, .119,
-             "口径：Per-user TPS 不含 TTFT。每卡吞吐按全部 16 卡计算。各点配置不同，连线仅用于比较。",
+             "口径：Per-user TPS 不含 TTFT。每卡吞吐按全部 16 卡计算；点上标注与纵轴使用相同单位。",
              fontsize=11.5, color=muted)
     fig.text(.055, .084,
-             "* 并发 2432 有 4 个正式错误。投机接受率为固定模拟值；本图不代表质量评测。",
+             "三组代码及参数不同，虚线仅作对比，不能把差异只归因于并发。* 并发 2432 有 4 个正式错误。",
              fontsize=11.5, color=muted)
-    fig.text(.055, .039, "视觉参考：InferenceX 官方 dark theme / NVIDIA 色域",
+    fig.text(.055, .039, "InferenceX 深色主题 · 投机接受率为固定模拟值，非质量评测",
              fontsize=10.3, color=muted)
     fig.text(.945, .039, "数据：本项目 AIPerf 导出  ·  整理：2026-11-03",
              fontsize=10.3, color=muted, ha="right")

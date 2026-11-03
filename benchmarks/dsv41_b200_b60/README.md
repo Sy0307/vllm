@@ -16,6 +16,8 @@
 
 主图按 [InferenceX](https://inferencex.semianalysis.com/inference) 常见的每卡吞吐—用户生成速度视角连线，右图展示 TTFT p50/p90/p95/p99。采用其官方深色主题、NVIDIA 绿色色域、金色高亮及对比色板；精确来源和颜色值见 [style_reference.json](figures/style_reference.json)。全部采用正式全程口径，包含突发阶段。各点配置不同，连线仅用于比较，不代表仅改变并发的扫描。Per-user TPS 不含 TTFT，与 InferenceX 默认端到端交互性口径不同。
 
+主图坐标与点上标注统一为 tok/s/GPU（整机吞吐除以全部 16 卡）。2048/2432/2816 三组记录的坐标分别为 (147.14, 5194.46)、(129.34, 5776.64)、(112.45, 6264.12)。单用户速度来自逐请求生成速度的均值，不等于整机吞吐除以客户端并发；三组代码及参数不同，不能把速度下降归因于并发这一项。
+
 [SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径，`--latin-font` 可指定 InferenceX 使用的 DM Sans 字体。
 
 ## 优化与对应提交
