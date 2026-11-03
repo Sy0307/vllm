@@ -1,0 +1,11 @@
+{
+  "host_model": "f184ccabfe55305c4aa9577b08ada0542e2cc15b",
+  "prefill_scheduler": "eb0e76832c31955a49bceb4fa3d54f212c55b7a2",
+  "kv_transfer": "af39cf4ce163bddec144c9b0345152b74185fec5",
+  "engram_prefetch": "a0af0237ff0e1c4b2ec007164c34f5aa7982b480",
+  "decode_allocator": "b6892dc748b592d106eee7fbce81c15ceeeb0a2f",
+  "draft_sampling": "f29936cccce36c7ff931c02a4eb4697d33a5f56d",
+  "mxfp8_precompile": "597d6692195d1b831d0876dfe3aeb9dcde8cbadf",
+  "nixl_reconnect": "040885c570c0d5020dc950cda49260c6f5f837b0",
+  "runtime": "f8661ae9f149519e8ac9c154c079887e3d45147e"
+}

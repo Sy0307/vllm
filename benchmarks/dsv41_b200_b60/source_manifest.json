@@ -1,0 +1,546 @@
+{
+  "base_vllm_commit": "94a29d316e8c1d6dcf6ff75645c2e61c7e3c83fd",
+  "provenance": "Local B60 source snapshots, previously audited against the remote deployment",
+  "files": [
+    {
+      "path": "overlays/decode/vllm/config/kv_transfer.py",
+      "source": "pr_sync_20261030/d/files/vllm/config/kv_transfer.py",
+      "sha256": "c7f089dc581316e03f02512acbd28a85ff8e069812e7c468aeb75faaf4b44121",
+      "bytes": 5640
+    },
+    {
+      "path": "overlays/decode/vllm/config/vllm.py",
+      "source": "pr_sync_20261030/d/files/vllm/config/vllm.py",
+      "sha256": "260edb19b8bb82800eebda23fbdc5d2288794f0f5495871645dc3ca68feef51e",
+      "bytes": 164160
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/device_communicators/shm_broadcast.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/device_communicators/shm_broadcast.py",
+      "sha256": "e09917093ef4517c808ff2d1ab0e2ca7f3a958fc60aee5098787f28c7aaf9f30",
+      "bytes": 51999
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/eplb/eplb_state.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/eplb/eplb_state.py",
+      "sha256": "fbf082a9db2d2c6f7347a77849ff5015ff2128294bca0012562cfc0710620fca",
+      "bytes": 57315
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/base.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/kv_transfer/kv_connector/v1/base.py",
+      "sha256": "e01e8709ccfc690d10e55ad345705fa0763e3ddc98a5736e0fce2898468f2165",
+      "bytes": 30199
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py",
+      "sha256": "a91874d1af277f3dbb0c0395057a6e7244eda0866f6555f78a8eeb1dc00bcd34",
+      "bytes": 30362
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py",
+      "sha256": "c43e7cf5185d0dbe04ec6faceaa168b59f1151e39edc7565a900c15e11805f52",
+      "bytes": 23809
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py",
+      "source": "build_dsync2/d/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py",
+      "sha256": "100234168bea6c94534c9eb79f64739a38bdf906b3ebe3644ae694b05e5a93ff",
+      "bytes": 191876
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
+      "sha256": "3fbe338c528fd66013c4dd45bdc148aae013fc3471d29a355140ecf9030a3232",
+      "bytes": 17105
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py",
+      "source": "pr_sync_20261030/d/files/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py",
+      "sha256": "b49d37b7176daaa6fa91b3772c58f7b892be45b961022e110b0f4ba5417c6a22",
+      "bytes": 13132
+    },
+    {
+      "path": "overlays/decode/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py",
+      "source": "build_dsync2/d/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py",
+      "sha256": "5aaba6d1d1ea45afd670611d9175099d8b77ca0649694887d8f30b03913a3469",
+      "bytes": 34571
+    },
+    {
+      "path": "overlays/decode/vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py",
+      "source": "pr_sync_20261030/d/files/vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py",
+      "sha256": "d79f297dc8a064be9e0330f95868e676b9e4521d3070ab561d1d1f702981688a",
+      "bytes": 34403
+    },
+    {
+      "path": "overlays/decode/vllm/model_executor/layers/fused_moe/eplb_triton.py",
+      "source": "pr_sync_20261030/d/files/vllm/model_executor/layers/fused_moe/eplb_triton.py",
+      "sha256": "09450e0d3eeacd478adf0526d70cda63cea3b6ed921816e99a76b789e9c80ac8",
+      "bytes": 1588
+    },
+    {
+      "path": "overlays/decode/vllm/model_executor/layers/fused_moe/prepare_megamoe.py",
+      "source": "pr_sync_20261030/d/files/vllm/model_executor/layers/fused_moe/prepare_megamoe.py",
+      "sha256": "0bafecb1731c0f1970a9871c6a417ef9a2ab3e3fd69605bec6e30e5cd7397533",
+      "bytes": 27561
+    },
+    {
+      "path": "overlays/decode/vllm/model_executor/layers/fused_moe/router/base_router.py",
+      "source": "pr_sync_20261030/d/files/vllm/model_executor/layers/fused_moe/router/base_router.py",
+      "sha256": "143dfec626d65991dda060bf7ba7200c25e80fb0ef794acfb797d79da80e2638",
+      "bytes": 10658
+    },
+    {
+      "path": "overlays/decode/vllm/models/deepseek_v4/common/eplb_util.py",
+      "source": "pr_sync_20261030/d/files/vllm/models/deepseek_v4/common/eplb_util.py",
+      "sha256": "53b9b65b8b07f2f12f2539e157c139dd23f17add79cee5f9ed08aaeec0accb59",
+      "bytes": 1757
+    },
+    {
+      "path": "overlays/decode/vllm/models/deepseek_v41/common/engram.py",
+      "source": "pr_sync_20261030/d/files/vllm/models/deepseek_v41/common/engram.py",
+      "sha256": "9c352898b81ce498ffc17889b4a67a1029002ffa75466ee1d971eed95a7b0bc9",
+      "bytes": 68629
+    },
+    {
+      "path": "overlays/decode/vllm/models/deepseek_v41/nvidia/dspark.py",
+      "source": "pr_sync_20261030/d/files/vllm/models/deepseek_v41/nvidia/dspark.py",
+      "sha256": "415d3ce1f23c76fa39a45686299ac6ef144e308a436d3389b6d773692fa8441b",
+      "bytes": 22944
+    },
+    {
+      "path": "overlays/decode/vllm/models/deepseek_v41/nvidia/flash_mla_mega_attn.py",
+      "source": "pr_sync_20261030/d/files/vllm/models/deepseek_v41/nvidia/flash_mla_mega_attn.py",
+      "sha256": "2c70e55d0f348587f05a35e5e927c4769ffcc8dd39b3f6365cb752a1459e651e",
+      "bytes": 22214
+    },
+    {
+      "path": "overlays/decode/vllm/models/deepseek_v41/nvidia/ops/fused_draft_sample.py",
+      "source": "pr_sync_20261030/d/files/vllm/models/deepseek_v41/nvidia/ops/fused_draft_sample.py",
+      "sha256": "ff3308574974085cf3892c3a3bd5c3e7a1e39f7eb0e6c016cf2f481a94ac6757",
+      "bytes": 4808
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/kv_cache_coordinator.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/kv_cache_coordinator.py",
+      "sha256": "d37ea4f2a45ae09b54329d7e14e53a187e3557766cd9343d887268f81e831065",
+      "bytes": 44902
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/kv_cache_manager.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/kv_cache_manager.py",
+      "sha256": "10dfb98a001d870dfb9547fe91539199b57d40f85fb421a40fe6c30af51049b0",
+      "bytes": 41303
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/kv_cache_utils.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/kv_cache_utils.py",
+      "sha256": "09bd1d39dae896594613efa3862e0357fb471e3334cc4f33ef86b13fefa3eeab",
+      "bytes": 48350
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/sched/interface.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/sched/interface.py",
+      "sha256": "17087378f233636112cd4650889cbc7d9994124c474ab519bd1fabf6fbfdd573",
+      "bytes": 10469
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/sched/output.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/sched/output.py",
+      "sha256": "f67d443eb501b9f2ec16d1762f30560994be3a76a6cf5c1f668b73ca6af3f22c",
+      "bytes": 15241
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/sched/scheduler.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/sched/scheduler.py",
+      "sha256": "3f9d6038371e90e0d0b8966d6a2d6c6998a1b85c2afe3fa5629e4d826a793131",
+      "bytes": 179673
+    },
+    {
+      "path": "overlays/decode/vllm/v1/core/single_type_kv_cache_manager.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/core/single_type_kv_cache_manager.py",
+      "sha256": "69385671e85115ccdaad2b9d43b9cb080e86c492cc06cd12c5f27f5a70403836",
+      "bytes": 121537
+    },
+    {
+      "path": "overlays/decode/vllm/v1/engine/core.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/engine/core.py",
+      "sha256": "9cd3bac9b1a9f55d6039b5bfa6ba7f353f0d3e8c7435f2b92fcc913078db26df",
+      "bytes": 138408
+    },
+    {
+      "path": "overlays/decode/vllm/v1/executor/abstract.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/executor/abstract.py",
+      "sha256": "8602dc3efb9e35390835a3b5d0e5f8eb8eec895ab15c64388712dfb7f24a5715",
+      "bytes": 18298
+    },
+    {
+      "path": "overlays/decode/vllm/v1/executor/early_kv_recv.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/executor/early_kv_recv.py",
+      "sha256": "2bd32fd7b1e70065e326af7e19526edcd4759b665dc7ce8abebf1cad13983271",
+      "bytes": 4647
+    },
+    {
+      "path": "overlays/decode/vllm/v1/executor/multiproc_executor.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/executor/multiproc_executor.py",
+      "sha256": "1d09e46441eee1ef79dd64546bd7a60cedc47003f28aa803835df2f839fdb0fd",
+      "bytes": 54288
+    },
+    {
+      "path": "overlays/decode/vllm/v1/executor/uniproc_executor.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/executor/uniproc_executor.py",
+      "sha256": "69dde56af3f625b89f90acd3cf6d4eb6beb7367ffc5ad5d70809a26c243162df",
+      "bytes": 8773
+    },
+    {
+      "path": "overlays/decode/vllm/v1/request.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/request.py",
+      "sha256": "68df6590d086189c3cef5a54dd6592222ea98bdc492f13619fa142c44d37a8bb",
+      "bytes": 17719
+    },
+    {
+      "path": "overlays/decode/vllm/v1/utils.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/utils.py",
+      "sha256": "de6bc79bdd7142819a9d9f9ff7407b820457aedc81c6e24d45e15a642249e10e",
+      "bytes": 35184
+    },
+    {
+      "path": "overlays/decode/vllm/v1/worker/gpu/buffer_utils.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/worker/gpu/buffer_utils.py",
+      "sha256": "bbbce2969c9f553e23d5545fe6fe152a99a895dcd0248198d81287ce652edf08",
+      "bytes": 14967
+    },
+    {
+      "path": "overlays/decode/vllm/v1/worker/gpu/dp_utils.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/worker/gpu/dp_utils.py",
+      "sha256": "6c809de2e2e86beee5ebf6704415f8714343db8977b377dcfab13c4c7c194ecf",
+      "bytes": 15457
+    },
+    {
+      "path": "overlays/decode/vllm/v1/worker/gpu/model_runner.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/worker/gpu/model_runner.py",
+      "sha256": "398d23134641ecd77e54ea6377a87fce7f2892912f483cc535b66481a03e8597",
+      "bytes": 119926
+    },
+    {
+      "path": "overlays/decode/vllm/v1/worker/gpu/states.py",
+      "source": "pr_sync_20261030/d/files/vllm/v1/worker/gpu/states.py",
+      "sha256": "871de15a32593fb595c8de6b75185b477ca5cb07354614b4edefc6c016264895",
+      "bytes": 5516
+    },
+    {
+      "path": "overlays/prefill/vllm/config/engram.py",
+      "source": "build_p85/p/vllm/config/engram.py",
+      "sha256": "a1909e8ae1ba104b3c378ab9035725bc20ae9b685d31a124223240869646a7ea",
+      "bytes": 6423
+    },
+    {
+      "path": "overlays/prefill/vllm/config/kv_transfer.py",
+      "source": "build_p85/p/vllm/config/kv_transfer.py",
+      "sha256": "7f99b1566e9ef818edf02f56cb018817620e3300c8e83e335431e51804e78cfc",
+      "bytes": 5704
+    },
+    {
+      "path": "overlays/prefill/vllm/config/scheduler.py",
+      "source": "build_p85/p/vllm/config/scheduler.py",
+      "sha256": "4344eb481a51a1813df29ba7b1719331dbb78318adf194d4d4a7ab2cee31f878",
+      "bytes": 17560
+    },
+    {
+      "path": "overlays/prefill/vllm/config/vllm.py",
+      "source": "build_p85/p/vllm/config/vllm.py",
+      "sha256": "57ae4c142c867a41c72238a2c3e7d4ee9f28a708a77bac70b37e90a5bcfc8538",
+      "bytes": 164311
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/device_communicators/shm_broadcast.py",
+      "source": "build_p85/p/vllm/distributed/device_communicators/shm_broadcast.py",
+      "sha256": "27750c90df2d8c566792153ea5b95bb703f0283b8c16dccc380c4dc5638c1378",
+      "bytes": 50213
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/eplb/eplb_state.py",
+      "source": "build_p85/p/vllm/distributed/eplb/eplb_state.py",
+      "sha256": "fbf082a9db2d2c6f7347a77849ff5015ff2128294bca0012562cfc0710620fca",
+      "bytes": 57315
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/base.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/base.py",
+      "sha256": "14810652aaf150037f1e0dbe3b9c0e51b30a85bca05269c7723d59ba4a64d129",
+      "bytes": 32506
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/connector.py",
+      "sha256": "d5031013ccfdbe22b35de95ac616d9c3ffdf60427c2ca077e6374b08bfb9e305",
+      "bytes": 18021
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/scheduler.py",
+      "sha256": "136ea42b39d21d9f5e0ed2af043c25685e32607c8ace532b13d48e4f1b50722b",
+      "bytes": 41950
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/worker.py",
+      "sha256": "2982caa35aa1a74ceae75fec7454521324387b99f3c265e4d815810a20e91702",
+      "bytes": 119181
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py",
+      "sha256": "ca0819033796f26d4e9fb56cc4d8eaaf686bfc810586830866dd9bbcc9cf8860",
+      "bytes": 33626
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py",
+      "sha256": "3b20bf054f719826ec910710f6521daa2a3da6d0a18af073a8b6af94a5061fe1",
+      "bytes": 24029
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py",
+      "sha256": "1160bfdd9d53eaa5198b38d75fcefffed4c2eb1d26dfc35f47d2ac374643a461",
+      "bytes": 190521
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
+      "sha256": "722153bcdd6192aca93df7e0620e960cc7df491b947ea48d9ace4ad33e33721c",
+      "bytes": 17642
+    },
+    {
+      "path": "overlays/prefill/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py",
+      "source": "build_p85/p/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py",
+      "sha256": "d3398c881649a4b72101a363458a07d5e55263a9081938d62635496d2efc3074",
+      "bytes": 12818
+    },
+    {
+      "path": "overlays/prefill/vllm/engine/arg_utils.py",
+      "source": "build_p85/p/vllm/engine/arg_utils.py",
+      "sha256": "f3151c38dd3df22179c95c9c466908916699ab99071df52140d67d06b00db3dd",
+      "bytes": 141724
+    },
+    {
+      "path": "overlays/prefill/vllm/model_executor/layers/sparse_attn_indexer.py",
+      "source": "build_p85/p/vllm/model_executor/layers/sparse_attn_indexer.py",
+      "sha256": "6ca5303802901f6ba13dca747d4ad9b12a851f329a752a689641c8db01464ad0",
+      "bytes": 58307
+    },
+    {
+      "path": "overlays/prefill/vllm/model_executor/warmup/kernel_warmup.py",
+      "source": "build_p85/p/vllm/model_executor/warmup/kernel_warmup.py",
+      "sha256": "e8061c626aec8581cd89275949e4a60d4a1630aedffaa601e64ba25e934fb884",
+      "bytes": 25056
+    },
+    {
+      "path": "overlays/prefill/vllm/models/deepseek_v4/common/eplb_util.py",
+      "source": "build_p85/p/vllm/models/deepseek_v4/common/eplb_util.py",
+      "sha256": "53b9b65b8b07f2f12f2539e157c139dd23f17add79cee5f9ed08aaeec0accb59",
+      "bytes": 1757
+    },
+    {
+      "path": "overlays/prefill/vllm/models/deepseek_v41/common/engram.py",
+      "source": "build_p85/p/vllm/models/deepseek_v41/common/engram.py",
+      "sha256": "a2ac541628f8a9647c6e68949dcb062fd64afaadb7c45802f2644f89ad64d198",
+      "bytes": 85542
+    },
+    {
+      "path": "overlays/prefill/vllm/models/deepseek_v41/nvidia/dspark.py",
+      "source": "build_p85/p/vllm/models/deepseek_v41/nvidia/dspark.py",
+      "sha256": "415d3ce1f23c76fa39a45686299ac6ef144e308a436d3389b6d773692fa8441b",
+      "bytes": 22944
+    },
+    {
+      "path": "overlays/prefill/vllm/models/deepseek_v41/nvidia/flash_mla_mega_attn.py",
+      "source": "build_p85/p/vllm/models/deepseek_v41/nvidia/flash_mla_mega_attn.py",
+      "sha256": "a53b53119de4093c22bc7527de11993842db70cd802fad55ecd76dfaa8e003d4",
+      "bytes": 26665
+    },
+    {
+      "path": "overlays/prefill/vllm/models/deepseek_v41/nvidia/model_state.py",
+      "source": "build_p85/p/vllm/models/deepseek_v41/nvidia/model_state.py",
+      "sha256": "b79f58b1f68f6dcad6544c8015354aee19e92e9c419e5bc5b426476eeef708ec",
+      "bytes": 34232
+    },
+    {
+      "path": "overlays/prefill/vllm/models/deepseek_v41/nvidia/ops/fused_draft_sample.py",
+      "source": "build_p85/p/vllm/models/deepseek_v41/nvidia/ops/fused_draft_sample.py",
+      "sha256": "ff3308574974085cf3892c3a3bd5c3e7a1e39f7eb0e6c016cf2f481a94ac6757",
+      "bytes": 4808
+    },
+    {
+      "path": "overlays/prefill/vllm/utils/flashinfer.py",
+      "source": "build_p85/p/vllm/utils/flashinfer.py",
+      "sha256": "22bb9f161e90523a8fe5bec202f0177d53fc9f620df67b5162b58fbcb6ccb4a5",
+      "bytes": 44348
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/core/kv_cache_manager.py",
+      "source": "build_p85/p/vllm/v1/core/kv_cache_manager.py",
+      "sha256": "5ea27cac31576d305d9de279dd51272568534411346db69917a09675bfc6d99b",
+      "bytes": 41070
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/core/kv_cache_utils.py",
+      "source": "build_p85/p/vllm/v1/core/kv_cache_utils.py",
+      "sha256": "0ed6bbe77903e1cae670fa1efae90c16a795d7dc9463a6c9cf3fab3e31f3a148",
+      "bytes": 49255
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/core/sched/interface.py",
+      "source": "build_p85/p/vllm/v1/core/sched/interface.py",
+      "sha256": "17087378f233636112cd4650889cbc7d9994124c474ab519bd1fabf6fbfdd573",
+      "bytes": 10469
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/core/sched/output.py",
+      "source": "build_p85/p/vllm/v1/core/sched/output.py",
+      "sha256": "dd4899ad46e91e9e6d6905c3285619163bff66ed9ebf180f78b5277ca3785263",
+      "bytes": 16564
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/core/sched/request_queue.py",
+      "source": "build_p85/p/vllm/v1/core/sched/request_queue.py",
+      "sha256": "25cad57c9818d7ad4298a84a915761761bb4b24fe557b9ecaba6b5fc3b4708a0",
+      "bytes": 11526
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/core/sched/scheduler.py",
+      "source": "build_p85/p/vllm/v1/core/sched/scheduler.py",
+      "sha256": "493fa23b456a6752419f24bb2bfe268331f0a0576ef0466f233bbfb686cff41d",
+      "bytes": 201391
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/engine/core.py",
+      "source": "build_p85/p/vllm/v1/engine/core.py",
+      "sha256": "900c9b0e04fd9dae749b763f6033c8422ef9025d1c19022725793b8b4e5c84a5",
+      "bytes": 132177
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/executor/abstract.py",
+      "source": "build_p85/p/vllm/v1/executor/abstract.py",
+      "sha256": "8602dc3efb9e35390835a3b5d0e5f8eb8eec895ab15c64388712dfb7f24a5715",
+      "bytes": 18298
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/executor/early_kv_recv.py",
+      "source": "build_p85/p/vllm/v1/executor/early_kv_recv.py",
+      "sha256": "460a1c8f9e4dbd584b9fdd28de5c8504d6f7306c5220b4c337a2d6a3145ffb17",
+      "bytes": 7527
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/executor/multiproc_executor.py",
+      "source": "build_p85/p/vllm/v1/executor/multiproc_executor.py",
+      "sha256": "a090e49acf17cf564ca334c9468c5525810cb082c56a4ccedcdefd851d9876cd",
+      "bytes": 54361
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/executor/uniproc_executor.py",
+      "source": "build_p85/p/vllm/v1/executor/uniproc_executor.py",
+      "sha256": "69dde56af3f625b89f90acd3cf6d4eb6beb7367ffc5ad5d70809a26c243162df",
+      "bytes": 8773
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/gil_watchdog.py",
+      "source": "build_p85/p/vllm/v1/gil_watchdog.py",
+      "sha256": "b11203acbb02fb2a3db1a604da6c43eb7e64a57f7eeec691fa24ac97e1ec83dc",
+      "bytes": 3657
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/request.py",
+      "source": "build_p85/p/vllm/v1/request.py",
+      "sha256": "afc8967ec3e08d8480a988be5794821d56205c101b483da6082fec21b54f3b9c",
+      "bytes": 17839
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/utils.py",
+      "source": "build_p85/p/vllm/v1/utils.py",
+      "sha256": "d565f52da0096c57601138bb3243f70a7cad0a6fd8f2c01f2370515c656c8128",
+      "bytes": 33687
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/worker/gpu/buffer_utils.py",
+      "source": "build_p85/p/vllm/v1/worker/gpu/buffer_utils.py",
+      "sha256": "bbbce2969c9f553e23d5545fe6fe152a99a895dcd0248198d81287ce652edf08",
+      "bytes": 14967
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/worker/gpu/dp_utils.py",
+      "source": "build_p85/p/vllm/v1/worker/gpu/dp_utils.py",
+      "sha256": "6c809de2e2e86beee5ebf6704415f8714343db8977b377dcfab13c4c7c194ecf",
+      "bytes": 15457
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/worker/gpu/model_runner.py",
+      "source": "build_p85/p/vllm/v1/worker/gpu/model_runner.py",
+      "sha256": "7bca09cedc5450bb21b211013e0e860274579826c6158fefa6db7e851017caaa",
+      "bytes": 120819
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/worker/gpu/states.py",
+      "source": "build_p85/p/vllm/v1/worker/gpu/states.py",
+      "sha256": "871de15a32593fb595c8de6b75185b477ca5cb07354614b4edefc6c016264895",
+      "bytes": 5516
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/worker/gpu_worker.py",
+      "source": "build_p85/p/vllm/v1/worker/gpu_worker.py",
+      "sha256": "ca2fd13c9ae193b2b2fa0ad7175da15d74879f2fa0316cae8dd1618fbd1aec26",
+      "bytes": 73674
+    },
+    {
+      "path": "overlays/prefill/vllm/v1/worker/workspace.py",
+      "source": "build_p85/p/vllm/v1/worker/workspace.py",
+      "sha256": "fa1b339d5b0783c13375962f494ad667df7ef6e24c74231c9c1a30e5bfab72a5",
+      "bytes": 15965
+    },
+    {
+      "path": "runtime/bench.sh",
+      "source": "runtime/bench.sh",
+      "sha256": "5f83e903a3fef12a046c4b6b1c4c643f7a0a0ea8d8d4cee6ea78b58f1c32ba06",
+      "bytes": 1727
+    },
+    {
+      "path": "runtime/knobs/b39dyn.env",
+      "source": "runtime/knobs/b39dyn.env",
+      "sha256": "9e46ef65e0aa7d2ab472e8e73bb97acd3ba68bf504d0d36c8e7c52fb651466ae",
+      "bytes": 481
+    },
+    {
+      "path": "runtime/knobs/b60d.env",
+      "source": "runtime/knobs/b60d.env",
+      "sha256": "816db8b6ffc53ada45a70e1ed69825db4910f8e7f6e6d9d716a72e0518f24d00",
+      "bytes": 713
+    },
+    {
+      "path": "runtime/knobs/b60p.env",
+      "source": "runtime/knobs/b60p.env",
+      "sha256": "9a5e791829b77c966a939d2f6e5f13e1e344f0f137c5f3053706e850325a0b2f",
+      "bytes": 1546
+    },
+    {
+      "path": "runtime/pb.py",
+      "source": "runtime/pb.py",
+      "sha256": "aa08811e2b660382f8c968ca32df1f5e2915817788c8c743a249e667a08495a3",
+      "bytes": 21845
+    },
+    {
+      "path": "runtime/router_policy_pcache2.yaml",
+      "source": "runtime/router_policy_pcache2.yaml",
+      "sha256": "2e2379fd9134e325d398d2be884e3bc4507bd9321b97444873a9c9b820268890",
+      "bytes": 1733
+    },
+    {
+      "path": "runtime/serve.sh",
+      "source": "runtime/serve.sh",
+      "sha256": "211f08794fff6d75ba75ea70fb06ce415be82c2e5b4a58acbf27da032531b501",
+      "bytes": 8092
+    }
+  ]
+}
