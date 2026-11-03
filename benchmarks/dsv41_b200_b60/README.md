@@ -14,9 +14,9 @@
 
 ![B200 吞吐、用户生成速度与首 token 等待](figures/performance_overview.png)
 
-折线图按客户端并发展示整机吞吐、per-user TPS（均值及 p10/p50/p90/p99）和 TTFT（p50/p90/p95/p99）。全部采用正式全程口径，包含突发阶段。各点对应不同实测配置，连线仅便于比较，不代表仅改变并发的扫描。视觉风格参考 [InferenceX](https://inferencex.semianalysis.com/inference)；per-user TPS 不含首 token 等待，与其默认端到端交互性口径不同。
+主图按 [InferenceX](https://inferencex.semianalysis.com/inference) 常见的每卡吞吐—用户生成速度视角连线，右图展示 TTFT p50/p90/p95/p99。采用其官方深色主题、NVIDIA 绿色色域、金色高亮及对比色板；精确来源和颜色值见 [style_reference.json](figures/style_reference.json)。全部采用正式全程口径，包含突发阶段。各点配置不同，连线仅用于比较，不代表仅改变并发的扫描。Per-user TPS 不含 TTFT，与 InferenceX 默认端到端交互性口径不同。
 
-[SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径。
+[SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径，`--latin-font` 可指定 InferenceX 使用的 DM Sans 字体。
 
 ## 优化与对应提交
 

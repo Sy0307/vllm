@@ -1,7 +1,8 @@
-"""Render line charts from existing B200 benchmark summaries; no benchmark runs."""
+"""Render the existing B200 results using InferenceX's documented dark theme."""
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import matplotlib
@@ -9,12 +10,33 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
-from matplotlib.patches import FancyBboxPatch
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter
+
+
+def oklch_hex(lightness, chroma, hue):
+    """Convert the upstream OKLCH theme tokens to clipped sRGB."""
+    angle = math.radians(hue)
+    a, b = chroma * math.cos(angle), chroma * math.sin(angle)
+    l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3
+    m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3
+    s = (lightness - 0.0894841775 * a - 1.2914855480 * b) ** 3
+    rgb = [
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    ]
+    rgb = [
+        12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+        for c in rgb
+    ]
+    return "#" + "".join(f"{round(max(0, min(1, c)) * 255):02x}" for c in rgb)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--font", type=Path)
+    parser.add_argument("--font", type=Path, help="Chinese fallback font")
+    parser.add_argument("--latin-font", type=Path, help="Optional DM Sans font")
     args = parser.parse_args()
     here = Path(__file__).resolve().parent
     data = json.loads((here / "performance_data.json").read_text())
@@ -25,120 +47,154 @@ def main():
             Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
         ]
         font = next((p for p in candidates if p.exists()), None)
-    if font:
-        font_manager.fontManager.addfont(str(font))
-        family = font_manager.FontProperties(fname=str(font)).get_name()
-    else:
-        family = "DejaVu Sans"
+    families = []
+    for path in [args.latin_font, font]:
+        if path:
+            font_manager.fontManager.addfont(str(path))
+            families.append(font_manager.FontProperties(fname=str(path)).get_name())
+    families.append("DejaVu Sans")
 
+    # InferenceX globals.css dark theme; see style_reference.json for pinned sources.
+    bg, ink, muted = "#131416", "#eaebec", "#b4b9bc"
+    border, grid, gold = "#656b72", "#222426", "#f7b041"
+    # generateVendorColors: one NVIDIA series, dark theme -> L=.64 C=.15 H=145.
+    green = oklch_hex(.64, .15, 145)
+    # InferenceX's dark --overlay-run-{1,2,3,0} comparison tokens.
+    colors = {
+        "p50": oklch_hex(.75, .20, 190),
+        "p90": oklch_hex(.78, .20, 90),
+        "p95": oklch_hex(.70, .22, 290),
+        "p99": oklch_hex(.72, .22, 25),
+    }
     plt.rcParams.update({
-        "font.family": family,
+        "font.family": families,
         "font.size": 13,
         "axes.unicode_minus": False,
-        "axes.edgecolor": "#c8d0da",
-        "axes.labelcolor": "#334155",
-        "xtick.color": "#64748b",
-        "ytick.color": "#64748b",
+        "axes.facecolor": bg,
+        "axes.edgecolor": border,
+        "axes.labelcolor": ink,
+        "text.color": ink,
+        "xtick.color": muted,
+        "ytick.color": muted,
         "svg.fonttype": "path",
+        "savefig.facecolor": bg,
     })
-    ink, muted, grid = "#0f172a", "#64748b", "#e5eaf0"
-    colors = {
-        "avg": "#049b82", "p10": "#94a3b8", "p50": "#3291cf",
-        "p90": "#7563d9", "p95": "#d38a28", "p99": "#ca5473",
-    }
     runs = sorted(data["runs"], key=lambda r: r["concurrency"])
     best = max(runs, key=lambda r: r["output_tps"])
-    xs = [r["concurrency"] for r in runs]
-    fig = plt.figure(figsize=(16, 9.8), facecolor="white")
-    fig.text(.05, .945, "DeepSeek V4.1 Flash  /  B200 性能趋势",
-             fontsize=27, color=ink)
-    fig.text(.05, .900, "AgentX  ·  16 GPU（8 Prefill + 8 Decode）  ·  2026-11-03 整理",
-             fontsize=14, color=muted)
-    fig.text(.05, .852, "当前最高吞吐配置：并发 2816  ·  以下均为正式全程，包含突发阶段",
-             fontsize=14, color=colors["avg"])
+    fig = plt.figure(figsize=(15, 9.6), facecolor=bg)
+    fig.text(.055, .940, "DeepSeek V4.1 Flash  /  B200", fontsize=26, color=ink)
+    fig.text(.945, .945, "PERFORMANCE", fontsize=12, color=gold, ha="right")
+    fig.text(.055, .897,
+             "AgentX  ·  16 GPU（8 Prefill + 8 Decode）  ·  正式全程（含突发阶段）",
+             fontsize=13.5, color=muted)
+    fig.add_artist(Line2D([.055, .945], [.867, .867],
+                         transform=fig.transFigure, color=border, lw=.8))
 
-    cards = [
-        (f"{best['output_tps']/1000:.1f}k", "整机输出 tok/s · 16 GPU"),
-        (f"{best['output_tps']/best['gpu_count']:,.0f}", "输出 tok/s/GPU · 按全部 16 卡"),
-        (f"{best['per_user_tps']['avg']:.2f}", "平均 per-user TPS"),
-        (f"{best['ttft_ms']['avg']/1000:.2f} s", "平均首 token 等待（TTFT）"),
+    stats = [
+        (f"{best['output_tps']/1000:.1f}k", "整机输出 tok/s", green),
+        (f"{best['output_tps']/best['gpu_count']:,.0f}",
+         "输出 tok/s/GPU · 按全部 16 卡", green),
+        (f"{best['per_user_tps']['avg']:.2f}", "平均 per-user TPS", ink),
+        (f"{best['ttft_ms']['avg']/1000:.2f} s", "平均 TTFT", gold),
     ]
-    for i, (value, label) in enumerate(cards):
-        x = .05 + i * .238
-        fig.add_artist(FancyBboxPatch(
-            (x, .735), .222, .09, transform=fig.transFigure,
-            boxstyle="round,pad=0.007,rounding_size=0.007",
-            facecolor="#f7f9fc", edgecolor="#e7ecf2", linewidth=.8,
-        ))
-        fig.text(x + .013, .780, value, fontsize=28, color=ink)
-        fig.text(x + .013, .748, label, fontsize=12, color=muted)
+    for i, (value, label, color) in enumerate(stats):
+        x = .055 + i * .235
+        fig.text(x, .800, value, fontsize=28, color=color)
+        fig.text(x, .767, label, fontsize=11.5, color=muted)
+        if i:
+            fig.add_artist(Line2D([x - .022, x - .022], [.765, .833],
+                                 transform=fig.transFigure, color=grid, lw=1))
+    fig.text(.945, .851, "以上指标：当前最高吞吐配置 · 并发 2816",
+             fontsize=10.5, color=muted, ha="right")
 
-    axes = [fig.add_axes([x, .280, .232, .365]) for x in [.069, .393, .717]]
-    for ax in axes:
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.tick_params(axis="both", labelsize=12.5, length=0, pad=8)
+    fig.text(.080, .704, "每卡吞吐 vs. 用户生成速度", fontsize=18, color=ink)
+    fig.text(.682, .704, "TTFT 延迟分位数", fontsize=18, color=ink)
+    left = fig.add_axes([.080, .292, .470, .345])
+    right = fig.add_axes([.682, .292, .263, .345])
+    for ax in [left, right]:
         ax.set_axisbelow(True)
-        ax.grid(axis="y", color=grid, linewidth=.8)
-        ax.set_xlim(1990, 3240)
-        ax.set_xticks(xs, [f"{x}" + ("*" if x == 2432 else "") for x in xs])
-        ax.set_xlabel("客户端并发", labelpad=12, fontsize=13)
+        ax.grid(color=grid, linewidth=.85)
+        ax.tick_params(axis="both", labelsize=12, length=4, width=.7, pad=6)
+        for spine in ax.spines.values():
+            spine.set_linewidth(.7)
+            spine.set_color(border)
 
-    throughput, user, ttft = axes
-    titles = ["整机输出吞吐 ↑", "用户生成速度 ↑", "首 token 等待 ↓"]
-    units = ["k tok/s", "tok/s/user · 不含 TTFT", "秒"]
-    for x, title, unit in zip([.069, .393, .717], titles, units):
-        fig.text(x, .688, title, fontsize=19, color=ink)
-        fig.text(x, .653, unit, fontsize=12, color=muted)
+    curve = sorted(runs, key=lambda r: r["per_user_tps"]["avg"])
+    xs = [r["per_user_tps"]["avg"] for r in curve]
+    ys = [r["output_tps"] / r["gpu_count"] for r in curve]
+    left.plot(xs, ys, color=green, linewidth=3.2, marker="o",
+              markersize=8, markeredgecolor=bg, markeredgewidth=1.4, zorder=3)
+    left.scatter([best["per_user_tps"]["avg"]],
+                 [best["output_tps"] / best["gpu_count"]],
+                 s=180, facecolors="none", edgecolors=gold, linewidths=1.5,
+                 zorder=4)
+    offsets = {2816: (15, 32), 2432: (-10, -45), 2048: (-12, 36)}
+    for r in curve:
+        concurrency = r["concurrency"]
+        suffix = "*" if r["formal_errors"] else ""
+        text = f"并发 {concurrency}{suffix}\n{r['output_tps']/1000:.1f}k tok/s"
+        left.annotate(
+            text, (r["per_user_tps"]["avg"], r["output_tps"] / r["gpu_count"]),
+            xytext=offsets[concurrency], textcoords="offset points",
+            ha="right" if concurrency == 2048 else "left", va="center",
+            fontsize=12, color=ink, linespacing=1.5,
+            bbox={"boxstyle": "round,pad=.35,rounding_size=.12",
+                  "facecolor": "#246c39", "edgecolor": gold if concurrency == 2816 else green,
+                  "linewidth": 1 if concurrency == 2816 else .6},
+        )
+    left.set_xlim(103, 157)
+    left.set_ylim(4700, 6850)
+    left.set_xticks([110, 120, 130, 140, 150])
+    left.set_yticks([5000, 5500, 6000, 6500])
+    left.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x/1000:g}k"))
+    left.set_xlabel("Per-user TPS（均值，tok/s/user）", labelpad=12, fontsize=13)
+    left.set_ylabel("Output token throughput（tok/s/GPU）", labelpad=12, fontsize=12)
+    left.text(.98, .97, "越往右上越好", transform=left.transAxes,
+              ha="right", va="top", color=muted, fontsize=10.5)
+    left.legend(
+        handles=[Line2D([], [], color=green, marker="o", linewidth=2.5,
+                        markersize=6, label="B200  ·  8P + 8D")],
+        loc="lower left", bbox_to_anchor=(-.01, 1.025), frameon=False,
+        fontsize=11.5, labelcolor=ink, borderaxespad=0,
+    )
 
-    values = [r["output_tps"] / 1000 for r in runs]
-    throughput.plot(xs, values, color=colors["avg"], marker="o", markersize=8,
-                    linewidth=3, markeredgecolor="white", markeredgewidth=1.3)
-    throughput.set_ylim(0, 112)
-    throughput.set_yticks([0, 25, 50, 75, 100])
-    throughput.fill_between(xs, values, color=colors["avg"], alpha=.055)
-    for x, y in zip(xs, values):
-        throughput.annotate(f"{y:.1f}k", (x, y), xytext=(0, 13),
-                            textcoords="offset points", ha="center", fontsize=14,
-                            color=colors["avg"])
-    throughput.text(.05, .08, "83.1k → 100.2k tok/s", transform=throughput.transAxes,
-                    fontsize=13, color=ink)
-
-    # Low TPS percentiles describe slower requests. No smoothing/interpolation.
-    for stat in ["p99", "p90", "avg", "p50", "p10"]:
-        values = [r["per_user_tps"][stat] for r in runs]
-        user.plot(xs, values, color=colors[stat], marker="o", markersize=5.5,
-                  linewidth=2.5 if stat == "avg" else 1.8,
-                  linestyle="--" if stat == "p10" else "-")
-        label = "均值" if stat == "avg" else stat.upper()
-        user.annotate(f"{label} {values[-1]:.1f}", (xs[-1], values[-1]),
-                      xytext=(9, 0), textcoords="offset points", va="center",
-                      fontsize=11.5, color=colors[stat])
-    user.set_xlim(1990, 3240)
-    user.set_ylim(65, 265)
-    user.set_yticks([75, 100, 150, 200, 250])
-
+    cx = [r["concurrency"] for r in runs]
     for stat in ["p99", "p95", "p90", "p50"]:
         values = [r["ttft_ms"][stat] / 1000 for r in runs]
-        ttft.plot(xs, values, color=colors[stat], marker="o", markersize=5.5,
-                  linewidth=2)
-        ttft.annotate(f"{stat.upper()} {values[-1]:.2f}", (xs[-1], values[-1]),
-                      xytext=(9, 0), textcoords="offset points", va="center",
-                      fontsize=11.5, color=colors[stat])
-    ttft.set_xlim(1990, 3240)
-    ttft.set_ylim(0, 27)
-    ttft.set_yticks([0, 5, 10, 15, 20, 25])
+        right.plot(cx, values, color=colors[stat], marker="o",
+                   markersize=5.5, linewidth=2.1,
+                   markeredgecolor=bg, markeredgewidth=.6)
+        right.annotate(
+            f"{stat.upper()}  {values[-1]:.2f}s", (cx[-1], values[-1]),
+            xytext=(9, 0), textcoords="offset points", va="center",
+            fontsize=10.8, color=colors[stat],
+        )
+    right.set_xlim(1990, 3310)
+    right.set_ylim(0, 27)
+    right.set_xticks(cx, ["2048", "2432*", "2816"])
+    right.set_yticks([0, 5, 10, 15, 20, 25])
+    right.set_xlabel("客户端并发", labelpad=12, fontsize=13)
+    right.set_ylabel("秒 · 越小越好", labelpad=9, fontsize=12)
+    right.text(0, 1.045, "P50 / P90 / P95 / P99",
+               transform=right.transAxes, color=muted, fontsize=11)
 
-    fig.text(.05, .175, "并发 2816：吞吐最高；并发 2048：用户生成更快，首 token 等待更短。",
-             fontsize=15, color=ink)
-    fig.text(.05, .123, "口径：均为正式全程。Per-user TPS 先逐请求计算，再汇总；低分位代表较慢请求。",
-             fontsize=12, color=muted)
-    fig.text(.05, .088, "* 并发 2432 有 4 个正式错误。各点对应不同实测配置，连线仅便于比较，不代表只改变并发的扫描。",
-             fontsize=12, color=muted)
-    fig.text(.05, .045, "视觉风格参考 InferenceX  ·  数据：本项目 AIPerf 原始导出  ·  投机接受率为固定模拟值，不代表质量评测。",
+    fig.add_artist(Line2D([.055, .945], [.205, .205],
+                         transform=fig.transFigure, color=border, lw=.7))
+    fig.text(.055, .163,
+             "并发 2816 吞吐最高；并发 2048 用户生成更快、首 token 等待更短。",
+             fontsize=14, color=ink)
+    fig.text(.055, .119,
+             "口径：Per-user TPS 不含 TTFT。每卡吞吐按全部 16 卡计算。各点配置不同，连线仅用于比较。",
              fontsize=11.5, color=muted)
-
-    fig.savefig(here / "performance_overview.png", dpi=200, facecolor="white")
-    fig.savefig(here / "performance_overview.svg", facecolor="white")
+    fig.text(.055, .084,
+             "* 并发 2432 有 4 个正式错误。投机接受率为固定模拟值；本图不代表质量评测。",
+             fontsize=11.5, color=muted)
+    fig.text(.055, .039, "视觉参考：InferenceX 官方 dark theme / NVIDIA 色域",
+             fontsize=10.3, color=muted)
+    fig.text(.945, .039, "数据：本项目 AIPerf 导出  ·  整理：2026-11-03",
+             fontsize=10.3, color=muted, ha="right")
+    fig.savefig(here / "performance_overview.png", dpi=220, facecolor=bg)
+    fig.savefig(here / "performance_overview.svg", facecolor=bg)
     plt.close(fig)
 
 
