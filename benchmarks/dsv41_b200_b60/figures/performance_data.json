@@ -53,7 +53,8 @@
       },
       "source_sha256": "088e528cbe61463ce7c3e9ea89304a93958e50d07ea08c7c547dfd92a5b2dab7",
       "formal_errors": 0,
-      "series": "same_configuration_concurrency_comparison"
+      "series": "same_configuration_concurrency_comparison",
+      "display_label": "10/30 · 并发 2048"
     },
     {
       "run": "pb-b58-1031b",
@@ -98,7 +99,8 @@
       },
       "source_sha256": "2100fbb57bcedaa9ec1e5a202d77bfb4417e35ba118eb253bb8fb37be1a1e914",
       "formal_errors": 4,
-      "series": "same_configuration_concurrency_comparison"
+      "series": "same_configuration_concurrency_comparison",
+      "display_label": "10/31 · 并发 2432"
     },
     {
       "run": "pb-b60-1102a",
@@ -143,7 +145,8 @@
       },
       "source_sha256": "dbac70c130724beabc75e0516e228ef6ef7e9b1a56c53962acab53639535c946",
       "formal_errors": 0,
-      "series": "latest_configuration"
+      "series": "latest_configuration",
+      "display_label": "11/02 · 并发 2816"
     },
     {
       "run": "pb-b57-1031a",
@@ -188,11 +191,42 @@
       },
       "source_sha256": "0c530aa69968d754c668e6b0a574df008aed52e66f3f424483381f3d45b1241d",
       "formal_errors": 0,
-      "series": "same_configuration_concurrency_comparison"
+      "series": "same_configuration_concurrency_comparison",
+      "display_label": "10/31 · 并发 2816"
+    },
+    {
+      "run": "internal-20261024-c2048",
+      "display_label": "10/24 旧内部基线",
+      "concurrency": 2048,
+      "gpu_count": 16,
+      "output_tps": 77967.68049934744,
+      "per_user_tps": {
+        "avg": 241.46656271379987,
+        "p10": 107.53796935426078,
+        "p50": 119.53932513437276,
+        "p99": 1009.7781334360536
+      },
+      "ttft_ms": {
+        "unit": "ms",
+        "avg": 2606.0459722096066,
+        "p1": 623.8984429599999,
+        "p5": 867.2443198,
+        "p10": 1008.6876788,
+        "p25": 1427.477304,
+        "p50": 1823.589127,
+        "p75": 2642.58017,
+        "p90": 4699.686714000001,
+        "p95": 7172.415038599952,
+        "p99": 14008.59391548
+      },
+      "formal_errors": 1,
+      "series": "historical_internal_baseline",
+      "source_sha256": "1dabeb214138759b1363f3ba27a899cebd6fac3ad000a6a5ab78ab9489c4117c"
     }
   ],
   "series_definition": {
     "same_configuration_concurrency_comparison": "B56 C2048, B58 C2432, B57 C2816 use ov-p84 and the same service parameters; run IDs/log start times differ. B58 has four formal errors.",
-    "latest_configuration": "B60 C2816 uses changed P scheduler code/knobs (ov-p85 and shared step budget). Highlight separately; do not connect into the old-configuration concurrency curve."
+    "latest_configuration": "2026-11-02 C2816: compared with 10/31 B57, shares the token-cap state across ranks with hysteresis and replaces the context budget with a DP-shared full-step budget. Residual SJF already existed in B57. Separate marker.",
+    "historical_internal_baseline": "2026-10-24 internal baseline at C2048. Different hosts and vLLM version; a separate marker, not part of the concurrency scan. See ../baseline_20261024.json."
   }
 }

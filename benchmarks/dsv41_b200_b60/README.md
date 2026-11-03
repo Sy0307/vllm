@@ -28,6 +28,31 @@ TPS 的 P10 表示较慢端，P90 表示较快端。B58 有 4 个正式错误，
 
 [SVG](figures/performance_overview.svg) · [图表数据](figures/performance_data.json) · [绘图脚本](figures/plot_performance.py)。运行脚本需要 matplotlib 与中文字体，可用 `--font` 指定字体路径，`--latin-font` 可指定 InferenceX 使用的 DM Sans 字体。
 
+## 与 10 月 24 日旧内部基线对比
+
+均为 16 张 B200（8P+8D）、AgentX、1800 秒正式阶段，整机吞吐采用含收尾的约 1840 秒观察窗口。旧基线运行于另一组机器、使用 `df3bd094` 基座；后三组使用 `94a29d31` 基座。本表比较历史系统表现，包含代码、部署和负载并发的变化。
+
+| 日期 / 配置 | 并发 | 整机 tok/s | 用户 TPS P10 / P50 | TTFT 均值 / P50 / P90 / P99（s） | 正式错误 |
+|---|---:|---:|---:|---:|---:|
+| 10/24 旧内部基线 | 2048 | 77,968 | 107.54 / 119.54 | 2.606 / 1.824 / 4.700 / 14.009 | 1 |
+| 10/30 配置 | 2048 | 83,111 | 118.44 / 138.04 | 1.257 / 0.637 / 1.854 / 13.302 | 0 |
+| 10/31 配置 | 2816 | 98,833 | 89.38 / 100.16 | 3.992 / 1.523 / 12.447 / 23.322 | 0 |
+| 11/02 配置：共享限步状态 + 整步预算 | 2816 | 100,226 | 84.77 / 98.03 | 3.163 / 1.168 / 11.580 / 23.891 | 0 |
+
+同为 C2048，10/30 相对旧内部基线吞吐高 **6.6%**，用户 TPS P50 高 **15.5%**。11/02 的最高吞吐比旧基线高 **28.5%**，其中同时增加了并发，不能算成调度单项收益。历史基线来源与统计方法见 [baseline_20261024.json](baseline_20261024.json)；旧记录只保留了用户 TPS P10/P50/P99 的精确审计值，未补造 P90/P95。灰点只作历史参考，不接入并发曲线。
+
+## 11 月 2 日的 P 调度具体是什么
+
+P 负责处理输入并产出交给 D 的 KV；D 负责后续生成。客户端并发仍是 2816。“新调度”只是 P 端配置变化，图表以日期标注。
+
+1. **短任务优先（此前已启用）**：按扣除本地/外部缓存后还需补算的输入 token 数排序。例如 128K 输入命中 120K，只剩 8K，会排在 32K 全未命中的请求前。恢复中的请求优先；普通请求等满 10 秒后提权。这是提权阈值，不是 TTFT 的 10 秒上限。
+2. **轻载限步的状态改为 DP 共享**：轻载时每 rank 每步最多 8192 token，单请求 chunk 最多 4096；任一 rank 排队超过 16 个请求就切到正常 16384 上限。全部 rank 排队不超过 10 且维持 1 秒，再切回轻载档。此前各 rank 读到的队列快照不同，可能一边限 8K、一边跑 16K；共享状态和滞回用于减少这种分歧。
+3. **共享整步预算替换上下文预算**：用新 token 数和历史上下文估计整步计算时间；每个 rank 发布需求，明显更重的 rank 按其他 rank 已发布的最大需求裁短，余下 token 留到下一步。预算倍数 1.0，下限 32 ms、上限 1000 ms；通过本机共享内存读取近似需求，不新增阻塞式 all-reduce。原上下文预算只约束 attention 的一部分代价，11/02 已关闭。
+
+**相对 10/31，新增的是第 2、3 项的变化，第 1 项并非刚加入。** 对应 [调度代码提交](https://github.com/Sy0307/vllm/commit/eb0e76832c31955a49bceb4fa3d54f212c55b7a2) 和 [实际参数](runtime/knobs/b60p.env)。
+
+已有对照同时关闭上述三项 P 调度，其他优化保留：[600,1800) 窗口内 TTFT 均值 1.84 → 1.55 s、P90 3.28 → 2.51 s，但 P99 **6.12 → 11.05 s**。恢复期部分请求撞到 10 秒提权线，是明确的尾延迟代价；三项贡献尚未拆开，两次机器也不同，吞吐差不能归因于调度。该配置未达到原预注册聚合锁步效率门槛，仍是候选配置。
+
 ## 优化与对应提交
 
 提交按归档文件主题分组；共享文件可能包含多个机制。表中提交是实测文件的归档入口，**不是独立消融或可逐项相加的性能补丁**。完整代码取分支最终版本。
@@ -47,6 +72,26 @@ TPS 的 P10 表示较慢端，P90 表示较快端。B58 有 4 个正式错误，
 公开 PR 来源：[#63932](https://github.com/vllm-project/vllm/pull/63932)、[#63933](https://github.com/vllm-project/vllm/pull/63933)、[#63934](https://github.com/vllm-project/vllm/pull/63934)、[#63936](https://github.com/vllm-project/vllm/pull/63936)、[#63938](https://github.com/vllm-project/vllm/pull/63938)、[#63940](https://github.com/vllm-project/vllm/pull/63940)、[#64500](https://github.com/vllm-project/vllm/pull/64500)。这些是开发来源；归档中还包括 PR 移植和本地修正，不能用 PR 当前 head 替代。
 
 本地修正来源为 `4ac0ab768e12107a313aeedd3748fc81148e6c1f`（lookup 前截断 P prompt）与 `3c65a5dbafb04369ceb51503546d2943ccca8c31`（通知式 early receive）；相应实现已保存在本分支快照。最新上游已合入的 BF16 DeepSelect、compressed KV gather 复用、MegaMoE replica mapping、MegaAttn positions，不应继续算成相对当前 main 的私有优势。
+
+### 仍保留的配置
+
+| 项目 | B60 的实际值 / 作用 | 已有证据 |
+|---|---|---|
+| 缓存感知路由 | `pcache2`：前缀命中权重 1.0、prefill 负载权重 10、路由缓存估计 TTL 600 s | 路由策略仍启用；不可把实验过但未采用的 store-aware 路由算进来。[部署提交](https://github.com/Sy0307/vllm/commit/f8661ae9f149519e8ac9c154c079887e3d45147e) |
+| D 流式输出合并 | `--stream-interval 8`，首 token 仍即时发出，后续减少输出事件 | 早期单轮端到端记录 +0.34%；不能外推为 B60 的独立收益。[参数](runtime/knobs/b60d.env) |
+| D 控制同步节拍 | `--dp-sync-interval 256`，从默认 16 调整 | 只改变运行状态同步，不减少每层 MoE 通信；已有 D-only 记录未测出独立吞吐提升。[参数](runtime/knobs/b60d.env) |
+| 基础执行配置 | 异步调度；P FULL_AND_PIECEWISE / D FULL_DECODE_ONLY；P/D 同步 EPLB，16 冗余专家，分别每 5000/12000 步 | 属于完整配方的基础条件，不作为新增私有算法收益。[启动文件](runtime/serve.sh) |
+
+CPU 行还包括 `VLLM_PD_HOSTOPT=1` 的打包复用和仅解析需要的 KV group；lookup 前截断 prompt、dummy-run 时保留有效 connector 引用等正确性修正也继续保留。不能因为没有独立收益数字就作为冗余删除。
+
+### 代码清理建议（尚未修改运行时代码）
+
+1. **优先补通知线程的退出流程**：[early_kv_recv.py](overlays/prefill/vllm/v1/executor/early_kv_recv.py) 的通知循环没有停止条件，`close()` 只关闭 socket；[WorkerProc.shutdown](overlays/prefill/vllm/v1/executor/multiproc_executor.py) 随后还会销毁 worker/connector。并发完成通知可能与退出交错，应先停止通知、唤醒并等待线程退出，再关 socket。这是静态发现的退出风险，未复现运行故障。
+2. **收拢实验开关与诊断**：B60 不启用 `_CtxBalance`、D 的 Engram peer-all、MegaMoE min-rows、replay padding 实验开关；仍有 wall-clock A/B toggle、逐步 JSONL、阶段计时和栈采样实现。后续工程分支可移出已放弃的实验、集中可选诊断，保留必要故障记录；归档保留原样。
+3. **统一配置入口**：[serve.sh](runtime/serve.sh) 在删掉 `VLLM_PREFILL_STEP_COST` 后会自动补回 `ctx_budget_ms=40`，与 11/02 配方相反。预算模式应显式配置，避免用“未设环境变量”表达关闭；同时参数化节点、venv、模型和日志路径。
+4. **减少 P/D 重复维护**：当前有 10 对内容完全相同的文件。后续集成应共享实现、保留确有差异的 P/D 行为；不要直接合并两份整文件快照或覆盖新上游改动。
+
+SJF 的 10 秒提权线属于策略取舍，调整它会改变性能，不能当作纯代码清理。当前只做静态核查；实测快照、manifest 和性能结论保持不变。
 
 ## 使用方式
 

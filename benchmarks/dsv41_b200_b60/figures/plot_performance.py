@@ -84,6 +84,7 @@ def main():
         [r for r in runs if r["series"] == "same_configuration_concurrency_comparison"],
         key=lambda r: r["concurrency"],
     )
+    historical = next(r for r in runs if r["series"] == "historical_internal_baseline")
     best = max(runs, key=lambda r: r["output_tps"])
     fig = plt.figure(figsize=(15, 9.6), facecolor=bg)
     fig.text(.055, .940, "DeepSeek V4.1 Flash  /  B200", fontsize=26, color=ink)
@@ -108,7 +109,7 @@ def main():
         if i:
             fig.add_artist(Line2D([x - .022, x - .022], [.765, .833],
                                  transform=fig.transFigure, color=grid, lw=1))
-    fig.text(.945, .851, "以上指标：当前最高吞吐配置 · 并发 2816",
+    fig.text(.945, .851, "以上指标：11/02 配置 · 并发 2816",
              fontsize=10.5, color=muted, ha="right")
 
     fig.text(.080, .704, "实测配置对比：每卡吞吐 vs. 用户速度", fontsize=17, color=ink)
@@ -132,13 +133,13 @@ def main():
                  [best["output_tps"] / best["gpu_count"]],
                  s=100, marker="D", facecolors=gold, edgecolors=bg, linewidths=1.1,
                  zorder=4)
-    offsets = {2816: (26, -30), 2432: (10, 18), 2048: (-12, 36)}
+    offsets = {2816: (26, -30), 2432: (10, 18), 2048: (-8, -30)}
     for r in [*curve, best]:
         concurrency = r["concurrency"]
         latest = r is best
         suffix = "*" if r["formal_errors"] else ""
-        note = " · 新调度" if latest else ""
-        text = (f"并发 {concurrency}{suffix}{note}\n"
+        note = "11/02 · " if latest else ""
+        text = (f"{note}并发 {concurrency}{suffix}\n"
                 f"{r['output_tps']/r['gpu_count']/1000:.2f}k tok/s/GPU")
         left.annotate(
             text, (r["per_user_tps"]["p50"], r["output_tps"] / r["gpu_count"]),
@@ -152,10 +153,20 @@ def main():
             arrowprops={"arrowstyle": "-", "color": gold if latest else green,
                         "linewidth": .8, "shrinkA": 4, "shrinkB": 6},
         )
+    hx = historical["per_user_tps"]["p50"]
+    hy = historical["output_tps"] / historical["gpu_count"]
+    left.scatter([hx], [hy], s=75, marker="s", facecolors="none",
+                 edgecolors=muted, linewidths=1.5, zorder=4)
+    left.annotate(
+        "10/24 旧内部基线\n4.87k tok/s/GPU", (hx, hy),
+        xytext=(-12, -22), textcoords="offset points", ha="right", va="center",
+        fontsize=11, color=muted, linespacing=1.5,
+        arrowprops={"arrowstyle": "-", "color": muted, "linewidth": .8},
+    )
     left.set_xlim(88, 150)
-    left.set_ylim(4700, 6950)
+    left.set_ylim(4350, 7100)
     left.set_xticks([90, 100, 110, 120, 130, 140, 150])
-    left.set_yticks([5000, 5500, 6000, 6500])
+    left.set_yticks([4500, 5000, 5500, 6000, 6500, 7000])
     left.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x/1000:g}k"))
     left.set_xlabel("Per-user TPS（P50，tok/s/user）", labelpad=12, fontsize=13)
     left.set_ylabel("Output token throughput（tok/s/GPU）", labelpad=12, fontsize=12)
@@ -164,9 +175,9 @@ def main():
     left.legend(
         handles=[Line2D([], [], color=green, marker="o", linewidth=2.5,
                         markersize=6, linestyle="-",
-                        label="同代码、同服务参数，仅改变并发"),
+                        label="10/30–31 同配置，仅改变并发"),
                  Line2D([], [], color=gold, marker="D", linestyle="none",
-                        markersize=6, label="新 P 调度 · 单独标出")],
+                        markersize=6, label="11/02 · 共享限步状态 + 整步预算")],
         loc="lower left", bbox_to_anchor=(-.01, 1.025), frameon=False,
         fontsize=10.5, labelcolor=ink, borderaxespad=0, ncol=1,
     )
@@ -194,13 +205,13 @@ def main():
     fig.add_artist(Line2D([.055, .945], [.205, .205],
                          transform=fig.transFigure, color=border, lw=.7))
     fig.text(.055, .163,
-             "同配置下，并发提高时整机吞吐上升、单用户速度下降；新调度另列比较。",
+             "同配置下，并发提高时整机吞吐上升、单用户速度下降；11/02 配置另列。",
              fontsize=14, color=ink)
     fig.text(.055, .119,
              "口径：用户速度用 P50，避免均值极端值的影响；不含 TTFT。每卡吞吐按全部 16 卡计算。",
              fontsize=11.5, color=muted)
     fig.text(.055, .084,
-             "绿线：B56 / B58 / B57。金点：B60 新 P 调度，不接入绿线。* 并发 2432 有 4 个正式错误。",
+             "灰点：10/24 旧内部基线（异机、异版本，1 错误）。* 并发 2432 有 4 个正式错误。",
              fontsize=11.5, color=muted)
     fig.text(.055, .039, "InferenceX 深色主题 · 投机接受率为固定模拟值，非质量评测",
              fontsize=10.3, color=muted)

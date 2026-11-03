@@ -1,0 +1,51 @@
+{
+  "label": "旧内部基线（2026-10-24）",
+  "concurrency": 2048,
+  "hardware": "16 x B200, 8P + 8D",
+  "base_vllm_commit_short": "df3bd094",
+  "workload": "AgentX, public Weka trace, 1800 seconds profiling plus grace/finish",
+  "observed_elapsed_s": 1840.003435798,
+  "output_tps": 77967.68049934744,
+  "successful_requests": 146875,
+  "formal_errors": 1,
+  "finish_cancelled_credits": 62,
+  "total_output_tokens": 143460800,
+  "per_user_tps": {
+    "avg": 241.46656271379987,
+    "p10": 107.53796935426078,
+    "p50": 119.53932513437276,
+    "p99": 1009.7781334360536
+  },
+  "ttft_ms": {
+    "unit": "ms",
+    "avg": 2606.0459722096066,
+    "p1": 623.8984429599999,
+    "p5": 867.2443198,
+    "p10": 1008.6876788,
+    "p25": 1427.477304,
+    "p50": 1823.589127,
+    "p75": 2642.58017,
+    "p90": 4699.686714000001,
+    "p95": 7172.415038599952,
+    "p99": 14008.59391548
+  },
+  "itl_ms": {
+    "avg": 8.023521938168418,
+    "p10": 5.087174859203297,
+    "p50": 8.365447930008905,
+    "p99": 10.189711142857144
+  },
+  "provenance": {
+    "raw_jsonl_sha256": "1dabeb214138759b1363f3ba27a899cebd6fac3ad000a6a5ab78ab9489c4117c",
+    "historical_audit_sha256": "96ea002bde7b69523ba1f49e38a8af754aa3be1bc135a84bdf5e9a10b3f68c10",
+    "compact_tsv_gzip_sha256": "344102435de0c079d12c5b6f31b723600cfc6d179de4d210da44bd2a9931f2e9",
+    "historical_raw_path": "/gpfs/mszn/data/dsv41-benchmarks/agentx-pd-2p1d-best3-c2048-nightly-df3bd094-20261024-042311/aiperf_artifacts/profile_export.jsonl"
+  },
+  "method": "TPS P10/P50/P99 and mean copied from the existing 2026-10-24 raw-JSONL audit, which uses per-request (OSL-1)/decode_duration and lower order-statistic percentiles. TTFT percentiles recalculated only from existing compact per-request TTFT values with numpy linear interpolation. No new benchmark.",
+  "limitations": [
+    "Different hosts and vLLM versions from the current archive; historical system comparison, not isolated scheduler gains.",
+    "No exact TPS P90/P95 retained in the local audit; do not infer them from last-SSE end timestamps.",
+    "TPS mean has extreme short-duration values; use P10/P50 for the comparison.",
+    "Synthetic speculative acceptance is not a quality result."
+  ]
+}
