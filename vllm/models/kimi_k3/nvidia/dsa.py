@@ -707,7 +707,11 @@ class KimiK3DSAAttention(nn.Module):
         indexer = cast(Any, self.dsa_indexer)
         if not (
             indexer.use_fused_k_insert
-            and indexer.dcp_world_size == 1
+            # Under DCP the latent goes through the backend's update op, which
+            # owns the rank-local slots; the prologue's fp8_ds_mla insert and
+            # a DCP-replicated q_b_proj are not covered.
+            and (indexer.dcp_world_size == 1 or attn.kv_cache_dtype != "fp8_ds_mla")
+            and not self.mla_attn.dcp_q_replicate
             and self.q_lora_rank is not None
             and self.use_nope
             and hasattr(self, "g_proj")
