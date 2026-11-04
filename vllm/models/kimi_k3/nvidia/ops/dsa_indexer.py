@@ -294,7 +294,6 @@ def _dsa_fused_prologue_kernel(
     index_block_stride,
     topk_ptr,
     topk_stride,
-    mla_kv_scale_ptr,
     Q_DIM: tl.constexpr,
     Q_BLOCK: tl.constexpr,
     KV_DIM: tl.constexpr,
@@ -306,9 +305,11 @@ def _dsa_fused_prologue_kernel(
     USE_PDL: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    # Trailing with defaults: mxfp4_fused_prologue calls this positionally.
+    mla_kv_scale_ptr=None,
     # True: per-tensor fp8 [kv_c | k_pe] rows (fp8_e4m3, as concat_and_cache_mla);
     # False: fp8_ds_mla.
-    MLA_PER_TENSOR_FP8: tl.constexpr,
+    MLA_PER_TENSOR_FP8: tl.constexpr = False,
 ):
     tok = tl.program_id(0).to(tl.int64)
     pid = tl.program_id(1)
@@ -484,7 +485,6 @@ def dsa_fused_prologue(
         index.stride(0),
         topk_indices_buffer,
         topk_indices_buffer.stride(0),
-        mla_kv_scale if mla_kv_scale is not None else topk_indices_buffer,
         Q_DIM=q_dim,
         Q_BLOCK=triton.next_power_of_2(q_dim),
         KV_DIM=kv_dim,
@@ -496,6 +496,7 @@ def dsa_fused_prologue(
         USE_PDL=use_pdl,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
+        mla_kv_scale_ptr=mla_kv_scale,
         MLA_PER_TENSOR_FP8=mla_kv_scale is not None,
         launch_pdl=use_pdl,
     )
