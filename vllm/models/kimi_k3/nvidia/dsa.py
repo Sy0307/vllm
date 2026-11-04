@@ -694,6 +694,9 @@ class KimiK3DSAAttention(nn.Module):
         self._gate_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None
         # Set by pack_projections(): the packed input and query weights.
         self._packed: list[torch.Tensor] | None = None
+        # Whether the fused prologue also writes the MLA latent cache; it only
+        # knows fp8_ds_mla, other formats go through the backend's update op.
+        self._prologue_writes_mla_cache = False
 
     def pack_projections(self) -> None:
         """Enable the fused forward (as DeepseekV32Attention): pack
@@ -708,7 +711,6 @@ class KimiK3DSAAttention(nn.Module):
             and self.q_lora_rank is not None
             and self.use_nope
             and hasattr(self, "g_proj")
-            and attn.kv_cache_dtype == "fp8_ds_mla"
             and attn.hisparse_cache is None
             and not is_weights_pre_processed()
             and not self.weights_offloaded
@@ -751,7 +753,11 @@ class KimiK3DSAAttention(nn.Module):
             self._packed.append(packed)
         if self.aux_stream is not None:
             self._gate_events = (torch.cuda.Event(), torch.cuda.Event())
-        logger.info_once("Kimi K3.1 DSA layers use the fused forward.")
+        self._prologue_writes_mla_cache = attn.kv_cache_dtype == "fp8_ds_mla"
+        logger.info_once(
+            "Kimi K3.1 DSA layers use the fused forward (%s KV cache).",
+            attn.kv_cache_dtype,
+        )
 
     def forward(
         self,
@@ -805,9 +811,13 @@ class KimiK3DSAAttention(nn.Module):
             has_prefills = cast(Any, attn_metadata[attn.layer_name]).num_prefills > 0
             index_metadata = attn_metadata[indexer.k_cache.prefix]
             assert isinstance(index_metadata, v32_indexer.DeepseekV32IndexerMetadata)
+            mla_cache_args = (
+                (attn.kv_cache, forward_context.slot_mapping[attn.layer_name])
+                if self._prologue_writes_mla_cache
+                else (None, None)
+            )
             caches = (
-                attn.kv_cache,
-                forward_context.slot_mapping[attn.layer_name],
+                *mla_cache_args,
                 indexer.k_cache.kv_cache,
                 index_metadata.slot_mapping,
             )
@@ -846,6 +856,13 @@ class KimiK3DSAAttention(nn.Module):
         indexer.score(hidden_states, index_q, index_weights, None)
         attn.impl.record_logical_topk_ready()
 
+        k_pe = k_pe.unsqueeze(1)
+        layer_name = _encode_layer_name(attn.layer_name)
+        kv_cache_dummy_dep = None
+        if not self._prologue_writes_mla_cache:
+            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed, k_pe, layer_name, attn.kv_cache_dtype, attn._k_scale
+            )
         output = torch.empty(
             (hidden_states.shape[0], self.num_local_heads * self.v_head_dim),
             dtype=hidden_states.dtype,
@@ -854,8 +871,9 @@ class KimiK3DSAAttention(nn.Module):
         torch.ops.vllm.unified_mla_attention_with_output(
             q,
             kv_c_normed,
-            k_pe.unsqueeze(1),
+            k_pe,
             output,
-            _encode_layer_name(attn.layer_name),
+            layer_name,
+            kv_cache_dummy_dep=kv_cache_dummy_dep,
         )
         return output
