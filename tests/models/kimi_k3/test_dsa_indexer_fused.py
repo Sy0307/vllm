@@ -763,6 +763,7 @@ def test_indexer_score_reads_its_cache_format(
         topk_backend="auto",
         shardq_layer_name="",
         dcp_local_topk=0,
+        logits_dtype=torch.float32,
     )
     context_lens = seq_lens.view(-1, 1).contiguous()
     # Varlen decode, as the metadata builder sets it up: request index per row.
