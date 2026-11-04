@@ -60,7 +60,7 @@ def add_cli_args(parser: FlexibleArgumentParser) -> None:
     )
     parser.add_argument(
         "--kv-init",
-        choices=["zeros"],
+        choices=["zeros", "random"],
         default="zeros",
         help="Initial KV cache contents of each case's blocks.",
     )
@@ -183,6 +183,10 @@ def run_case(runner, case: BenchCase, args: argparse.Namespace) -> dict[str, Any
         lookahead,
     )
     zero_kv_blocks(kv_caches, attn_groups, batch, kv_config.num_blocks)
+    if args.kv_init == "random":
+        from vllm.benchmarks.forward.kv_init import random_kv_blocks
+
+        random_kv_blocks(kv_caches, attn_groups, batch, kv_config.num_blocks)
     profile_prefix = None
     if args.profile_dir:
         from vllm.distributed.parallel_state import get_world_group

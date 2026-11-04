@@ -63,6 +63,48 @@ def zero_kv_blocks(
                 tensor.narrow(dim, begin * factor, (end - begin) * factor).zero_()
 
 
+@torch.inference_mode()
+def random_kv_blocks(
+    kv_caches: dict[str, Any],
+    attn_groups: list["AttentionGroup"],
+    batch: BenchBatch,
+    num_blocks: int,
+) -> None:
+    """Rank-identical random KV: floats ~N(0, 0.25); packed uint8 caches get
+    finite small fp8 bytes (also as ue8m0 scales: 2**(b-127), never inf), so
+    data-dependent kernels such as the DSA top-k see distinct, tie-free scores."""
+    idx = 0
+    for group in attn_groups:
+        ranges = batch.group_block_ranges[group.kv_cache_group_id]
+        for tensor in _group_tensors(kv_caches, group, num_blocks):
+            dim, factor = _block_dim(tensor, num_blocks)
+            for begin, end in ranges:
+                view = tensor.narrow(dim, begin * factor, (end - begin) * factor)
+                gen = torch.Generator(device=view.device).manual_seed(1234 + idx)
+                idx += 1
+                if view.dtype == torch.uint8:
+                    mag = torch.randint(
+                        0,
+                        0x58,
+                        view.shape,
+                        generator=gen,
+                        device=view.device,
+                        dtype=torch.uint8,
+                    )
+                    sign = torch.randint(
+                        0,
+                        2,
+                        view.shape,
+                        generator=gen,
+                        device=view.device,
+                        dtype=torch.uint8,
+                    )
+                    view.copy_(mag | (sign << 7))
+                elif view.is_floating_point():
+                    rnd = torch.randn(view.shape, generator=gen, device=view.device)
+                    view.copy_((rnd * 0.5).to(view.dtype))
+
+
 def touched_kv_views(
     kv_caches: dict[str, Any],
     attn_groups: list["AttentionGroup"],
