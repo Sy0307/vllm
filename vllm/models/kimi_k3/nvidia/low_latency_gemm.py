@@ -553,6 +553,25 @@ KIMI_K3_PROJECTIONS_SM100: dict[tuple[int, int], ProjectionSpec] = {
         ),
         name="dense_gate_up_proj",
     ),
+    # Kimi K3.1 DSA packed projections at TP8, measured on B200 against packed
+    # cuBLAS (same >=5% rule); cuBLAS wins from M5 / M3 on.
+    (2272, 7168): ProjectionSpec(
+        2272,
+        7168,
+        cute_configs=(
+            (1, _cute(1, 224, 4, 2)),
+            (2, _cute(2, 224, 4, 2)),
+            (3, _cute(3, 128, 2, 2)),
+            (4, _cute(4, 224, 4, 1)),
+        ),
+        name="dsa_qkv_a_wkv_proj",
+    ),
+    (6400, 1536): ProjectionSpec(
+        6400,
+        1536,
+        cute_configs=((1, _cute(1, 96, 4, 2)), (2, _cute(2, 96, 4, 2))),
+        name="dsa_q_b_wq_proj",
+    ),
 }
 
 _SM90CuteConfig = tuple[int, int, int, int]
