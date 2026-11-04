@@ -294,6 +294,7 @@ def _dsa_fused_prologue_kernel(
     index_block_stride,
     topk_ptr,
     topk_stride,
+    mla_kv_scale_ptr,
     Q_DIM: tl.constexpr,
     Q_BLOCK: tl.constexpr,
     KV_DIM: tl.constexpr,
@@ -305,6 +306,9 @@ def _dsa_fused_prologue_kernel(
     USE_PDL: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
+    # True: per-tensor fp8 [kv_c | k_pe] rows (fp8_e4m3, as concat_and_cache_mla);
+    # False: fp8_ds_mla.
+    MLA_PER_TENSOR_FP8: tl.constexpr,
 ):
     tok = tl.program_id(0).to(tl.int64)
     pid = tl.program_id(1)
@@ -339,7 +343,22 @@ def _dsa_fused_prologue_kernel(
         y = y.to(kv_out_ptr.dtype.element_ty)
         tl.store(kv_out_ptr + tok * KV_DIM + offs, y)
         slot = tl.load(mla_slot_ptr + tok, mask=tok < num_mla_slots, other=-1)
-        if slot >= 0:
+        if MLA_PER_TENSOR_FP8:
+            if slot >= 0:
+                base = (slot // mla_block_size) * mla_block_stride + (
+                    slot % mla_block_size
+                ) * mla_entry_stride
+                inv_scale = 1.0 / tl.load(mla_kv_scale_ptr)
+                fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
+                # Round to the bf16 kv_c_normed first, as the unfused insert reads it.
+                y_q = y.to(tl.float32) * inv_scale
+                y_q = tl.minimum(tl.maximum(y_q, -FP8_MAX), FP8_MAX)
+                tl.store(mla_cache_ptr + base + offs, y_q.to(fp8_dtype))
+                rope = tl.arange(0, ROPE_DIM)
+                k_pe = tl.load(k_pe_ptr + tok * k_pe_stride + rope).to(tl.float32)
+                k_pe = tl.minimum(tl.maximum(k_pe * inv_scale, -FP8_MAX), FP8_MAX)
+                tl.store(mla_cache_ptr + base + KV_DIM + rope, k_pe.to(fp8_dtype))
+        elif slot >= 0:
             # fp8_ds_mla, same math as concat_and_cache_ds_mla: KV_DIM fp8 values
             # with power-of-two per-128 tile scales (fp32), then k_pe in bf16.
             base = (slot // mla_block_size) * mla_block_stride + (
@@ -393,12 +412,16 @@ def dsa_fused_prologue(
     mla_slot_mapping: torch.Tensor | None,
     index_cache: torch.Tensor | None,
     index_slot_mapping: torch.Tensor | None,
+    mla_kv_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``fused_norm_rope`` for the NoPE Kimi K3.1 DSA layer: the q_a / kv_a
-    RMSNorms, the fp8_ds_mla insert of ``[kv_c_normed | k_pe]``, the indexer key
+    RMSNorms, the MLA insert of ``[kv_c_normed | k_pe]``, the indexer key
     LayerNorm + FP8 insert and the -1 fill of the top-k rows, in one launch.
 
-    ``mla_cache`` (``[num_blocks, block_size, 656]``) and ``index_cache``
+    The MLA insert is fp8_ds_mla (``[num_blocks, block_size, 656]``), or with
+    ``mla_kv_scale`` the per-tensor fp8 rows of ``concat_and_cache_mla``
+    (``[num_blocks, block_size, 576]``, values divided by the scale).
+    ``mla_cache`` and ``index_cache``
     (``[num_blocks, block_size, head_dim + 4]``) are uint8, possibly strided
     page views of a packed cache; ``None`` (profile runs) skips the insert. Rows
     past a slot mapping or with a negative slot are not inserted.
@@ -461,6 +484,7 @@ def dsa_fused_prologue(
         index.stride(0),
         topk_indices_buffer,
         topk_indices_buffer.stride(0),
+        mla_kv_scale if mla_kv_scale is not None else topk_indices_buffer,
         Q_DIM=q_dim,
         Q_BLOCK=triton.next_power_of_2(q_dim),
         KV_DIM=kv_dim,
@@ -472,6 +496,7 @@ def dsa_fused_prologue(
         USE_PDL=use_pdl,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
+        MLA_PER_TENSOR_FP8=mla_kv_scale is not None,
         launch_pdl=use_pdl,
     )
     return q_out, kv_out

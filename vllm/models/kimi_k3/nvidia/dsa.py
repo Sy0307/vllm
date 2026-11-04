@@ -694,6 +694,7 @@ class KimiK3DSAAttention(nn.Module):
         self._gate_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None
         # Set by pack_projections(): the packed input and query weights.
         self._packed: list[torch.Tensor] | None = None
+        self._mla_kv_scale: torch.Tensor | None = None
         # Whether the fused prologue also writes the MLA latent cache; it only
         # knows fp8_ds_mla, other formats go through the backend's update op.
         self._prologue_writes_mla_cache = False
@@ -757,7 +758,17 @@ class KimiK3DSAAttention(nn.Module):
             self._packed.append(packed)
         if self.aux_stream is not None:
             self._gate_events = (torch.cuda.Event(), torch.cuda.Event())
-        self._prologue_writes_mla_cache = attn.kv_cache_dtype == "fp8_ds_mla"
+        # The prologue writes fp8_ds_mla, and per-tensor fp8 rows outside DCP
+        # (DCP owns rank-local latent slots through the backend's update op).
+        per_tensor_fp8 = (
+            attn.kv_cache_dtype in ("fp8", "fp8_e4m3")
+            and indexer.dcp_world_size == 1
+            and not indexer.use_fp4_cache
+        )
+        self._prologue_writes_mla_cache = (
+            attn.kv_cache_dtype == "fp8_ds_mla" or per_tensor_fp8
+        )
+        self._mla_kv_scale = attn._k_scale if per_tensor_fp8 else None
         logger.info_once(
             "Kimi K3.1 DSA layers use the fused forward (%s KV cache).",
             attn.kv_cache_dtype,
@@ -828,10 +839,7 @@ class KimiK3DSAAttention(nn.Module):
         assert indexer.topk_indices_buffer is not None
         k_norm = cast(KimiK3DSAIndexerKNorm, indexer.k_index_norm)
         # One eps for the three norms (equal, checked in pack_projections).
-        prologue = dsa_fused_prologue
-        if indexer.use_fp4_cache:
-            prologue = mxfp4_fused_prologue
-        q_c, kv_c_normed = prologue(
+        prologue_args = (
             q_c,
             kv_c,
             k_pe,
@@ -844,6 +852,12 @@ class KimiK3DSAAttention(nn.Module):
             indexer.topk_indices_buffer,
             *caches,
         )
+        if indexer.use_fp4_cache:
+            q_c, kv_c_normed = mxfp4_fused_prologue(*prologue_args)
+        else:
+            q_c, kv_c_normed = dsa_fused_prologue(
+                *prologue_args, mla_kv_scale=self._mla_kv_scale
+            )
 
         q, index_q = low_latency_linear(q_c, query_weight).split(
             [

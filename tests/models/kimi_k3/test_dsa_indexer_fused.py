@@ -271,6 +271,85 @@ def test_fused_prologue_matches_unfused(packed: bool, num_tokens: int):
     assert torch.all(topk[num_tokens:] == 7)
 
 
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 7, 300])
+@pytest.mark.parametrize("scale", [1.0, 0.5])
+@torch.inference_mode()
+def test_fused_prologue_per_tensor_fp8_matches_unfused(
+    packed: bool, num_tokens: int, scale: float
+):
+    """With mla_kv_scale the prologue writes the per-tensor fp8 rows that
+    concat_and_cache_mla("fp8_e4m3") writes (the FlashInfer sparse MLA cache)."""
+    torch.manual_seed(0)
+    entry = KV_LORA + ROPE
+    num_blocks = (num_tokens + 2 * BLOCK - 1) // BLOCK + 1
+    qkv = torch.randn(
+        num_tokens, Q_LORA + KV_LORA + ROPE, dtype=torch.bfloat16, device="cuda"
+    )
+    q_c, kv_c, k_pe = qkv.split([Q_LORA, KV_LORA, ROPE], dim=-1)
+    k = torch.randn(num_tokens, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    q_w = torch.rand(Q_LORA, dtype=torch.bfloat16, device="cuda") + 0.5
+    kv_w = torch.rand(KV_LORA, dtype=torch.bfloat16, device="cuda") + 0.5
+    k_w = torch.rand(HEAD_DIM, dtype=torch.float32, device="cuda") + 0.5
+    k_b = torch.randn(HEAD_DIM, dtype=torch.float32, device="cuda") * 0.1
+    eps = 1e-6
+    num_slots = max(num_tokens - 1, 1)
+    slots = torch.randperm(num_blocks * BLOCK, device="cuda")[:num_slots]
+    if num_slots > 2:
+        slots[1] = -1
+    slots = slots.to(torch.int64)
+    kv_scale = torch.tensor([scale], dtype=torch.float32, device="cuda")
+
+    def mla_cache() -> torch.Tensor:
+        if not packed:
+            return torch.zeros(
+                num_blocks, BLOCK, entry, dtype=torch.uint8, device="cuda"
+            )
+        raw = torch.zeros(
+            num_blocks, BLOCK * (entry + 64), dtype=torch.uint8, device="cuda"
+        )
+        return torch.as_strided(
+            raw, (num_blocks, BLOCK, entry), (raw.stride(0), entry, 1)
+        )
+
+    ref_mla = mla_cache()
+    ref_kv = _rms_norm_ref(kv_c, kv_w, eps)
+    ops.concat_and_cache_mla(
+        ref_kv[:num_slots].contiguous(),
+        k_pe[:num_slots].contiguous(),
+        ref_mla.view(current_platform.fp8_dtype()),
+        slots,
+        "fp8_e4m3",
+        kv_scale,
+    )
+
+    mla = mla_cache()
+    index = _make_cache(False, num_blocks)[1]
+    topk = torch.full((num_tokens, TOPK), 7, dtype=torch.int32, device="cuda")
+    _, kv_out = dsa_fused_prologue(
+        q_c,
+        kv_c,
+        k_pe,
+        k,
+        q_w,
+        kv_w,
+        k_w,
+        k_b,
+        eps,
+        topk,
+        mla,
+        slots,
+        index,
+        slots,
+        mla_kv_scale=kv_scale,
+    )
+
+    torch.testing.assert_close(kv_out, ref_kv, atol=2e-2, rtol=2e-2)
+    mismatch = (mla != ref_mla).float().mean().item()
+    assert mismatch < 2e-3, f"{mismatch:.2e} of MLA cache bytes differ"
+    assert torch.all(topk == -1)
+
+
 @torch.inference_mode()
 @pytest.mark.parametrize("use_fp4_cache", [False, True])
 def test_fused_prologue_without_caches(use_fp4_cache: bool):
