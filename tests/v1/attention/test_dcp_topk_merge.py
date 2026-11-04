@@ -371,7 +371,7 @@ def test_profile_reservation_matches_decode_peak(merge):
     )
     q = torch.randn(num_rows, 1, heads, head_dim, device="cuda").to(torch.float8_e4m3fn)
     q_scale, weights = mqa_logits_mx_inputs(
-        q, None, torch.randn(num_rows, heads, device="cuda")
+        q, None, torch.randn(num_rows, heads, device="cuda"), torch.bfloat16
     )
     indices = torch.arange(num_rows, dtype=torch.int32, device="cuda")
     schedule = get_paged_mqa_logits_metadata(
@@ -390,6 +390,7 @@ def test_profile_reservation_matches_decode_peak(merge):
         block_table,
         schedule,
         max_model_len,
+        logits_dtype=torch.bfloat16,
         indices=indices,
     )
     assert logits.dtype == torch.bfloat16

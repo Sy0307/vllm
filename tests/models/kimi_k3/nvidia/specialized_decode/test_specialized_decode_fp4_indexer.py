@@ -328,7 +328,9 @@ def deepgemm_logits(x, rows, q, max_len):
     table = x.table.repeat_interleave(q, 0)[:rows].contiguous()
     indices = torch.arange(rows, dtype=torch.int32, device="cuda")
     schedule = get_paged_mqa_logits_metadata(lens, UNIT, get_num_sms(), indices)
-    q_scale, weights = mqa_logits_mx_inputs(query, q_scale, x.weights[:rows])
+    q_scale, weights = mqa_logits_mx_inputs(
+        query, q_scale, x.weights[:rows], torch.bfloat16
+    )
     return fp8_fp4_paged_mqa_logits(
         (query, q_scale),
         kv_cache_as_quant_view(x.index, 128, True),
@@ -337,6 +339,7 @@ def deepgemm_logits(x, rows, q, max_len):
         table,
         schedule,
         max_model_len=max_len,
+        logits_dtype=torch.bfloat16,
         indices=indices,
     )
 
