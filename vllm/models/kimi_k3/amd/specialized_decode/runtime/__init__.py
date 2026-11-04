@@ -112,7 +112,16 @@ def m1_reasons(vllm_config) -> list[str]:
 
     cc = vllm_config.cache_config
     backend = vllm_config.attention_config.backend
+    hf_text_config = getattr(
+        getattr(vllm_config, "model_config", None), "hf_text_config", None
+    )
     checks = (
+        # M1 runs dense MLA; Kimi-K3.1's DSA layers attend only to the indexer's
+        # top-k rows and must run vLLM's sparse attention ops
+        (
+            getattr(hf_text_config, "dsa_config", None) is not None,
+            "dense MLA layers (Kimi-K3.1 DSA layers run vLLM's sparse ops)",
+        ),
         # M1 reads AITER MLA's decode metadata (max_qo_len, paged_kv_*,
         # asm_decode_num_heads); the loaded layers' backend is checked too
         # (``guards.mla_weight_reasons``)
