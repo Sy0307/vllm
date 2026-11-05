@@ -341,6 +341,9 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            # KDA RecoverSSM on non-last PP ranks keeps each request's verify
+            # records at its request slot until the deferred commit.
+            req_idx=input_batch.idx_mapping_np,
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(

@@ -760,11 +760,11 @@ def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_buil
     )
     builder.recoverssm_context = Mock()
 
-    def build(req_idx: list[int]) -> KimiK3KDAMetadata:
+    def build(req_idx: list[int] | None) -> KimiK3KDAMetadata:
         batch = BatchSpec(seq_lens=[100, 30, 20], query_lens=[1, 3, 3])
         common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
             is_prefilling=torch.tensor([True, False, False]),
-            req_idx=np.array(req_idx),
+            req_idx=None if req_idx is None else np.array(req_idx),
         )
         return builder.build(
             0,
@@ -772,6 +772,11 @@ def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_buil
             num_decode_draft_tokens_cpu=torch.tensor([-1, 2, 2], dtype=torch.int32),
             num_accepted_tokens=torch.ones(3, dtype=torch.int32),
         )
+
+    # Batch rows must never stand in for request slots: the other micro-batch's
+    # verify would overwrite them before this step's deferred commit.
+    with pytest.raises(ValueError, match="request slot"):
+        build(None)
 
     step = build([7, 4, 9])
     commit = step.recoverssm_commit

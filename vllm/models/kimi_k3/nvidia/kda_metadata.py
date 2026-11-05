@@ -431,10 +431,16 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         into the persistent buffer a CUDA graph's verify reads."""
         rows = self.recoverssm_slot_rows
         assert rows is not None and spec_sequence_masks_cpu is not None
+        if m.req_idx is None:
+            # Falling back to the batch rows would let the next step's verify
+            # (another request) overwrite records before the deferred commit.
+            raise ValueError(
+                "KDA RecoverSSM on a non-last PP rank needs each row's request "
+                "slot (CommonAttentionMetadata.req_idx)"
+            )
         spec_rows = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0].numpy()
         assert spec_rows.shape[0] == num_spec_decodes
-        # Dummy and capture batches carry no request table; their rows stand in.
-        slots = spec_rows if m.req_idx is None else np.asarray(m.req_idx)[spec_rows]
+        slots = np.asarray(m.req_idx)[spec_rows]
         async_tensor_h2d(slots.astype(np.int32), out=rows[:num_spec_decodes])
         return rows
 

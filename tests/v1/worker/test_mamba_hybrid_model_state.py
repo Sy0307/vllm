@@ -60,6 +60,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         dcp_local_seq_lens=None,
         positions=positions,
         prompt_lens=torch.tensor([1024], dtype=torch.int32),
+        idx_mapping_np=np.array([5]),
     )
     expected_metadata = {"layer": object()}
     build_attn_metadata = Mock(return_value=expected_metadata)
@@ -76,6 +77,8 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert metadata is expected_metadata
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
+    # KDA RecoverSSM on non-last PP ranks keys verify records by request slot.
+    assert build_attn_metadata.call_args.kwargs["req_idx"] is input_batch.idx_mapping_np
 
 
 def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
