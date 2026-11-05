@@ -40,7 +40,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -654,6 +654,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        # Rows each captured graph emits on a non-last PP rank; fewer than
+        # num_tokens when the model ships SP-local rows between stages.
+        self.intermediate_tensor_num_tokens: dict[BatchExecutionDescriptor, int] = {}
 
     def capture(
         self,
@@ -695,8 +698,11 @@ class ModelCudaGraphManager(CudaGraphManager):
         def persistent_like(x: torch.Tensor) -> torch.Tensor:
             return x.new_empty((max(max_tokens, x.shape[0]), *x.shape[1:]))
 
-        def store_capture_output(num_tokens: int, model_output: Any) -> None:
+        def store_capture_output(
+            desc: BatchExecutionDescriptor, model_output: Any
+        ) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
+            num_tokens = desc.num_tokens
             if self.is_last_pp_rank:
                 # Last PP rank (common case).
                 if self.use_aux_hidden_state_outputs:
@@ -717,6 +723,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                 # Non-last PP rank.
                 assert isinstance(model_output, IntermediateTensors)
                 intermediate_tensors = model_output
+                num_tokens = get_intermediate_tensor_num_tokens(intermediate_tensors)
+                self.intermediate_tensor_num_tokens[desc] = num_tokens
                 if self.intermediate_tensors is None:
                     self.intermediate_tensors = IntermediateTensors(
                         {
@@ -786,7 +794,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
-                    store_capture_output(num_tokens, finish())
+                    store_capture_output(desc, finish())
 
                 return ubatch_forward_fn
 
@@ -839,7 +847,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # model outputs. No need to keep track of the hidden states.
                     return None
 
-                store_capture_output(num_tokens, model_output)
+                store_capture_output(desc, model_output)
 
             return forward_fn
 
@@ -852,7 +860,8 @@ class ModelCudaGraphManager(CudaGraphManager):
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
             assert self.intermediate_tensors is not None
-            return self.intermediate_tensors[: desc.num_tokens]
+            num_tokens = self.intermediate_tensor_num_tokens.get(desc, desc.num_tokens)
+            return self.intermediate_tensors[:num_tokens]
 
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]

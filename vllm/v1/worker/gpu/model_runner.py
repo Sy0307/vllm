@@ -69,7 +69,7 @@ from vllm.multimodal.encoder_budget import (
 )
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -168,6 +168,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    _inner_decoder,
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
@@ -251,6 +252,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
+        self.pp_sequence_sharded = False
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -564,8 +566,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # for the max capture size so they can be sliced per batch.
             # Save as persistent member so runtime can copy received data
             # into the same addresses that the CUDA graphs captured.
+            # A sequence-parallel model ships only its TP rank's rows between
+            # stages, so it can ask for smaller receive buffers.
+            self.pp_sequence_sharded = getattr(
+                self.model, "pp_intermediate_tensors_are_sequence_sharded", False
+            )
+            inner = _inner_decoder(self.model)
+            pp_rows = self.max_num_tokens
+            if hasattr(inner, "pp_intermediate_rows"):
+                pp_rows = inner.pp_intermediate_rows(pp_rows)
             self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                batch_size=self.max_num_tokens,
+                batch_size=pp_rows,
                 dtype=self.model_config.dtype,
                 device=self.device,
             )
@@ -2094,6 +2105,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
+            if not dummy_run and self.pp_sequence_sharded:
+                # SP-local rows: cdiv(n, tp) per TP rank.
+                n = get_intermediate_tensor_num_tokens(intermediate_tensors)
             new_tensors = {
                 k: v[:n]
                 if dummy_run

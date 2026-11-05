@@ -162,6 +162,31 @@ def shard_sequence_parallel_mlp(
     )
 
 
+def use_kimi_k3_sequence_parallel(vllm_config: VllmConfig) -> bool:
+    """Whether Kimi-K3 runs the model-level sequence-parallel path.
+
+    Between layers each TP rank keeps only its ``cdiv(num_tokens, tp)`` token
+    rows: attention all-gathers before and reduce-scatters after, and the MoE
+    consumes the local rows. DeepGEMM MegaMoE needs distinct token shards on
+    the TP/EP ranks, so it keeps SP on across pipeline stages (the stages then
+    exchange SP-local rows, see ``KimiLinearModel.forward``). Other MoE
+    backends keep the DP-only, PP=1 behaviour.
+    """
+    parallel_config = vllm_config.parallel_config
+    use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    return (
+        parallel_config.enable_expert_parallel
+        and parallel_config.tensor_parallel_size > 1
+        and (
+            use_mega_moe
+            or (
+                parallel_config.pipeline_parallel_size == 1
+                and parallel_config.data_parallel_size > 1
+            )
+        )
+    )
+
+
 def can_shard_sequence_parallel_shared_expert(vllm_config: VllmConfig) -> bool:
     """Whether the active MoE backend preserves the SP shared-expert contract.
 
@@ -714,13 +739,7 @@ class KimiDecoderLayer(nn.Module):
             and layer_idx % config.moe_layer_freq == 0
         )
 
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
         if config.is_kda_layer(layer_idx):
             kda_config = config.linear_attn_config
             assert kda_config is not None
@@ -992,13 +1011,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         self.attn_res_block_size: int | None = config.attn_res_block_size
         self.use_attn_res = self.attn_res_block_size is not None
         parallel_config = vllm_config.parallel_config
-        use_mega_moe = vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-        self.use_sequence_parallel = (
-            parallel_config.pipeline_parallel_size == 1
-            and parallel_config.enable_expert_parallel
-            and parallel_config.tensor_parallel_size > 1
-            and (use_mega_moe or parallel_config.data_parallel_size > 1)
-        )
+        self.use_sequence_parallel = use_kimi_k3_sequence_parallel(vllm_config)
 
         self.vocab_size = config.vocab_size
 
@@ -1108,6 +1121,45 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
+        self._sp_capture_output: torch.Tensor | None = None
+
+    def pp_intermediate_rows(self, num_tokens: int) -> int:
+        """Rows a non-first PP stage's persistent receive buffers need.
+
+        Under SP the stages exchange SP-local rows (see ``forward``); dummy runs
+        and graph capture narrow full-size slices to the same
+        ``cdiv(num_tokens, tp)`` rows, so a full-size buffer is never read
+        past that.
+        """
+        if self.use_sequence_parallel:
+            return cdiv(num_tokens, get_tensor_model_parallel_world_size())
+        return num_tokens
+
+    def _persist_captured_output(self, packed: torch.Tensor) -> torch.Tensor:
+        """Route a captured graph's gathered output through one shared buffer.
+
+        Captured graphs keep their outputs alive for replay, so a fresh
+        ``[num_tokens, (1 + num_aux) * hidden]`` all-gather result per capture
+        size would stay pinned in the graph pool. Copying into one buffer sized
+        by the first (largest) capture lets the gather output be reused inside
+        the pool. Eager forwards return ``packed`` unchanged.
+        """
+        if not torch.cuda.is_current_stream_capturing():
+            return packed
+        buf = self._sp_capture_output
+        num_tokens, width = packed.shape
+        if (
+            buf is None
+            or buf.shape[0] < num_tokens
+            or buf.shape[1] != width
+            or buf.dtype != packed.dtype
+        ):
+            # Graphs are captured largest-first, so this allocates once.
+            buf = torch.empty((num_tokens, width), dtype=packed.dtype, device=packed.device)
+            self._sp_capture_output = buf
+        out = buf[:num_tokens]
+        out.copy_(packed)
+        return out
 
     def make_empty_intermediate_tensors(
         self,
@@ -1219,12 +1271,27 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
                 forward_context.is_padding = sp_padding_mask(
-                    forward_context.is_padding, hidden_states
+                    forward_context.is_padding, positions
                 )
-            hidden_states = sp_shard(hidden_states)
-            assert residual is None, "Currently, SP is not supported with PP"
+            if get_pp_group().is_first_rank:
+                hidden_states = sp_shard(hidden_states)
+                assert residual is None
+            else:
+                # PP stages exchange SP-local rows directly between matching
+                # TP ranks. Dummy runs and graph capture hand in full-size
+                # persistent buffers, so narrow both cases to the local rows.
+                local_num_tokens = cdiv(
+                    full_num_tokens, get_tensor_model_parallel_world_size()
+                )
+                assert hidden_states.shape[0] >= local_num_tokens
+                hidden_states = hidden_states[:local_num_tokens]
+                assert residual is not None
+                assert residual.shape[0] >= local_num_tokens
+                residual = residual[:local_num_tokens]
 
         remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+        if self.use_sequence_parallel:
+            remote_aux = [t[: hidden_states.shape[0]] for t in remote_aux]
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
@@ -1276,9 +1343,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         assert hidden_states is not None
         assert residual is not None
         if not get_pp_group().is_last_rank:
-            assert not self.use_sequence_parallel, (
-                "Currently, SP is not supported with PP"
-            )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
             return IntermediateTensors(
@@ -1306,6 +1370,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         else:
             hidden_states = hidden_states + residual
 
+        # Under SP the remote (earlier PP stage) aux states are SP-local rows
+        # too, so gather them together with the local ones.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
@@ -1314,6 +1381,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 )
                 packed_hidden_states = sp_all_gather(packed_hidden_states)
                 packed_hidden_states = packed_hidden_states[:full_num_tokens]
+                packed_hidden_states = self._persist_captured_output(
+                    packed_hidden_states
+                )
                 hidden_states, *aux_hidden_states = packed_hidden_states.split(
                     hidden_size, dim=-1
                 )
@@ -1322,7 +1392,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 hidden_states = hidden_states[:full_num_tokens]
 
         # NOTE: the final norm is applied in compute_logits instead of here.
-        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
@@ -1514,6 +1583,9 @@ class KimiLinearForCausalLM(
         self.quant_config = quant_config
         self.model = KimiLinearModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.model.use_sequence_parallel
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -1775,6 +1847,9 @@ class KimiK3ForConditionalGeneration(
             )
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.language_model.make_empty_intermediate_tensors
+        )
+        self.pp_intermediate_tensors_are_sequence_sharded = (
+            self.language_model.pp_intermediate_tensors_are_sequence_sharded
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
 

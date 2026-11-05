@@ -818,6 +818,15 @@ class SupportsPP(Protocol):
         MRO of your model class.
     """
 
+    pp_intermediate_tensors_are_sequence_sharded: bool = False
+    """Whether all PP intermediate tensors hold only this TP rank's tokens.
+
+    When True, matching TP ranks exchange their local tensors directly, without
+    the TP slicing / all-gather transport optimization (which assumes the
+    tensors are replicated across TP ranks). Hidden states, residuals and
+    auxiliary outputs must then share one token-local layout.
+    """
+
     make_empty_intermediate_tensors: _MakeEmptyIntermediateTensors
     """Called when PP rank > 0 for profiling purposes."""
 
