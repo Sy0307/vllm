@@ -738,7 +738,6 @@ class KimiDecoderLayer(nn.Module):
         layer_idx = self.layer_idx
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
         self.is_moe_layer = (
             self.is_moe
             and config.num_experts is not None
@@ -1162,7 +1161,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             or buf.dtype != packed.dtype
         ):
             # Graphs are captured largest-first, so this allocates once.
-            buf = torch.empty((num_tokens, width), dtype=packed.dtype, device=packed.device)
+            buf = torch.empty(
+                (num_tokens, width), dtype=packed.dtype, device=packed.device
+            )
             self._sp_capture_output = buf
         out = buf[:num_tokens]
         out.copy_(packed)
