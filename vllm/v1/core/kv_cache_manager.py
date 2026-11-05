@@ -15,7 +15,11 @@ from vllm.v1.core.kv_cache_coordinator import (
 )
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_null_head
-from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+from vllm.v1.core.single_type_kv_cache_manager import (
+    _MAMBA_CKPT_HOLD,
+    _MAMBA_CKPT_REFRESH,
+    MambaManager,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
@@ -635,6 +639,31 @@ class KVCacheManager:
 
         """
         self.coordinator.free(request.request_id)
+        if _MAMBA_CKPT_HOLD:
+            # After the request's own blocks: the held state becomes the
+            # youngest entry and outlives the attention prefix it gates.
+            self.block_pool.free_blocks(self.pop_held_mamba_states(request))
+        if _MAMBA_CKPT_REFRESH:
+            # Likewise move the released checkpoints to the LRU tail.
+            self.block_pool.requeue_cached_blocks(
+                self.pop_released_mamba_states(request)
+            )
+
+    def pop_held_mamba_states(self, request: Request) -> list[KVCacheBlock]:
+        """Mamba state blocks the request kept referenced (HOLD)."""
+        held: list[KVCacheBlock] = []
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                held.extend(manager.pop_held_state(request.request_id))
+        return held
+
+    def pop_released_mamba_states(self, request: Request) -> list:
+        """Hashed Mamba states the request released before finishing (REFRESH)."""
+        entries: list = []
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                entries.extend(manager.pop_released_states(request.request_id))
+        return entries
 
     def remove_skipped_blocks(
         self,

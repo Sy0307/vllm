@@ -6738,3 +6738,40 @@ def test_get_unhashed_block_ids_all_groups():
     )
 
     assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
+
+
+def test_requeue_cached_blocks_moves_still_cached_blocks_to_lru_tail():
+    # Hybrid prefix caching: a Mamba checkpoint released mid-request must
+    # outlive the attention prefix it gates, so it is re-queued at the LRU
+    # tail when the request is freed (VLLM_K3_MAMBA_CKPT_REFRESH).
+    pool = BlockPool(num_gpu_blocks=6, enable_caching=True, hash_block_size=16)
+    num_free = pool.get_num_free_blocks()
+    ckpt, attn0, attn1, stale = pool.get_new_blocks(4)
+    ckpt_hash = make_block_hash_with_group_id(BlockHash(b"ckpt"), 1)
+    stale_hash = make_block_hash_with_group_id(BlockHash(b"stale"), 1)
+    for block, h in (
+        (ckpt, ckpt_hash),
+        (attn0, make_block_hash_with_group_id(BlockHash(b"a0"), 0)),
+        (attn1, make_block_hash_with_group_id(BlockHash(b"a1"), 0)),
+        (stale, stale_hash),
+    ):
+        block.set_block_hash(h)
+        pool.cached_block_hash_to_block.insert(h, block)
+
+    # The checkpoint is released first (prefill moved past it), then the
+    # request's attention blocks when it finishes.
+    pool.free_blocks([ckpt, stale])
+    pool.free_blocks([attn0, attn1])
+    tail = pool.free_block_queue.get_all_free_blocks()[-4:]
+    assert tail == [ckpt, stale, attn0, attn1]
+
+    # `stale` was re-hashed after release: skipped. `ckpt` moves to the tail.
+    stale.reset_hash()
+    moved = pool.requeue_cached_blocks([(ckpt, ckpt_hash), (stale, stale_hash)])
+    assert moved == 1
+    assert pool.free_block_queue.get_all_free_blocks()[-1] is ckpt
+    assert pool.get_num_free_blocks() == num_free
+
+    # A block that is referenced again is not in the free queue: skipped.
+    pool.touch([ckpt])
+    assert pool.requeue_cached_blocks([(ckpt, ckpt_hash)]) == 0

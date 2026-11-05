@@ -40,6 +40,10 @@ from vllm.v1.core.encoder_cache_manager import (
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.single_type_kv_cache_manager import (
+    _MAMBA_CKPT_HOLD,
+    _MAMBA_CKPT_REFRESH,
+)
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -80,6 +84,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+class _RequeueEntries(list):
+    """Deferred-free entry: (block, hash) pairs to move to the LRU tail."""
 
 
 class Scheduler(SchedulerInterface):
@@ -3241,6 +3249,16 @@ class Scheduler(SchedulerInterface):
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
         if blocks:
             self.deferred_frees.append((self.sched_step_seq, blocks))
+        if _MAMBA_CKPT_HOLD:
+            held = self.kv_cache_manager.pop_held_mamba_states(request)
+            if held:
+                self.deferred_frees.append((self.sched_step_seq, held))
+        if _MAMBA_CKPT_REFRESH:
+            released = self.kv_cache_manager.pop_released_mamba_states(request)
+            if released:
+                self.deferred_frees.append(
+                    (self.sched_step_seq, _RequeueEntries(released))
+                )
 
     def _free_cow_retained_blocks(
         self, blocks: list[KVCacheBlock], fence_seq: int
@@ -3265,6 +3283,9 @@ class Scheduler(SchedulerInterface):
             if fence > self.processed_step_seq:
                 break
             _, blocks = self.deferred_frees.popleft()
+            if isinstance(blocks, _RequeueEntries):
+                self.kv_cache_manager.block_pool.requeue_cached_blocks(blocks)
+                continue
             # Free in reverse order so that the tail blocks are evicted first.
             self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
 

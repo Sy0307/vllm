@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
@@ -45,6 +46,19 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
+
+# Mamba "align" checkpoints are released to the LRU queue as soon as prefill
+# moves past them, while the request's attention blocks stay referenced until it
+# finishes, so the one state block a later prefix hit needs is evicted before
+# the attention prefix it gates ("all or nothing" hybrid prefix caching). With
+# REFRESH the manager remembers the hashed states it released and they are
+# re-queued at the LRU tail when the request is freed (no capacity is held).
+# HOLD keeps the newest released state of a request referenced until the
+# request is freed (one block per request and Mamba group).
+# Ported from our K3 B200 release; same env names as the K3 deployment.
+_MAMBA_CKPT_REFRESH = os.environ.get("VLLM_K3_MAMBA_CKPT_REFRESH", "0") == "1"
+_MAMBA_CKPT_HOLD = os.environ.get("VLLM_K3_MAMBA_CKPT_HOLD", "0") == "1"
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -1465,6 +1479,12 @@ class MambaManager(SingleTypeKVCacheManager):
             # checkpoint position and reserved block index for the current
             # allocation.
             self._checkpoints: dict[str, tuple[int, int]] = {}
+            # Hashed states released before the request finished (REFRESH).
+            self._released_states: dict[
+                str, list[tuple[KVCacheBlock, BlockHashWithGroupId]]
+            ] = {}
+            # Newest released state, held until the request is freed (HOLD).
+            self._held_state: dict[str, KVCacheBlock] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
@@ -1610,6 +1630,47 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return mask
 
+    def _free_released_states(
+        self, request_id: str, blocks: list[KVCacheBlock]
+    ) -> None:
+        """Return retired state blocks (newest first) to the pool. With HOLD the
+        newest hashed one stays referenced and the one it supersedes is
+        released instead; with REFRESH the released hashed ones are recorded
+        so they can be re-queued when the request is freed."""
+        if _MAMBA_CKPT_HOLD:
+            newest = next(
+                (b for b in blocks if b.block_hash is not None and not b.is_null),
+                None,
+            )
+            if newest is not None:
+                blocks = [b for b in blocks if b is not newest]
+                previous = self._held_state.get(request_id)
+                self._held_state[request_id] = newest
+                if previous is not None:
+                    blocks.append(previous)
+        if _MAMBA_CKPT_REFRESH:
+            released = None
+            for block in blocks:
+                if block.block_hash is not None and not block.is_null:
+                    if released is None:
+                        released = self._released_states.setdefault(request_id, [])
+                    released.append((block, block.block_hash))
+        if blocks:
+            self.block_pool.free_blocks(blocks)
+
+    def pop_held_state(self, request_id: str) -> list[KVCacheBlock]:
+        if self.mamba_cache_mode != "align":
+            return []
+        held = self._held_state.pop(request_id, None)
+        return [] if held is None else [held]
+
+    def pop_released_states(
+        self, request_id: str
+    ) -> list[tuple[KVCacheBlock, BlockHashWithGroupId]]:
+        if self.mamba_cache_mode != "align":
+            return []
+        return self._released_states.pop(request_id, [])
+
     def _remove_blocks_in_range(
         self, request_id: str, first_block: int, last_block: int
     ) -> None:
@@ -1628,7 +1689,7 @@ class MambaManager(SingleTypeKVCacheManager):
             freed.append(blocks[i])
             blocks[i] = self._null_block
         if freed:
-            self.block_pool.free_blocks(freed)
+            self._free_released_states(request_id, freed)
         self._num_retired_blocks[request_id] = last_block
 
     def remove_skipped_blocks(
@@ -1658,7 +1719,9 @@ class MambaManager(SingleTypeKVCacheManager):
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                    self._free_released_states(
+                        request_id, [blocks[last_state_block_idx]]
+                    )
                     blocks[last_state_block_idx] = self._null_block
 
     def _needs_internal_checkpoint(
