@@ -407,7 +407,7 @@ def is_flashinfer_recurrent_kda_prefill_supported(
         compute_capability in ((10, 0), (10, 3))
         and head_dim == 128
         and input_dtype == torch.bfloat16
-        and recurrent_state_dtype == torch.bfloat16
+        and recurrent_state_dtype in (torch.bfloat16, torch.float32)
         and lower_bound is not None
     )
 
@@ -519,8 +519,8 @@ def resolve_kda_prefill_backend(
     if backend == "flashinfer" and not flashinfer_supported:
         raise RuntimeError(
             "FlashInfer KDA prefill requires CUDA SM100 or SM103, bfloat16 "
-            "activations and recurrent state, head_dim=128, a bounded KDA "
-            "gate, and flashinfer-python 0.6.18 or newer."
+            "activations, a bfloat16 or float32 recurrent state, head_dim=128, "
+            "a bounded KDA gate, and flashinfer-python 0.6.18 or newer."
         )
     if backend == "flashkda" and not flashkda_supported:
         raise RuntimeError(
