@@ -27,6 +27,10 @@ GVR2_PREFILL_MIN_ROWS = 1024
 # back to persistent_topk past it; explicit ``cooperative`` requests are
 # validated against the same bound.
 AUTO_COOPERATIVE_MAX_ROWS = 64
+# On SM100 under TP, cooperative_topk (and DeepSelect) on 1-row decodes skew the
+# ranks by ~0.5 ms per step before the next all-reduce (Kimi K3.1, 8x B200);
+# persistent_topk has no skew and is also faster per call up to a few rows.
+AUTO_PERSISTENT_MAX_ROWS = 4
 
 # ---------------------------------------------------------------------------
 # DeepSelect (vllm._deepselect_C)
@@ -297,6 +301,8 @@ class SparseIndexerTopk(torch.nn.Module):
     ) -> str:
         """The priority chain: cooperative -> persistent -> per_row.
         aiter/deep_select/flashinfer/flashinfer_gvr2/torch are opt-in only.
+        On SM100, batches of at most AUTO_PERSISTENT_MAX_ROWS rows go to
+        persistent_topk first.
 
         cooperative_topk is preferred whenever it is applicable, i.e. within
         its AUTO_COOPERATIVE_MAX_ROWS row limit; larger batches go to
@@ -305,9 +311,16 @@ class SparseIndexerTopk(torch.nn.Module):
         aiter not auto-resolved as it does not outperform the per-row on every shape,
         hence we delegate to the caller to decide when to use it.
         """
+        persistent_ok = self._is_cuda and topk_tokens in (512, 1024, 2048)
+        if (
+            persistent_ok
+            and num_rows <= AUTO_PERSISTENT_MAX_ROWS
+            and current_platform.is_device_capability_family(100)
+        ):
+            return "persistent"
         if not self._cooperative_constraints(logits, topk_tokens, num_rows):
             return "cooperative"
-        if self._is_cuda and topk_tokens in (512, 1024, 2048):
+        if persistent_ok:
             return "persistent"
         return "per_row"
 

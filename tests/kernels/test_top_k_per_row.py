@@ -2755,6 +2755,15 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
             resolve("auto", k=512, num_rows=AUTO_COOPERATIVE_MAX_ROWS) == "cooperative"
         )
         assert resolve("auto", k=512, num_rows=8) == "cooperative"
+        # SM100 runs the smallest batches on persistent (no TP rank skew).
+        from vllm.model_executor.layers.indexer_topk import (
+            AUTO_PERSISTENT_MAX_ROWS,
+        )
+
+        small = "persistent" if is_sm100 else "cooperative"
+        assert resolve("auto", num_rows=1) == small
+        assert resolve("auto", num_rows=AUTO_PERSISTENT_MAX_ROWS) == small
+        assert resolve("auto", num_rows=AUTO_PERSISTENT_MAX_ROWS + 1) == "cooperative"
         # ...persistent past the row limit, even where DeepSelect would be
         # applicable.
         assert (
