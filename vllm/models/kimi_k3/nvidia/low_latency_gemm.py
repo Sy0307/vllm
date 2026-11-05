@@ -783,7 +783,8 @@ def run_kda_projection_overlap(
     f_b_weight: torch.Tensor,
     aux_stream: torch.cuda.Stream,
     events: tuple[torch.cuda.Event, torch.cuda.Event],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    with_f_a: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """Run the TP8 KDA decode projection branches concurrently.
 
     Args:
@@ -793,9 +794,12 @@ def run_kda_projection_overlap(
         f_b_weight: F_B weight with shape ``[1536, 128]``.
         aux_stream: Stream for the F_A/beta then F_B branch.
         events: Start and completion events for the stream fork and join.
+        with_f_a: Also return the F_A projection (the gate input the KdaWide
+            RecoverSSM verify projects itself).
 
     Returns:
-        The Q/K/V/G projection, F_B output, and beta projection.
+        The Q/K/V/G projection, F_B output, and beta projection, then the F_A
+        projection with ``with_f_a``.
 
     """
     num_tokens = hidden_states.shape[0]
@@ -822,7 +826,7 @@ def run_kda_projection_overlap(
             )
         return torch.mm(hidden_states, qkvg_weight.t())
 
-    def run_fab_fb() -> tuple[torch.Tensor, torch.Tensor]:
+    def run_fab_fb() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if num_tokens == 1:
             projected_fab = shape_dynamic_skinny_gemm(
                 hidden_states,
@@ -851,20 +855,22 @@ def run_kda_projection_overlap(
                     hidden_states,
                     packed_weight[_KDA_QKVG_SIZE:].t(),
                 )
-            beta = projected_fab[:, 128:140]
+            f_a, beta = projected_fab[:, :128], projected_fab[:, 128:140]
             if num_tokens <= KDA_SKINNY_K_MAX_TOKENS:
                 g1 = kda_skinny_gemm.run_k(projected_fab, f_b_weight)
             else:
-                g1 = torch.mm(projected_fab[:, :128], f_b_weight.t())
-        return g1, beta
+                g1 = torch.mm(f_a, f_b_weight.t())
+        return g1, beta, f_a
 
-    projected_qkvg, (g1, beta) = maybe_execute_in_parallel(
+    projected_qkvg, (g1, beta, f_a) = maybe_execute_in_parallel(
         run_qkvg,
         run_fab_fb,
         events[0],
         events[1],
         aux_stream,
     )
+    if with_f_a:
+        return projected_qkvg, g1, beta, f_a
     return projected_qkvg, g1, beta
 
 

@@ -65,16 +65,24 @@ class KdaWide:
     """``tokens`` q (1: single-token decode with slots [B]; > 1: verify with slots
     [B, >= q] and accepted [B]); ``record``: RecoverSSM verify (checkpoint slot,
     records out); ``gate_mode`` as KdaSplit's F_B reduction order (0: one chain of
-    eight MMAs, 1: four chains of two)."""
+    eight MMAs, 1: four chains of two); ``norm``: apply the gated RMSNorm, else
+    write the BF16 recurrence output (the gate and norm weight are not read)."""
 
     def __init__(
-        self, heads, tokens=1, record=False, gate_mode=0, has_bias=False, ahead=0
+        self,
+        heads,
+        tokens=1,
+        record=False,
+        gate_mode=0,
+        has_bias=False,
+        ahead=0,
+        norm=True,
     ):
         if not 1 <= tokens <= 8:
             raise ValueError(f"KdaWide supports 1-8 tokens per request; got {tokens}")
         assert gate_mode in (0, 1) and (tokens > 1 or not record)
         self.heads, self.tokens, self.record = heads, tokens, record
-        self.gate_mode, self.has_bias = gate_mode, has_bias
+        self.gate_mode, self.has_bias, self.norm = gate_mode, has_bias, norm
         # CTAs resident at once: each prefetches into L2 the state (and conv rows)
         # of the item that many CTAs later, which runs in the next wave.
         self.ahead = ahead
@@ -152,7 +160,9 @@ class KdaWide:
                     if cutlass.const_expr(self.has_bias):
                         for t in cutlass.range_constexpr(T):
                             accum[s, t] = Float32(bias[conv_channel])
-            nw = norm_weight[channel]
+            nw = Float32(0)
+            if cutlass.const_expr(self.norm):
+                nw = norm_weight[channel]
             a = a_log[head]
             dt = [dt_bias[head * 128 + 16 * warp + lane // 4 + 8 * i] for i in range(2)]
 
@@ -173,7 +183,8 @@ class KdaWide:
             for t in cutlass.range_constexpr(T):
                 inputs[0, t] = x[token + t, 2 * section * dim + head * 128 + channel]
                 inputs[1, t] = x[token + t, dim + head * 128 + channel]  # k (section 0)
-                gates.append(gate[token + t, head * 128 + channel])
+                if cutlass.const_expr(self.norm):
+                    gates.append(gate[token + t, head * 128 + channel])
             if (section == 1) & (channel < T):
                 shared_beta[channel] = triton_sigmoid(
                     Float32(beta[token + channel, head])
@@ -321,12 +332,13 @@ class KdaWide:
 
             # Gated RMSNorm (threads 0-127: channel c of each token) and the
             # convolution window [tap 1, tap 2, x_0, ..., x_q-1] of every channel.
-            if section == 0:
-                for t in cutlass.range_constexpr(T):
-                    o = shared_o[t, channel]
-                    total = warp_sum(o * o)
-                    if lane == 0:
-                        out_sums[t, warp] = total
+            if cutlass.const_expr(self.norm):  # noqa: SIM102
+                if section == 0:
+                    for t in cutlass.range_constexpr(T):
+                        o = shared_o[t, channel]
+                        total = warp_sum(o * o)
+                        if lane == 0:
+                            out_sums[t, warp] = total
             for s in cutlass.range_constexpr(2):
                 if (section == 0) | (s == 0):
                     conv_channel = (2 * section + s) * dim + head * 128 + channel
@@ -337,12 +349,18 @@ class KdaWide:
             cute.arch.barrier()
             if section == 0:
                 for t in cutlass.range_constexpr(T):
-                    sumsq = self.quad_sum(out_sums[t, None])
-                    variance = sumsq * (1.0 / 128) + eps
-                    rstd = reciprocal(sqrt_approx(variance))
-                    sigmoid_gate = triton_sigmoid(Float32(gates[t]))
-                    result = shared_o[t, channel] * rstd * nw * sigmoid_gate
-                    output[token + t, head * 128 + channel] = BFloat16(result)
+                    if cutlass.const_expr(self.norm):
+                        sumsq = self.quad_sum(out_sums[t, None])
+                        variance = sumsq * (1.0 / 128) + eps
+                        rstd = reciprocal(sqrt_approx(variance))
+                        sigmoid_gate = triton_sigmoid(Float32(gates[t]))
+                        result = shared_o[t, channel] * rstd * nw * sigmoid_gate
+                        output[token + t, head * 128 + channel] = BFloat16(result)
+                    else:
+                        # shared_o already holds the BF16-rounded output.
+                        output[token + t, head * 128 + channel] = BFloat16(
+                            shared_o[t, channel]
+                        )
 
     @cute.jit
     def prefetch_next(self, args, head, request):

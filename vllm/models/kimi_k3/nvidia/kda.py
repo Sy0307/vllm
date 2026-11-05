@@ -65,6 +65,10 @@ from vllm.models.kimi_k3.nvidia.recoverssm.kernels import (
     can_use_cute_recoverssm,
     compile_state_commit,
 )
+from vllm.models.kimi_k3.nvidia.recoverssm.wide_verify import (
+    WideRecoverSSMVerify,
+    wide_verify_unsupported,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -794,10 +798,36 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     self.conv1d.weight.device,
                     align=self.cache_config.mamba_cache_mode == "align",
                 )
+        # The Triton verify's steps run on KdaWide where it can (FP32 state,
+        # row- or slot-addressed records); the commit stays Triton.
+        self.recoverssm_wide: WideRecoverSSMVerify | None = None
+        if self.recoverssm_backend == "triton":
+            wide_reason = wide_verify_unsupported(
+                head_dim=self.head_dim,
+                conv_width=self.conv_size,
+                window=self.spec_query_len,
+                activation_dtype=vllm_config.model_config.dtype,
+                conv_state_dtype=conv_state_dtype,
+                state_dtype=recurrent_state_dtype,
+                lower_bound=self.gate_lower_bound,
+                f_b_weight=self.f_b_proj.weight,
+            )
+            if wide_reason is None:
+                self.recoverssm_wide = WideRecoverSSMVerify(self)
+                logger.info_once(
+                    "Using the KdaWide KDA RecoverSSM verify (CuTe, FP32 state); "
+                    "the commit stays Triton."
+                )
+            else:
+                logger.info_once(
+                    "Using the Triton KDA RecoverSSM verify: KdaWide cannot run (%s).",
+                    wide_reason,
+                )
         decode_conv1d_weight = None
         if (
             self.kda_decode_backend != "triton"
             or self.kda_spec_decode_backend == "flashinfer"
+            or self.recoverssm_wide is not None
         ):
             decode_conv1d_weight = torch.empty(
                 3,
@@ -950,12 +980,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 run_kda_projection_overlap,
             )
 
-            projected_qkvg, g1, beta = run_kda_projection_overlap(
+            projected_qkvg, g1, beta, f_a = run_kda_projection_overlap(
                 hidden_states,
                 self.in_proj_qkvgfab.weight,
                 self.f_b_proj.weight,
                 projection_aux_stream,
                 projection_events,
+                with_f_a=True,
             )
             mixed_qkv, g_proj_states = projected_qkvg.split(
                 [3 * self.local_projection_size, self.local_projection_size],
@@ -989,6 +1020,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             g2=g2,
             beta=beta,
             core_attn_out=core_attn_out,
+            f_a=f_a,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(core_attn_out):
@@ -1004,6 +1036,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         conv_weight: torch.Tensor,
         query_start_loc: torch.Tensor,
         out: torch.Tensor | None,
+        f_a: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """RecoverSSM verify of the speculative requests: the short convolution
         and the KDA recurrence from each request's checkpoint, which is left
@@ -1021,6 +1054,29 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         records = self.recoverssm_records
         assert records is not None
         conv_state, state = self.kv_cache[:2]
+        # KdaWide verifies q tokens per request: every speculative request
+        # must have all q (CUDA graph padding tokens trail the real ones).
+        num_spec_tokens = m.num_spec_decodes * self.spec_query_len
+        if (
+            self.recoverssm_wide is not None
+            and f_a is not None
+            and m.num_spec_decode_tokens == num_spec_tokens <= num_tokens
+            and self.recoverssm_wide(
+                x=mixed_qkv[:num_spec_tokens],
+                f_a=f_a[:num_spec_tokens],
+                raw_beta=raw_beta[0, :num_spec_tokens],
+                state_indices=state_indices,
+                num_accepted_tokens=m.num_accepted_tokens,
+                conv_state=conv_state
+                if is_conv_state_dim_first()
+                else conv_state.transpose(-1, -2),
+                state=state,
+                records=records,
+                record_rows=m.recoverssm_record_rows,
+                out=out[0, :num_spec_tokens].flatten(-2),
+            )
+        ):
+            return out
         if self.recoverssm_backend == "cute":
             assert self.recoverssm_verify is not None
             assert self.gate_lower_bound is not None
@@ -1092,6 +1148,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        f_a: torch.Tensor | None = None,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1126,11 +1183,43 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
+        if f_a is not None:
+            f_a = f_a[:num_actual_tokens]
 
         conv_state, recurrent_state = self.kv_cache[:2]
         # The convolution kernels consume (..., dim, width - 1).
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
+
+        num_spec_tokens = m.num_spec_decodes * self.spec_query_len
+        if (
+            self.recoverssm_wide is not None
+            and f_a is not None
+            and has_spec_decode
+            and m.num_prefills == 0
+            and m.num_decodes == 0
+            # Every request verifies all q tokens; CUDA graph padding tokens
+            # trail them and are left unwritten, as by the Triton verify.
+            and m.num_spec_decode_tokens == num_spec_tokens <= num_actual_tokens
+        ):
+            # Only verify rows: KdaWide also applies the gated RMSNorm.
+            assert spec_state_indices_tensor is not None
+            assert num_accepted_tokens is not None
+            assert self.recoverssm_records is not None
+            if self.recoverssm_wide(
+                x=mixed_qkv[:num_spec_tokens],
+                f_a=f_a[:num_spec_tokens],
+                raw_beta=beta[0, :num_spec_tokens],
+                state_indices=spec_state_indices_tensor[: m.num_spec_decodes, 0],
+                num_accepted_tokens=num_accepted_tokens,
+                conv_state=conv_state,
+                state=recurrent_state,
+                records=self.recoverssm_records,
+                record_rows=m.recoverssm_record_rows,
+                out=core_attn_out[0, :num_spec_tokens].flatten(-2),
+                output_gate=g2[:num_spec_tokens].flatten(-2),
+            ):
+                return
 
         if (
             self.kda_spec_decode_backend == "flashinfer"
@@ -1223,10 +1312,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         )
 
         # Separate multi-query speculative tokens from prefill/plain decode.
+        f_a_spec = None
         if has_spec_decode:
             if m.num_prefills == 0 and m.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
-                g1_spec, beta_spec = g1, beta
+                g1_spec, beta_spec, f_a_spec = g1, beta, f_a
                 mixed_qkv_ns = g1_ns = beta_ns = None
             elif spec_token_start is not None:
                 assert non_spec_token_start is not None
@@ -1238,6 +1328,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 non_spec_slice = slice(non_spec_token_start, non_spec_end)
                 mixed_qkv_spec = mixed_qkv[spec_slice]
                 g1_spec, beta_spec = g1[:, spec_slice], beta[:, spec_slice]
+                if f_a is not None:
+                    f_a_spec = f_a[spec_slice]
                 mixed_qkv_ns = mixed_qkv[non_spec_slice]
                 g1_ns, beta_ns = g1[:, non_spec_slice], beta[:, non_spec_slice]
             else:
@@ -1246,6 +1338,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
                 g1_spec = g1.index_select(1, spec_token_indx)
                 beta_spec = beta.index_select(1, spec_token_indx)
+                if f_a is not None:
+                    f_a_spec = f_a.index_select(0, spec_token_indx)
                 mixed_qkv_ns = mixed_qkv.index_select(0, non_spec_token_indx)
                 g1_ns = g1.index_select(1, non_spec_token_indx)
                 beta_ns = beta.index_select(1, non_spec_token_indx)
@@ -1275,6 +1369,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     conv_weights,
                     spec_cu_seqlens,
                     spec_out,
+                    f_a=f_a_spec,
                 )
             else:
                 mixed_qkv_spec = causal_conv1d_update(
