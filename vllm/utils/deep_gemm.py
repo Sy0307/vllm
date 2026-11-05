@@ -743,9 +743,10 @@ def fp8_fp4_mqa_logits(
 
 # Query rows per CTA task of the unscheduled SM100 MQA logits kernel.
 _MQA_LOGITS_BLOCK_Q = 4
-# Shortest K range worth a scheduled launch: below it a 4-row task scans its
-# keys about as fast as the metadata kernel runs.
-_MQA_LOGITS_SCHEDULE_MIN_KEYS = 16384
+# Shortest K range worth a scheduled launch. On B200 the scheduled call costs
+# ~0.04 ms with its metadata kernel, which an unscheduled 4-row task matches
+# at ~25K keys (6 rows: 20K keys 0.033 vs 0.039 ms, 120K keys 0.17 vs 0.04).
+_MQA_LOGITS_SCHEDULE_MIN_KEYS = 32768
 
 
 def get_mqa_logits_metadata(
