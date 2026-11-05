@@ -1088,9 +1088,11 @@ def test_wide_verify_matches_triton(batch, slot_rows, dim_first, norm):
 @pytest.mark.parametrize("norm", [False, True])
 @torch.inference_mode()
 def test_wide_verify_random_gates(norm):
-    """Arbitrary F_A / F_B: KdaWide's mma.sync gate projection rounds to the F_B
-    GEMM's BF16 gate except at rounding ties (one ulp), which move a head's
-    later outputs slightly."""
+    """Arbitrary F_A / F_B: KdaWide's mma.sync gate projection and the F_B GEMM
+    are FP32 reductions of the same 128 BF16 products in different orders. They
+    round to the same BF16 gate except at rounding ties (one ulp) and where the
+    products cancel (|raw_g| << sum |products|), where the reduction error spans
+    many ulps of the tiny result; either moves a head's later outputs slightly."""
     heads, window, batch = 12, 5, 96
     torch.manual_seed(11 + norm)
     slots, tokens = batch + 1, batch * window
@@ -1134,11 +1136,19 @@ def test_wide_verify_random_gates(norm):
     )
     torch.accelerator.synchronize()
 
-    # Raw gates: KdaWide's (records) against the F_B GEMM's.
+    # Raw gates: KdaWide's (records) against the F_B GEMM's, within one BF16 ulp
+    # plus the error of two FP32 reductions of 128 products (n u each, u doubled
+    # for the tensor cores' truncating accumulation).
     ours = records.key_gate[..., D:].reshape(batch, heads, window, D)
     gemm = raw_gate.view(batch, window, heads, D).transpose(1, 2)
+    products = f_a.float().abs() @ f_b.float().abs().T
+    products = products.view(batch, window, heads, D).transpose(1, 2)
+    ours_f, gemm_f = ours.float(), gemm.float()
+    ulp = torch.maximum(ours_f.abs(), gemm_f.abs()) * 2.0**-7
+    bound = ulp + 2 * D * 2.0**-23 * products
+    excess = ((ours_f - gemm_f).abs() / bound).max().item()
+    assert excess <= 1, f"raw gate {excess:.2f}x past the FP32 reduction bound"
     ulps = (ours.view(torch.int16).int() - gemm.view(torch.int16).int()).abs()
-    assert ulps.max().item() <= 1
     assert (ulps > 0).float().mean().item() < 1e-2
     _assert_matches(out.unflatten(-1, (heads, D)), expected, same=0.95, rms_max=0.1)
 

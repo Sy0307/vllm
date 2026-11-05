@@ -15,10 +15,11 @@ Triton commit, which reads the same records.
 Numerics follow the Triton formulas with the layer's FP32 conv1d weight (FP32
 products, BF16-rounded convolution outputs, raw gates and recurrence outputs);
 FP32 reduction orders differ, and the raw gate is recomputed from F_A on
-mma.sync instead of read from the F_B GEMM, so at rounding ties it can differ
-from it by one BF16 ulp. With a BF16 conv weight the Triton convolution rounds
-each product to BF16 and KdaWide would not match it, so such layers keep the
-Triton verify.
+mma.sync instead of read from the F_B GEMM: it differs from it by one BF16 ulp
+at rounding ties, and by the FP32 reduction-order error (about 2^-24 of
+sum |F_A F_B|) where the products cancel. With a BF16 conv weight the Triton
+convolution rounds each product to BF16 and KdaWide would not match it, so such
+layers keep the Triton verify.
 
 Launches go through TVM-FFI straight from the torch tensors on the current
 stream (as the CuTe verify does): pure speculative steps run inside FULL CUDA
