@@ -984,6 +984,10 @@ class _StubLookupClient:
         self.num_tokens: list[int] = []
         self.prefetched: list[tuple[str, int]] = []
         self.discarded: list[str] = []
+        self.skip_tokens: list[int] = []
+        # The local hit the pending lookup took as present (see
+        # LookupKeyClient.lookup_skip_tokens).
+        self.pending_skip_tokens = 0
 
     def discard(self, req_id):
         self.discarded.append(req_id)
@@ -998,9 +1002,14 @@ class _StubLookupClient:
         num_tokens: int,
         block_hashes: list[bytes],
         non_block: bool = False,
+        skip_tokens: int = 0,
     ) -> MooncakeLookupResult:
         self.num_tokens.append(num_tokens)
+        self.skip_tokens.append(skip_tokens)
         return MooncakeLookupResult(self._hit_tokens)
+
+    def lookup_skip_tokens(self, req_id: str) -> int:
+        return self.pending_skip_tokens
 
 
 def _make_admission_request(request_id="req-0"):
@@ -1026,6 +1035,26 @@ def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
     assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
     assert scheduler.load_specs[request.request_id].vllm_cached_tokens == 16
     assert scheduler.load_specs[request.request_id].can_load is False
+
+
+def test_lookup_reprobes_when_local_hit_shrank_below_skipped_prefix():
+    """The lookup took the local prefix hit as present without probing it. If
+    local blocks were evicted before the result is consumed, the gap was never
+    probed: the scheduler looks up again from its current local hit instead of
+    loading."""
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()
+
+    scheduler.client.pending_skip_tokens = 32
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (None, False)
+    assert scheduler.client.discarded == [request.request_id]
+    assert scheduler.client.skip_tokens == [16, 16]
+    assert scheduler.load_specs == {}
+
+    scheduler.client.pending_skip_tokens = 16
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
 
 
 @pytest.mark.parametrize(

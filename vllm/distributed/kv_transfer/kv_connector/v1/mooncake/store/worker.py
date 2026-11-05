@@ -22,7 +22,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import torch
 import zmq
@@ -106,6 +106,18 @@ logger = init_logger(__name__)
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
+
+# Debug: also probe every key of each lookup and warn on a different result.
+_LOOKUP_VERIFY = os.getenv("MOONCAKE_LOOKUP_VERIFY", "0") == "1"
+
+
+class _LookupUnit(NamedTuple):
+    """One (group, hash) a lookup probes; ``end_token`` ends its Store chunk."""
+
+    group: int
+    hash_bytes: bytes
+    hash_hex: str
+    end_token: int
 
 
 @dataclass(frozen=True)
@@ -2438,13 +2450,21 @@ class MooncakeStoreWorker:
         return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
     def lookup(
-        self, num_tokens: int, block_hashes: Sequence[BlockHash]
+        self,
+        num_tokens: int,
+        block_hashes: Sequence[BlockHash],
+        skip_tokens: int = 0,
     ) -> MooncakeLookupResult:
         """Check how many prefix tokens exist in the store.
 
-        Checks across all rank-specific key namespaces that may be loaded. A
-        hit covering all ``num_tokens`` is re-derived below the request end so
-        the last token is recomputed for sampling.
+        A (group, hash) counts only when every rank namespace that will load it
+        holds it. A hit covering all ``num_tokens`` is re-derived below the
+        request end so the last token is recomputed for sampling.
+
+        ``skip_tokens`` is the prefix the scheduler holds in its local prefix
+        cache. Whole pages below it are taken as present without a probe: the
+        scheduler never loads them, and re-looks up if its local hit shrinks
+        below ``skip_tokens`` before it consumes this result.
         """
         if self._capacity_only:
             return MooncakeLookupResult(0)
@@ -2453,85 +2473,21 @@ class MooncakeStoreWorker:
         if not block_hashes or token_len <= 0:
             return MooncakeLookupResult(0)
 
-        # Build per-(group, hash) candidate keys expanded across rank namespaces.
-        # candidate_meta stores (group, hash_bytes, end_token) for each key slice.
-        candidate_keys: list[str] = []
-        candidate_meta: list[tuple[int, bytes, int]] = []
-        fine_grained = self.coord.enable_partial_hash_hits
-        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
-        for g_idx, db in enumerate(self.token_dbs):
-            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
-                continue
-            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
-            key_prefixes = self._lookup_key_prefixes[g_idx]
-            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
-            unit_size = self.hash_block_size if fine_grained else db.chunk_size
-            max_units = (
-                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
-            )
-            for unit_id in range(max_units):
-                block_id = unit_id * unit_size // spec_block_size
-                if lookup_mask is not None and (
-                    block_id >= len(lookup_mask) or not lookup_mask[block_id]
-                ):
-                    continue
-                end_token = (unit_id + 1) * unit_size
-                h = block_hashes[end_token // self.hash_block_size - 1]
-                hash_hex = h.hex()
-                for key_prefix in key_prefixes:
-                    candidate_keys.append(
-                        PoolKey.build_key_string(key_prefix, hash_hex)
-                    )
-                candidate_meta.append((g_idx, bytes(h), end_token))
-
-        if not candidate_keys:
+        units = self._lookup_units(token_len, block_hashes)
+        if not units:
             return MooncakeLookupResult(0)
-
-        exists_fn = (
-            self.store.batch_is_exist
-            if self._selective_lease is None
-            else self._selective_lease.probe
-        )
-        lookup_start = time.perf_counter()
-        try:
-            res = exists_fn(candidate_keys)
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-            )
-        except Exception as e:
-            self._record_kv_connector_operation(
-                "lookup_exists",
-                time.perf_counter() - lookup_start,
-                len(candidate_keys),
-                status="error",
-                num_failed_keys=len(candidate_keys),
-            )
-            logger.error("Remote connection failed in lookup: %s", e)
+        if self._selective_lease is not None:
+            # Lease probes take leases as a side effect: probe every key once.
+            present = self._probe_all_namespaces(units, self._selective_lease.probe)
+        else:
+            present = self._probe_two_pass(units, block_hashes, token_len, skip_tokens)
+        if present is None:
             return MooncakeLookupResult(0)
-
-        # A (group, hash) is "present" only when every namespace that will be
-        # loaded has it (per-group count: sharded groups need every rank's
-        # shard, replicated groups one namespace per unique KV head).
-        exists_set = set()
-        pos = 0
-        previous_page = None
-        preceding_chunks_present = True
-        for g_idx, hash_bytes, end_token in candidate_meta:
-            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
-            page = (g_idx, (end_token - 1) // spec_block_size)
-            if page != previous_page:
-                preceding_chunks_present = True
-                previous_page = page
-            count = len(self._lookup_key_prefixes[g_idx])
-            present = all(res[pos + j] == 1 for j in range(count))
-            # A page-prefix hit covers every Store chunk before its final chunk.
-            if preceding_chunks_present and present:
-                exists_set.add((g_idx, hash_bytes))
-            if end_token % self.token_dbs[g_idx].chunk_size == 0:
-                preceding_chunks_present &= present
-            pos += count
+        exists_set = self._lookup_exists_set(units, present)
+        if _LOOKUP_VERIFY and self._selective_lease is None:
+            self._verify_lookup(
+                num_tokens, token_len, block_hashes, skip_tokens, units, exists_set
+            )
 
         hit, load_masks = self._longest_hit(
             num_tokens, token_len, block_hashes, exists_set
@@ -2545,6 +2501,208 @@ class MooncakeStoreWorker:
             exists_set,
             functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
         )
+
+    def _lookup_units(
+        self, token_len: int, block_hashes: Sequence[BlockHash]
+    ) -> list[_LookupUnit]:
+        """The (group, hash) units a lookup of ``token_len`` tokens probes, per
+        group in token order."""
+        units: list[_LookupUnit] = []
+        fine_grained = self.coord.enable_partial_hash_hits
+        lookup_masks = None if fine_grained else self.coord.lookup_mask(token_len)
+        for g_idx, db in enumerate(self.token_dbs):
+            if not self._kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
+                continue
+            spec_block_size = self._kv_cache_groups[g_idx].kv_cache_spec.block_size
+            lookup_mask = None if lookup_masks is None else lookup_masks[g_idx]
+            unit_size = self.hash_block_size if fine_grained else db.chunk_size
+            max_units = (
+                min(token_len, len(block_hashes) * self.hash_block_size) // unit_size
+            )
+            for unit_id in range(max_units):
+                block_id = unit_id * unit_size // spec_block_size
+                if lookup_mask is not None and (
+                    block_id >= len(lookup_mask) or not lookup_mask[block_id]
+                ):
+                    continue
+                end_token = (unit_id + 1) * unit_size
+                h = block_hashes[end_token // self.hash_block_size - 1]
+                units.append(_LookupUnit(g_idx, bytes(h), h.hex(), end_token))
+        return units
+
+    def _lookup_exists_set(
+        self, units: list[_LookupUnit], present: list[bool]
+    ) -> set[tuple[int, bytes]]:
+        """The stored (group, hash) pairs, given whether each unit is present in
+        every namespace: a page-prefix hit covers every Store chunk before its
+        final chunk, so a chunk only counts after all earlier chunks of its
+        page."""
+        exists_set = set()
+        previous_page = None
+        preceding_chunks_present = True
+        for unit, unit_present in zip(units, present):
+            spec_block_size = self._kv_cache_groups[unit.group].kv_cache_spec.block_size
+            page = (unit.group, (unit.end_token - 1) // spec_block_size)
+            if page != previous_page:
+                preceding_chunks_present = True
+                previous_page = page
+            if preceding_chunks_present and unit_present:
+                exists_set.add((unit.group, unit.hash_bytes))
+            if unit.end_token % self.token_dbs[unit.group].chunk_size == 0:
+                preceding_chunks_present &= unit_present
+        return exists_set
+
+    def _probe_keys(
+        self, keys: list[str], exists_fn: Callable[[list[str]], Any]
+    ) -> list[int] | None:
+        lookup_start = time.perf_counter()
+        try:
+            res = list(exists_fn(keys))
+        except Exception as e:
+            self._record_kv_connector_operation(
+                "lookup_exists",
+                time.perf_counter() - lookup_start,
+                len(keys),
+                status="error",
+                num_failed_keys=len(keys),
+            )
+            logger.error("Remote connection failed in lookup: %s", e)
+            return None
+        self._record_kv_connector_operation(
+            "lookup_exists", time.perf_counter() - lookup_start, len(keys)
+        )
+        return res
+
+    def _probe_all_namespaces(
+        self,
+        units: list[_LookupUnit],
+        exists_fn: Callable[[list[str]], Any] | None = None,
+    ) -> list[bool] | None:
+        """Probe every unit in every namespace that will load it (sharded groups
+        need every rank's shard, replicated groups one namespace per unique KV
+        head)."""
+        build_key = PoolKey.build_key_string
+        keys = [
+            build_key(prefix, unit.hash_hex)
+            for unit in units
+            for prefix in self._lookup_key_prefixes[unit.group]
+        ]
+        res = self._probe_keys(keys, exists_fn or self.store.batch_is_exist)
+        if res is None:
+            return None
+        present = []
+        pos = 0
+        for unit in units:
+            count = len(self._lookup_key_prefixes[unit.group])
+            present.append(all(r == 1 for r in res[pos : pos + count]))
+            pos += count
+        return present
+
+    def _probe_two_pass(
+        self,
+        units: list[_LookupUnit],
+        block_hashes: Sequence[BlockHash],
+        token_len: int,
+        skip_tokens: int,
+    ) -> list[bool] | None:
+        """Per-unit presence equivalent to ``_probe_all_namespaces`` for the hit
+        and its tail keys, with far fewer keys.
+
+        Pass 1 probes one namespace per unit; a unit missing there is missing.
+        The hit over the pass-1 presences bounds the exact hit from above (the
+        hit only grows with the exists set), and the hit and its tail keys only
+        depend on units up to the hit plus an EAGLE-dropped block and the rest
+        of the tail chunk. Pass 2 probes the other namespaces of the pass-1
+        units up to that bound plus two blocks; later units count as missing.
+        Units in whole pages below ``skip_tokens`` count as present unprobed.
+        """
+        known = [False] * len(units)
+        if skip_tokens > 0:
+            for i, unit in enumerate(units):
+                page = self._kv_cache_groups[unit.group].kv_cache_spec.block_size
+                known[i] = unit.end_token <= skip_tokens // page * page
+        probe_ids = [i for i, k in enumerate(known) if not k]
+        present1 = list(known)
+        if probe_ids:
+            build_key = PoolKey.build_key_string
+            res1 = self._probe_keys(
+                [
+                    build_key(
+                        self._lookup_key_prefixes[units[i].group][0], units[i].hash_hex
+                    )
+                    for i in probe_ids
+                ],
+                self.store.batch_is_exist,
+            )
+            if res1 is None:
+                return None
+            for i, r in zip(probe_ids, res1):
+                present1[i] = r == 1
+        _, bound = self.coord.find_longest_cache_hit(
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(
+                self.hash_block_size, self._lookup_exists_set(units, present1)
+            ),
+        )
+        present = list(known)
+        if bound <= 0:
+            return present
+        limit = bound + 2 * max(
+            self.coord.lcm_block_size, *(db.chunk_size for db in self.token_dbs)
+        )
+        keys2: list[str] = []
+        pending: list[tuple[int, int]] = []
+        for i in probe_ids:
+            unit = units[i]
+            if not present1[i] or unit.end_token > limit:
+                continue
+            rest = self._lookup_key_prefixes[unit.group][1:]
+            if not rest:
+                present[i] = True
+                continue
+            keys2.extend(PoolKey.build_key_string(p, unit.hash_hex) for p in rest)
+            pending.append((i, len(rest)))
+        if keys2:
+            res2 = self._probe_keys(keys2, self.store.batch_is_exist)
+            if res2 is None:
+                return None
+            pos = 0
+            for i, count in pending:
+                present[i] = all(r == 1 for r in res2[pos : pos + count])
+                pos += count
+        return present
+
+    def _verify_lookup(
+        self,
+        num_tokens: int,
+        token_len: int,
+        block_hashes: Sequence[BlockHash],
+        skip_tokens: int,
+        units: list[_LookupUnit],
+        exists_set: set[tuple[int, bytes]],
+    ) -> None:
+        """Debug (MOONCAKE_LOOKUP_VERIFY=1): compare with probing every key."""
+        present = self._probe_all_namespaces(units)
+        if present is None:
+            return
+        if skip_tokens > 0:
+            for i, unit in enumerate(units):
+                page = self._kv_cache_groups[unit.group].kv_cache_spec.block_size
+                present[i] |= unit.end_token <= skip_tokens // page * page
+        full, _ = self._longest_hit(
+            num_tokens, token_len, block_hashes, self._lookup_exists_set(units, present)
+        )
+        fast, _ = self._longest_hit(num_tokens, token_len, block_hashes, exists_set)
+        if fast != full:
+            logger.warning(
+                "Mooncake two-pass lookup differs from a full probe: %s vs %s "
+                "(num_tokens=%d, skip_tokens=%d)",
+                fast,
+                full,
+                num_tokens,
+                skip_tokens,
+            )
 
     def _longest_hit(
         self,
@@ -2715,7 +2873,14 @@ class LookupKeyServer:
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
                     blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
-                    result = self.store_worker.lookup(num_tokens, block_hashes)
+                    skip_tokens = (
+                        int.from_bytes(all_frames[4], byteorder="big")
+                        if len(all_frames) > 4
+                        else 0
+                    )
+                    result = self.store_worker.lookup(
+                        num_tokens, block_hashes, skip_tokens
+                    )
                     self.socket.send(encode_lookup_response(result))
 
                 elif msg_type == RESET_MSG:
@@ -2758,6 +2923,8 @@ class LookupKeyServer:
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, bytes]
+    # The local prefix hit the lookup skipped (see MooncakeStoreWorker.lookup).
+    skip_tokens: int = 0
     # Freshness runs from when the RPC returned, not when it was queued.
     completed_at: float | None = None
     error_logged: bool = False
@@ -2812,7 +2979,7 @@ class LookupKeyClient:
         self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
 
     def _lookup(
-        self, num_tokens: int, block_hashes: list[BlockHash]
+        self, num_tokens: int, block_hashes: list[BlockHash], skip_tokens: int = 0
     ) -> MooncakeLookupResult:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
@@ -2820,6 +2987,7 @@ class LookupKeyClient:
             num_tokens.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
+            max(0, skip_tokens).to_bytes(4, byteorder="big"),
         )
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
@@ -2831,9 +2999,12 @@ class LookupKeyClient:
         num_tokens: int,
         block_hashes: list[BlockHash],
         non_block: bool = False,
+        skip_tokens: int = 0,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
-        then cache it until expiry or discard()."""
+        then cache it until expiry or discard(). ``skip_tokens`` (the local
+        prefix hit) is fixed when the lookup is submitted; see
+        ``lookup_skip_tokens``."""
         now = time.monotonic()
         signature = _lookup_signature(num_tokens, block_hashes)
         state = self._lookups.get(req_id)
@@ -2849,9 +3020,10 @@ class LookupKeyClient:
         if state is None:
             state = LookupState(
                 future=self.executor.submit(
-                    self._lookup, num_tokens, list(block_hashes)
+                    self._lookup, num_tokens, list(block_hashes), skip_tokens
                 ),
                 signature=signature,
+                skip_tokens=skip_tokens,
             )
             self._lookups[req_id] = state
         if non_block and not state.future.done():
@@ -2888,6 +3060,11 @@ class LookupKeyClient:
             signature=_lookup_signature(num_tokens, block_hashes),
         )
         return True
+
+    def lookup_skip_tokens(self, req_id: str) -> int:
+        """The local prefix hit the pending lookup of ``req_id`` skipped."""
+        state = self._lookups.get(req_id)
+        return 0 if state is None else state.skip_tokens
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""

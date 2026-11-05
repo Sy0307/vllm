@@ -5012,15 +5012,137 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     worker.num_kv_head = 1
     worker.dcp_size = 4
     _refresh_group_tp_replication_factors(worker)
-    worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
-
-    assert worker.lookup(16, [b"a0"]).hit_length == 0
-    assert worker.store.batch_is_exist.call_args.args[0] == [
+    keys = [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
         "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0@6130",
         "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0@6130",
     ]
+    stored = {keys[0], keys[1], keys[3]}
+    worker.store.batch_is_exist.side_effect = lambda ks: [int(k in stored) for k in ks]
+
+    assert worker.lookup(17, [b"a0"]).hit_length == 0
+    probed = [
+        k for call in worker.store.batch_is_exist.call_args_list for k in call.args[0]
+    ]
+    assert sorted(probed) == keys
+
+    stored.add(keys[2])
+    assert worker.lookup(17, [b"a0"]).hit_length == 16
+
+
+def _two_pass_lookup_worker(
+    *, hash_block_size: int, mamba_block_size: int, use_eagle: bool, dcp: int
+):
+    worker = _make_bare_worker(block_size=16)
+    worker.hash_block_size = hash_block_size
+    worker.tp_size = dcp
+    worker.num_kv_head = 1
+    worker.dcp_size = dcp
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["attention"],
+            FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None),
+        ),
+        KVCacheGroupSpec(
+            ["mamba"],
+            MambaSpec(
+                block_size=mamba_block_size,
+                shapes=((1, 1),),
+                dtypes=(torch.float32,),
+                mamba_cache_mode="align",
+            ),
+        ),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            chunk_size=chunk_size,
+            hash_block_size=hash_block_size,
+        )
+        for group_id, chunk_size in enumerate(
+            (hash_block_size, max(hash_block_size, mamba_block_size))
+        )
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=16,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+        enable_partial_hash_hits=hash_block_size < 16,
+    )
+    _refresh_group_tp_replication_factors(worker)
+    return worker
+
+
+@pytest.mark.parametrize("hash_block_size", [4, 16])
+@pytest.mark.parametrize("mamba_block_size", [4, 16])
+@pytest.mark.parametrize("use_eagle", [False, True])
+def test_two_pass_lookup_matches_probing_every_namespace(
+    hash_block_size, mamba_block_size, use_eagle
+):
+    """The default lookup probes one rank namespace first and the others only
+    below the pass-1 hit bound, and takes whole pages below the local prefix
+    hit (skip_tokens) as present. Over random stores (per-namespace prefixes,
+    holes, stray keys past the hit) its hit and tail keys equal probing every
+    key of a store that also holds the skipped pages."""
+    import random
+
+    if mamba_block_size < hash_block_size:
+        pytest.skip("Mamba blocks are whole hash blocks")
+    rng = random.Random(hash_block_size * 100 + mamba_block_size * 10 + use_eagle)
+    worker = _two_pass_lookup_worker(
+        hash_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        use_eagle=use_eagle,
+        dcp=4,
+    )
+    hashes = [BlockHash(f"h{i:03d}".encode()) for i in range(40)]
+    namespaces = [
+        prefix for g_idx in range(2) for prefix in worker._lookup_key_prefixes[g_idx]
+    ]
+    probed_fast = probed_full = 0
+    for _ in range(300):
+        # Per namespace: a mostly-stored prefix of random length, then strays.
+        base = rng.randrange(len(hashes) + 1)
+        stored = set()
+        for prefix in namespaces:
+            cutoff = max(0, base + rng.choice([0, 0, 0, -1, -3, 2]))
+            stored.update(
+                PoolKey.build_key_string(prefix, h.hex())
+                for i, h in enumerate(hashes)
+                if rng.random() < (0.97 if i < cutoff else 0.1)
+            )
+        worker.store.batch_is_exist.side_effect = lambda ks, stored=stored: [
+            int(k in stored) for k in ks
+        ]
+        num_tokens = rng.randrange(1, len(hashes) * hash_block_size + 2)
+        skip_tokens = rng.choice([0, 0, rng.randrange(num_tokens + 1)])
+        worker.store.batch_is_exist.reset_mock()
+        fast = worker.lookup(num_tokens, hashes, skip_tokens)
+        probed_fast += sum(
+            len(call.args[0]) for call in worker.store.batch_is_exist.call_args_list
+        )
+
+        token_len = worker.coord.align_lookup_length(num_tokens)
+        units = worker._lookup_units(token_len, hashes) if token_len > 0 else []
+        if not units:
+            assert fast == MooncakeLookupResult(0)
+            continue
+        worker.store.batch_is_exist.reset_mock()
+        present = worker._probe_all_namespaces(units)
+        probed_full += len(worker.store.batch_is_exist.call_args.args[0])
+        for i, unit in enumerate(units):
+            page = worker._kv_cache_groups[unit.group].kv_cache_spec.block_size
+            present[i] |= unit.end_token <= skip_tokens // page * page
+        full, _ = worker._longest_hit(
+            num_tokens,
+            token_len,
+            hashes,
+            worker._lookup_exists_set(units, present),
+        )
+        assert fast == full, (num_tokens, skip_tokens, sorted(stored))
+    assert probed_fast < probed_full
 
 
 def test_lookup_partial_prefix_returns_first_hit_length():

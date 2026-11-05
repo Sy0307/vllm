@@ -262,9 +262,23 @@ class MooncakeStoreScheduler:
             request.num_tokens,
             request.block_hashes,
             non_block=self.lookup_async,
+            skip_tokens=num_computed_tokens,
         )
         if lookup_result is None:
             # Lookup not ready yet; scheduler will retry on a later step.
+            return None, False
+        if self.client.lookup_skip_tokens(request.request_id) > num_computed_tokens:
+            # The lookup took a longer local prefix as present than the
+            # scheduler holds now (local blocks were evicted meanwhile), so the
+            # gap was never probed: look up again from the current local hit.
+            self.client.discard(request.request_id)
+            self.client.lookup(
+                request.request_id,
+                request.num_tokens,
+                request.block_hashes,
+                non_block=True,
+                skip_tokens=num_computed_tokens,
+            )
             return None, False
         num_external_hit_tokens = lookup_result.hit_length
 
