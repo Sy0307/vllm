@@ -244,6 +244,10 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
     partial_tail_sent: bool = False
+    # Prefix length the request resumed from (its cache hit): the Mamba state
+    # stored there is superseded once this request stores a later prompt
+    # boundary state (see ``ReqMeta.superseded_state_tokens``).
+    resume_tokens: int = 0
 
     def update(
         self,
@@ -307,6 +311,12 @@ class ReqMeta:
     # Set on the save that first covers the whole prompt, so the scheduler
     # publishes the prompt's partial tail once rather than on every save.
     publish_partial_tail: bool = False
+    # Prefix length of the Mamba state this request resumed from. Once this
+    # job's later boundary state is stored, the next turn resumes from that
+    # one, so workers remove the old state from the store: a hybrid model's
+    # per-boundary state outweighs the attention KV of a whole agentic turn and
+    # would otherwise crowd live prefixes out of the store until LRU eviction.
+    superseded_state_tokens: int = 0
 
     @staticmethod
     def from_request_tracker(

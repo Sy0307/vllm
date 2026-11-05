@@ -723,7 +723,78 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
         return puts
 
+    def _superseded_state_keys(self, req_meta: ReqMeta) -> list[str]:
+        """This rank's store keys for the Mamba state the request resumed from.
+
+        Mirrors the split ``_boundary_puts`` writes a Mamba boundary with, so
+        every rank removes exactly the shards it (or its peer phase) stored.
+        """
+        num_tokens = req_meta.superseded_state_tokens
+        hash_block_size = self.coord.hash_block_size
+        if (
+            num_tokens <= 0
+            or num_tokens % hash_block_size
+            or num_tokens // hash_block_size > len(req_meta.block_hashes)
+        ):
+            return []
+        keys: list[str] = []
+        for group_id in sorted(self.coord.mamba_group_ids):
+            if not self.group_participates[group_id]:
+                continue
+            db = self.token_databases[group_id]
+            put_step = self.group_put_steps[group_id]
+            put_step_rank = (self.tp_rank + group_id) % put_step
+            block_size = db.store_layout.block_size
+            block_start = (cdiv(num_tokens, block_size) - 1) * block_size
+            for start in range(block_start, num_tokens, db.chunk_size):
+                if start // db.chunk_size % put_step != put_step_rank:
+                    continue
+                end = min(start + db.chunk_size, num_tokens)
+                key_hash = req_meta.block_hashes[end // hash_block_size - 1]
+                keys.extend(
+                    db.store_layout.key_for(shard_id, key_hash)
+                    for shard_id in db.store_layout.local_shard_ids
+                )
+        return keys
+
+    def _remove_superseded_states(self, req_meta: ReqMeta) -> None:
+        """Best-effort removal of the state a newer boundary superseded.
+
+        Not forced: a key still leased by an in-flight load stays, and a failed
+        removal only leaves the old state to LRU eviction.
+        """
+        keys = self._superseded_state_keys(req_meta)
+        batch_remove = getattr(self.store, "batch_remove", None)
+        if not keys or batch_remove is None:
+            return
+        try:
+            res = batch_remove(keys)
+        except Exception as e:
+            logger.debug(
+                "Removing superseded state keys of request %s failed: %s",
+                req_meta.req_id,
+                e,
+            )
+            return
+        logger.debug(
+            "Removed %d/%d superseded state keys of request %s",
+            sum(1 for r in res if r == 0),
+            len(keys),
+            req_meta.req_id,
+        )
+
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
+        """Persist this job's boundary puts, then drop the state they supersede.
+
+        Returns:
+            True when no put is needed or every put succeeds, False otherwise.
+        """
+        stored = self._put_boundary_states(req_meta)
+        if stored and req_meta.boundary_puts and req_meta.superseded_state_tokens:
+            self._remove_superseded_states(req_meta)
+        return stored
+
+    def _put_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
 
         These are every mamba key the connector writes (``store_mask`` excludes

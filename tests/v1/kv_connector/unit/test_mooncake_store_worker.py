@@ -1589,6 +1589,55 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
     assert addrs == [[0x2000 + 7 * 256]]
 
 
+def _make_superseding_req(superseded_state_tokens: int) -> ReqMeta:
+    return ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [5]),
+        block_hashes=[bytes([i + 1]) * 4 for i in range(8)],
+        can_save=True,
+        boundary_puts=[(1, 7, 32)],
+        superseded_state_tokens=superseded_state_tokens,
+    )
+
+
+def test_boundary_state_removes_the_state_it_supersedes():
+    """A request that resumed from the state at 16 and stores one at 32 makes
+    the old state stale: the next turn resumes at 32, so the worker removes the
+    rank's keys of the state at 16 (Mamba groups only)."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    store.batch_remove.side_effect = lambda keys, *a: [0] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+    req = _resolve_partial_tail(thread, _make_superseding_req(16))
+
+    assert thread._maybe_offload_boundary_states(req)
+
+    old_key = thread.token_databases[1].store_layout.key_for(
+        0, BlockHash(req.block_hashes[16 // 4 - 1])
+    )
+    store.batch_remove.assert_called_once_with([old_key])
+
+
+@pytest.mark.parametrize("put_ok, superseded", [(False, 16), (True, 0)])
+def test_boundary_state_keeps_the_resume_state(put_ok, superseded):
+    """No removal when the newer state failed to store or nothing was resumed."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [
+        256 if put_ok else -1
+    ] * len(keys)
+    thread = _make_partial_tail_send_thread(store)
+
+    stored = thread._maybe_offload_boundary_states(
+        _resolve_partial_tail(thread, _make_superseding_req(superseded))
+    )
+
+    assert stored == put_ok
+    store.batch_remove.assert_not_called()
+
+
 @pytest.mark.parametrize("saved_tokens", [0, 32])
 @pytest.mark.parametrize("use_eagle", [False, True])
 def test_mixed_snapshot_and_sub_block_offloads(saved_tokens, use_eagle):

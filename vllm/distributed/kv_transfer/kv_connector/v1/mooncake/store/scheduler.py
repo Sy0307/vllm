@@ -59,6 +59,25 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
     return request.prompt_token_ids
 
 
+def _take_superseded_state(
+    tracker: RequestTracker, mamba_puts: list[BoundaryPut]
+) -> int:
+    """Return (once) the resume prefix a later prompt boundary state supersedes.
+
+    A request that resumed from the state at ``tracker.resume_tokens`` makes it
+    stale when it stores a state further along the same prompt: the next turn
+    resumes from the newer one. Decode-time boundaries do not count, and a
+    request that hit nothing has nothing to supersede.
+    """
+    resume = tracker.resume_tokens
+    if resume <= 0 or not any(
+        resume < put.num_tokens <= tracker.prefill_end_tokens for put in mamba_puts
+    ):
+        return 0
+    tracker.resume_tokens = 0
+    return resume
+
+
 def _partial_tail_non_mamba_puts(
     coord: MooncakeStoreCoordinator,
     req_meta: ReqMeta,
@@ -399,6 +418,7 @@ class MooncakeStoreScheduler:
                     else None
                 ),
                 prefill_end_tokens=len(prefill_tokens),
+                resume_tokens=request.num_computed_tokens,
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -724,6 +744,7 @@ class MooncakeStoreScheduler:
             if block_id == NULL_BLOCK_ID:
                 return False
             mamba_puts.append(BoundaryPut(store_group_id, block_id, boundary))
+        superseded = _take_superseded_state(tracker, mamba_puts)
         req_meta = ReqMeta(
             req_id=request.request_id,
             token_len_chunk=0,
@@ -736,6 +757,7 @@ class MooncakeStoreScheduler:
             prefill_end_tokens=tracker.prefill_end_tokens,
             boundary_puts=mamba_puts,
             completed_token_len=request.num_computed_tokens,
+            superseded_state_tokens=superseded,
         )
         coord = self._store_coord
         assert coord is not None
@@ -805,8 +827,10 @@ class MooncakeStoreScheduler:
             if not accepted:
                 continue
             tracker.has_pending_offload = True
+            superseded = _take_superseded_state(tracker, accepted)
             if (req_meta := save_metas.get(req_id)) is not None:
                 req_meta.boundary_puts = accepted
+                req_meta.superseded_state_tokens = superseded
                 continue
             meta.add_request(
                 ReqMeta(
@@ -819,6 +843,7 @@ class MooncakeStoreScheduler:
                     prefill_end_tokens=tracker.prefill_end_tokens,
                     boundary_puts=accepted,
                     completed_token_len=tracker.token_len,
+                    superseded_state_tokens=superseded,
                 )
             )
 

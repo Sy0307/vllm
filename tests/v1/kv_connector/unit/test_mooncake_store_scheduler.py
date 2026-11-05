@@ -1714,6 +1714,38 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
 
 
+def test_boundary_state_supersedes_the_resume_state_once():
+    """The first prompt boundary past the request's cache hit marks the state
+    it resumed from as superseded; later boundaries of the request do not."""
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    scheduler._request_trackers["req-0"].resume_tokens = 16
+
+    first = MooncakeStoreConnectorMetadata(set(), set())
+    scheduler._handle_boundary_state_offloads({"req-0": [(1, 7, 32)]}, first)
+    second = MooncakeStoreConnectorMetadata(set(), set())
+    scheduler._handle_boundary_state_offloads({"req-0": [(1, 9, 48)]}, second)
+
+    assert first.requests[0].superseded_state_tokens == 16
+    assert second.requests[0].superseded_state_tokens == 0
+
+
+@pytest.mark.parametrize("resume_tokens, boundary", [(0, 32), (32, 32), (48, 32)])
+def test_boundary_state_without_a_later_boundary_supersedes_nothing(
+    resume_tokens, boundary
+):
+    """No cache hit, or a boundary at or before the resume point, keeps it."""
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    scheduler._request_trackers["req-0"].resume_tokens = resume_tokens
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads({"req-0": [(1, 7, boundary)]}, meta)
+
+    assert meta.requests[0].superseded_state_tokens == 0
+    assert scheduler._request_trackers["req-0"].resume_tokens == resume_tokens
+
+
 def test_boundary_state_job_pins_exact_blocks_once():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
