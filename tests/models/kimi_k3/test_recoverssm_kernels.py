@@ -826,6 +826,16 @@ def test_triton_records_at_record_rows_match_records_at_batch_rows(monkeypatch):
                 assert torch.equal(slot_rec[row, :, :n], batch_rec[b, :, :n])
 
 
+# KdaWide in the regular decode against the Triton conv + verify (+ o_norm) it
+# replaces. The KDA layer's conv1d parameter is FP32 (params_dtype=float32): the
+# Triton convolution then multiplies in FP32 like KdaWide (with a BF16 weight it
+# rounds every product to BF16, and ~60% of the outputs differ; such layers keep
+# the Triton verify). The F_B / F_A gate inputs sit on a 2^-6 / integer grid,
+# as in the specialized decode's tests, so KdaWide's mma.sync gate projection
+# and the F_B GEMM agree bit for bit; test_wide_verify_random_gates covers
+# arbitrary gates.
+
+
 def _wide_layer(heads, window, conv_weight, f_b):
     """The KDA layer attributes ``WideRecoverSSMVerify`` and the commit read."""
     from vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.kda.prepared import (
@@ -847,18 +857,25 @@ def _wide_layer(heads, window, conv_weight, f_b):
     )
 
 
-def _wide_weights(heads: int):
-    f_b = (torch.randn(heads * D, D, device=DEVICE) * D**-0.5).to(torch.bfloat16)
-    conv_weight = torch.randn(3 * heads * D, 4, device=DEVICE) * 0.5
-    return f_b, conv_weight.to(torch.bfloat16)
+def _wide_weights(heads: int, grid: bool = True):
+    """F_B ([H*128, 128] BF16) and the FP32 conv1d weight [3*H*128, 4]."""
+    f_b = torch.randn(heads * D, D, device=DEVICE)
+    if grid:
+        f_b = (f_b * 3).round().clamp(-8, 8).bfloat16() / 64
+    else:
+        f_b = (f_b * D**-0.5).bfloat16()
+    return f_b, torch.randn(3 * heads * D, 4, device=DEVICE) * 0.5
 
 
-def _wide_step_inputs(tokens: int, heads: int, f_b: torch.Tensor):
+def _wide_step_inputs(tokens: int, heads: int, f_b: torch.Tensor, grid: bool = True):
     """One in-projection row per token (q|k|v, output gate, f_a, beta, padding)
     and the raw gate the regular path's F_B projection feeds the Triton verify."""
     dim = heads * D
     width = 4 * dim + D + heads + 4
     projected = torch.randn(tokens, width, device=DEVICE, dtype=torch.bfloat16)
+    if grid:
+        f_a = torch.randn(tokens, D, device=DEVICE) * 1.5
+        projected[:, 4 * dim : 4 * dim + D] = f_a.round().clamp(-3, 3)
     x, gate = projected[:, : 3 * dim], projected[:, 3 * dim : 4 * dim]
     f_a = projected[:, 4 * dim : 4 * dim + D]
     raw_beta = projected[:, 4 * dim + D : 4 * dim + D + heads]
@@ -911,6 +928,14 @@ def _triton_regular_verify(
     return out[0]
 
 
+def _gated_rms_norm(out, gate, layer):
+    """The regular path's o_norm on the Triton verify output [T, H, 128]."""
+    out = out.float()
+    rstd = torch.rsqrt(out.pow(2).mean(-1, keepdim=True) + layer.o_norm.eps)
+    gate = torch.sigmoid(gate.float().view(out.shape))
+    return (out * rstd * layer.decode_norm_weight * gate).to(torch.bfloat16)
+
+
 def _run_wide(layer, x, f_a, raw_beta, conv, state, records, slots, rows, gate):
     """``WideRecoverSSMVerify`` as the regular path calls it; it must launch."""
     from vllm.models.kimi_k3.nvidia.recoverssm.wide_verify import (
@@ -940,12 +965,31 @@ def _run_wide(layer, x, f_a, raw_beta, conv, state, records, slots, rows, gate):
     return out
 
 
-# KdaWide against the Triton verify. The raw gate is recomputed from F_A on
-# mma.sync (FP32 sums rounded to BF16 like the F_B GEMM's output: equal up to
-# one BF16 ulp at rounding ties) and FP32 reduction orders differ; outputs and
-# records are BF16 (one ulp: 2**-8 relative). The conv window holds copied BF16
-# inputs and a verify never writes the SSM checkpoint: both are exact.
-WIDE_ATOL, WIDE_RTOL = 2e-2, 1.6e-2
+def _assert_matches(got, want, same=0.99, rtol=2e-2, rms_atol=1e-3, rms_max=None):
+    """KdaWide vs Triton over [..., 128] rows (a head's channels). Tolerances
+    scale with each row's RMS: the gated RMSNorm divides a head by RMS(o), and
+    o is ~3e-3 here, so an absolute atol would either hide everything before the
+    norm or fail on ulps of large elements after it.
+
+    ``same``: least bit-identical fraction (only FP32 reduction order and
+    approximate exp/rsqrt differ: a few rounding ties). Every element within
+    ``rtol`` of itself (two BF16 ulps: a tie in o, then one in the norm) plus
+    ``rms_atol`` of its row's RMS; ``rms_max``: instead a bound on |d| / RMS
+    (gates that differ by an ulp move whole heads a little)."""
+    identical = (got.view(torch.int16) == want.view(torch.int16)).float().mean()
+    got, want = got.float(), want.float()
+    rms = want.pow(2).mean(-1, keepdim=True).sqrt().clamp_min(1e-30)
+    diff = (got - want).abs()
+    assert identical.item() >= same, f"bit-identical fraction {identical.item():.4f}"
+    if rms_max is not None:
+        worst = (diff / rms).max().item()
+        assert worst < rms_max, f"max |d| / RMS {worst:.3e}"
+        return
+    bad = diff > rtol * want.abs() + rms_atol * rms
+    assert not bad.any(), (
+        f"{int(bad.sum())} of {bad.numel()} elements off; worst |d| / RMS "
+        f"{(diff / rms).max().item():.3e}"
+    )
 
 
 @pytest.mark.parametrize("norm", [False, True])
@@ -954,11 +998,12 @@ WIDE_ATOL, WIDE_RTOL = 2e-2, 1.6e-2
 @pytest.mark.parametrize("batch", [1, 16, 48, 96])
 @torch.inference_mode()
 def test_wide_verify_matches_triton(batch, slot_rows, dim_first, norm):
-    """KdaWide in the regular decode (FP32 SSM state, BF16 conv state and
-    weights; TP8 shapes: 12 heads, q 5) against the Triton convolution + verify
-    it replaces, and with ``norm`` the gated RMSNorm the regular path applies
-    after it: outputs, records (by batch row, or by request slot on non-last PP
-    ranks) and the conv window, with a CUDA graph padding row (null slot)."""
+    """KdaWide in the regular decode (FP32 SSM state, BF16 conv state, FP32
+    conv1d weight; TP8 shapes: 12 heads, q 5) against the Triton convolution +
+    verify it replaces, and with ``norm`` the gated RMSNorm the regular path
+    applies after it: outputs, records (by batch row, or by request slot on
+    non-last PP ranks), the conv window and the untouched checkpoint, with a
+    CUDA graph padding row (null slot)."""
     heads, window = 12, 5
     torch.manual_seed(batch + 2 * slot_rows + 4 * dim_first + 8 * norm)
     slots, tokens = 3 * batch + 1, batch * window
@@ -996,12 +1041,9 @@ def test_wide_verify_matches_triton(batch, slot_rows, dim_first, norm):
         ref_records,
         state_indices,
         record_rows,
-    ).float()
+    )
     if norm:
-        rstd = torch.rsqrt(expected.pow(2).mean(-1, keepdim=True) + 1e-6)
-        gate_heads = torch.sigmoid(gate.float().view(tokens, heads, D))
-        expected = expected * rstd * layer.decode_norm_weight * gate_heads
-    expected = expected.to(torch.bfloat16).flatten(-2)
+        expected = _gated_rms_norm(expected, gate, layer)
 
     _, conv, state = pages
     out = _run_wide(
@@ -1020,33 +1062,85 @@ def test_wide_verify_matches_triton(batch, slot_rows, dim_first, norm):
 
     live = state_indices > 0
     live_tokens = live.repeat_interleave(window)
-    got, want = out[live_tokens].float(), expected[live_tokens].float()
-    torch.testing.assert_close(got, want, atol=WIDE_ATOL, rtol=WIDE_RTOL)
-    # Isolated ulp-level differences only, no systematic bias.
-    assert (got - want).abs().mean() < 2e-3
+    _assert_matches(out.unflatten(-1, (heads, D))[live_tokens], expected[live_tokens])
     assert torch.all(out[~live_tokens] == 0)
     # The checkpoint stays as it was; live requests' conv windows are rewritten.
     assert torch.equal(state, ref_state)
     for slot in state_indices[live].tolist():
         assert torch.equal(conv[slot], ref_conv[slot])
     written = record_rows if slot_rows else torch.arange(batch, device=DEVICE)
-    for b in range(batch):
-        if not live[b]:
-            continue
-        row = int(written[b])
-        for got_rec, want_rec in (
-            (records.correction, ref_records.correction),
-            (records.key_gate, ref_records.key_gate),
-        ):
-            torch.testing.assert_close(
-                got_rec[row].float(),
-                want_rec[row].float(),
-                atol=WIDE_ATOL,
-                rtol=WIDE_RTOL,
-            )
+    live_rows = written[live].long()
+    # Keys and raw gates are BF16 copies; corrections are FP32 (V-wide rows).
+    _assert_matches(
+        records.key_gate[live_rows], ref_records.key_gate[live_rows], same=0.999
+    )
+    torch.testing.assert_close(
+        records.correction[live_rows],
+        ref_records.correction[live_rows],
+        rtol=1e-2,
+        atol=1e-4,
+    )
     for row in sorted(set(range(rows)) - set(written.tolist())):
         assert torch.equal(records.correction[row], initial_records.correction[row])
         assert torch.equal(records.key_gate[row], initial_records.key_gate[row])
+
+
+@pytest.mark.parametrize("norm", [False, True])
+@torch.inference_mode()
+def test_wide_verify_random_gates(norm):
+    """Arbitrary F_A / F_B: KdaWide's mma.sync gate projection rounds to the F_B
+    GEMM's BF16 gate except at rounding ties (one ulp), which move a head's
+    later outputs slightly."""
+    heads, window, batch = 12, 5, 96
+    torch.manual_seed(11 + norm)
+    slots, tokens = batch + 1, batch * window
+    f_b, conv_weight = _wide_weights(heads, grid=False)
+    layer = _wide_layer(heads, window, conv_weight, f_b)
+    x, gate, f_a, raw_beta, raw_gate = _wide_step_inputs(tokens, heads, f_b, grid=False)
+    state_indices = torch.randperm(slots - 1, device=DEVICE)[:batch].to(torch.int32)
+    state_indices += 1
+    pages = _pages(slots, heads, window, True, state_dtype=torch.float32)
+    _, ref_conv, ref_state = _clone_pages(pages)
+    records, ref_records = (
+        _records(batch, heads, window),
+        _records(batch, heads, window),
+    )
+    expected = _triton_regular_verify(
+        layer,
+        conv_weight,
+        x,
+        raw_gate,
+        raw_beta,
+        ref_conv,
+        ref_state,
+        ref_records,
+        state_indices,
+        None,
+    )
+    if norm:
+        expected = _gated_rms_norm(expected, gate, layer)
+    _, conv, state = pages
+    out = _run_wide(
+        layer,
+        x,
+        f_a,
+        raw_beta,
+        conv,
+        state,
+        records,
+        state_indices,
+        None,
+        gate if norm else None,
+    )
+    torch.accelerator.synchronize()
+
+    # Raw gates: KdaWide's (records) against the F_B GEMM's.
+    ours = records.key_gate[..., D:].reshape(batch, heads, window, D)
+    gemm = raw_gate.view(batch, window, heads, D).transpose(1, 2)
+    ulps = (ours.view(torch.int16).int() - gemm.view(torch.int16).int()).abs()
+    assert ulps.max().item() <= 1
+    assert (ulps > 0).float().mean().item() < 1e-2
+    _assert_matches(out.unflatten(-1, (heads, D)), expected, same=0.95, rms_max=0.1)
 
 
 @pytest.mark.parametrize("conv_dtype", [torch.bfloat16, torch.float32])
@@ -1130,7 +1224,7 @@ def test_wide_verify_steps_match_triton(slot_rows, dim_first, conv_dtype, monkey
                     state_indices,
                     record_rows,
                     None,
-                )
+                ).unflatten(-1, (heads, D))
             else:
                 outs[wide] = _triton_regular_verify(
                     layer,
@@ -1143,19 +1237,103 @@ def test_wide_verify_steps_match_triton(slot_rows, dim_first, conv_dtype, monkey
                     records,
                     state_indices,
                     record_rows,
-                ).flatten(-2)
+                )
             context.commit(
                 accepted, state_indices, query_start, record_rows=record_rows
             )
         torch.accelerator.synchronize()
-        torch.testing.assert_close(
-            outs[True][live_tokens].float(),
-            outs[False][live_tokens].float(),
-            atol=WIDE_ATOL,
-            rtol=WIDE_RTOL,
-        )
+        _assert_matches(outs[True][live_tokens], outs[False][live_tokens])
         (_, ref_conv, ref_state), (_, conv, state) = paths[False][0], paths[True][0]
         assert torch.equal(conv[live_slots], ref_conv[live_slots])
         torch.testing.assert_close(
-            state[live_slots], ref_state[live_slots], atol=WIDE_ATOL, rtol=WIDE_RTOL
+            state[live_slots], ref_state[live_slots], rtol=1e-2, atol=1e-3
         )
+
+
+@pytest.mark.parametrize("slot_rows", [False, True])
+@torch.inference_mode()
+def test_wide_verify_cuda_graph_replay(slot_rows):
+    """FULL CUDA graphs capture the regular path's ``_forward``: the TVM-FFI
+    KdaWide launch (on the capture stream, compiled beforehand by an eager
+    step, as ``WideRecoverSSMVerify.compile`` does at layer init) replays with
+    new activations and slots, as the Triton verify computes them."""
+    from vllm.models.kimi_k3.nvidia.recoverssm.wide_verify import (
+        WideRecoverSSMVerify,
+    )
+
+    heads, window, batch = 12, 5, 16
+    torch.manual_seed(5 + slot_rows)
+    slots, tokens = 2 * batch + 1, batch * window
+    f_b, conv_weight = _wide_weights(heads)
+    layer = _wide_layer(heads, window, conv_weight, f_b)
+    x, gate, f_a, raw_beta, raw_gate = _wide_step_inputs(tokens, heads, f_b)
+    projected = x.as_strided((tokens, x.stride(0)), (x.stride(0), 1))
+    state_indices = torch.zeros(batch, dtype=torch.int32, device=DEVICE)
+    ones = torch.ones(batch, dtype=torch.int32, device=DEVICE)
+    rows = batch + 4
+    record_rows = (
+        torch.randperm(rows, device=DEVICE)[:batch].to(torch.int32)
+        if slot_rows
+        else None
+    )
+    pages = _pages(slots, heads, window, True, state_dtype=torch.float32)
+    initial = _clone_pages(pages)
+    _, conv, state = pages
+    records = _records(rows, heads, window)
+    out = torch.empty(tokens, heads * D, device=DEVICE, dtype=torch.bfloat16)
+    verify = WideRecoverSSMVerify(layer)
+    WideRecoverSSMVerify._failed = None
+
+    def run():
+        assert verify(
+            x=x,
+            f_a=f_a,
+            raw_beta=raw_beta,
+            state_indices=state_indices,
+            num_accepted_tokens=ones,
+            conv_state=conv,
+            state=state,
+            records=records,
+            record_rows=record_rows,
+            out=out,
+            output_gate=gate,
+        ), WideRecoverSSMVerify._failed
+
+    graph = torch.cuda.CUDAGraph()
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        state_indices.copy_(torch.arange(1, batch + 1, device=DEVICE))
+        run()  # compiles (eagerly)
+        stream.synchronize()
+        with torch.cuda.graph(graph, stream=stream):
+            run()
+    for replay in range(2):
+        pages[0].copy_(initial[0])
+        projected.normal_()
+        f_a.copy_(
+            (torch.randn_like(f_a, dtype=torch.float32) * 1.5).round().clamp(-3, 3)
+        )
+        state_indices.copy_(torch.randperm(slots - 1, device=DEVICE)[:batch] + 1)
+        state_indices[3] = 0  # a padding row this time
+        graph.replay()
+        torch.accelerator.synchronize()
+        ref = _clone_pages(initial)
+        ref_records = _records(rows, heads, window)
+        raw_gate = (f_a.float() @ f_b.float().T).to(torch.bfloat16)
+        expected = _triton_regular_verify(
+            layer,
+            conv_weight,
+            x,
+            raw_gate,
+            raw_beta,
+            ref[1],
+            ref[2],
+            ref_records,
+            state_indices,
+            record_rows,
+        )
+        expected = _gated_rms_norm(expected, gate, layer)
+        live_tokens = (state_indices > 0).repeat_interleave(window)
+        got = out.unflatten(-1, (heads, D))
+        _assert_matches(got[live_tokens], expected[live_tokens])
+        assert torch.all(out[~live_tokens] == 0), replay

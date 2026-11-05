@@ -2,22 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KdaWide against the Triton RecoverSSM verify of the regular Kimi-K3 KDA
 decode, per KDA layer, at TP8 shapes (12 local heads x 128, q 5, FP32 SSM
-state, BF16 conv state; SM10x only).
+state, BF16 conv state, the layer's FP32 conv1d weight; SM10x only).
 
   triton   causal_conv1d_update + kda_recoverssm_verify (+ the gated RMSNorm)
-  kdawide  WideRecoverSSMVerify: one CuTe launch (+ the fused gated RMSNorm)
+  kdawide  WideRecoverSSMVerify: one TVM-FFI CuTe launch (+ the fused norm)
 
 ``+norm`` rows are a pure speculative step (KdaWide fuses o_norm and returns);
 ``pre-norm`` rows a mixed step's speculative rows (o_norm runs separately on
 both paths, so it is left out). Both paths keep the F_B GEMM of forward(), so
-it is not timed. ``slot rows``: records addressed by request slot (non-last PP
+it is not timed. ``slot`` records: addressed by request slot (non-last PP
 ranks).
 
 graph: a CUDA graph with one call per layer (each layer its own weights, conv
 and SSM state, records and inputs), replayed after an L2 flush (Triton
-do_bench median), per layer. eager: wall time per layer of back-to-back eager
-calls; the server runs this verify eagerly (``_forward`` breaks the CUDA
-graph), so host overhead counts there.
+do_bench median), per layer: uniform speculative steps run this way (FULL
+graphs capture ``_forward``). eager: wall time per layer of back-to-back eager
+calls, as piecewise / mixed steps run ``_forward``. host: CPU time per layer to
+issue the launches (no synchronization), and the Triton path's split into its
+three launches.
+
+same / max|d|/rms: bit-identical output fraction and the largest difference
+relative to its (token, head) row's RMS, KdaWide against Triton from the same
+caches. ``--bf16-conv-weight`` reproduces the earlier mismatch (the Triton
+convolution rounds BF16 x BF16 products to BF16).
 
 From the vllm root, on an SM10x GPU:
     python bench_kdawide.py [--batches 1 16 48 96] [--layers 8] [--conv-layout DS]
@@ -38,7 +45,7 @@ EPS = 1e-5  # FusedRMSNormGated's default, as the KDA layer builds it
 class Layer:
     """One KDA layer's weights, caches, records and step inputs."""
 
-    def __init__(self, heads, window, batch, slots, record_rows, dim_first):
+    def __init__(self, heads, window, batch, slots, record_rows, dim_first, args):
         from vllm.models.kimi_k3.nvidia.ops.recoverssm import KDARecoverSSMRecords
         from vllm.models.kimi_k3.nvidia.recoverssm.wide_verify import (
             WideRecoverSSMVerify,
@@ -50,7 +57,9 @@ class Layer:
         d, dev, bf16 = HEAD_DIM, torch.device("cuda"), torch.bfloat16
         dim, tokens = heads * d, batch * window
         self.heads, self.window, self.tokens = heads, window, tokens
-        self.conv_weight = (torch.randn(3 * dim, 4, device=dev) * 0.5).to(bf16)
+        self.conv_weight = torch.randn(3 * dim, 4, device=dev) * 0.5
+        if args.bf16_conv_weight:
+            self.conv_weight = self.conv_weight.to(bf16)
         self.f_b = (torch.randn(dim, d, device=dev) * d**-0.5).to(bf16)
         self.norm_weight = torch.randn(d, device=dev).to(bf16)
         self.A_log = torch.randn(heads, device=dev) * 0.5
@@ -86,15 +95,11 @@ class Layer:
             )
         )
 
-    def triton(self, meta, norm):
-        """The regular path's Triton verify (``_recoverssm_verify``) + o_norm."""
+    def conv1d(self, meta):
         from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
             causal_conv1d_update,
         )
-        from vllm.models.kimi_k3.nvidia.ops.recoverssm import kda_recoverssm_verify
-        from vllm.third_party.flash_linear_attention.ops.kda import rms_norm_gated
 
-        heads, tokens, dim = self.heads, self.tokens, self.heads * HEAD_DIM
         causal_conv1d_update(
             self.x,
             self.conv,
@@ -108,6 +113,11 @@ class Layer:
             validate_data=False,
             out=self.conv_out,
         )
+
+    def verify(self, meta):
+        from vllm.models.kimi_k3.nvidia.ops.recoverssm import kda_recoverssm_verify
+
+        heads, tokens, dim = self.heads, self.tokens, self.heads * HEAD_DIM
         q, k, v = (
             t.unflatten(-1, (heads, HEAD_DIM)).unsqueeze(0)
             for t in self.conv_out.split(dim, -1)
@@ -129,13 +139,22 @@ class Layer:
             out=self.out,
             record_rows=meta.rows,
         )
+
+    def norm(self, meta):
+        """The KDA layer's ``core_attn_out.copy_(self.o_norm(core_attn_out, g2))``."""
+        from vllm.third_party.flash_linear_attention.ops.kda import rms_norm_gated
+
+        gate = self.gate.view(self.tokens, self.heads, HEAD_DIM)
+        self.out.copy_(
+            rms_norm_gated(self.out, gate, self.norm_weight, None, "sigmoid", eps=EPS)
+        )
+
+    def triton(self, meta, norm):
+        """The regular path's Triton verify (``_recoverssm_verify``) + o_norm."""
+        self.conv1d(meta)
+        self.verify(meta)
         if norm:
-            gate = self.gate.view(tokens, heads, HEAD_DIM)
-            self.out.copy_(
-                rms_norm_gated(
-                    self.out, gate, self.norm_weight, None, "sigmoid", eps=EPS
-                )
-            )
+            self.norm(meta)
 
     def kdawide(self, meta, norm):
         from vllm.models.kimi_k3.nvidia.recoverssm.wide_verify import (
@@ -176,6 +195,7 @@ def _graph_us(calls) -> float:
 
 
 def _eager_us(calls, iters: int = 30) -> float:
+    """Wall time per call of back-to-back eager calls (host- or GPU-bound)."""
     for call in calls:
         call()
     torch.accelerator.synchronize()
@@ -187,18 +207,37 @@ def _eager_us(calls, iters: int = 30) -> float:
     return (time.perf_counter() - start) * 1e6 / (iters * len(calls))
 
 
+def _host_us(calls, iters: int = 10) -> float:
+    """CPU time per call to issue the launches: timed without synchronizing
+    (``iters * len(calls)`` launches stay well inside the launch queue)."""
+    for call in calls:
+        call()
+    torch.accelerator.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        for call in calls:
+            call()
+    elapsed = time.perf_counter() - start
+    torch.accelerator.synchronize()
+    return elapsed * 1e6 / (iters * len(calls))
+
+
 def _difference(layer, meta, norm, live_tokens) -> tuple[float, float]:
-    """Largest and mean |KdaWide - Triton| over live rows, from the same caches."""
+    """Bit-identical fraction and max |KdaWide - Triton| / RMS of the (token,
+    head) row over live rows, both from the same caches."""
     records = (layer.records.correction, layer.records.key_gate)
     saved = [t.clone() for t in (layer.conv, *records)]
     layer.triton(meta, norm)
-    expected = layer.out.clone()
+    expected = layer.out[0, live_tokens].clone()
     for tensor, copy in zip((layer.conv, *records), saved):
         tensor.copy_(copy)
     layer.kdawide(meta, norm)
     torch.accelerator.synchronize()
-    diff = (layer.out - expected)[0, live_tokens].float().abs()
-    return diff.max().item(), diff.mean().item()
+    got = layer.out[0, live_tokens]
+    same = (got.view(torch.int16) == expected.view(torch.int16)).float().mean()
+    got, expected = got.float(), expected.float()
+    rms = expected.pow(2).mean(-1, keepdim=True).sqrt().clamp_min(1e-30)
+    return same.item(), ((got - expected).abs() / rms).max().item()
 
 
 def main() -> None:
@@ -208,8 +247,14 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=5, help="q = drafts + 1")
     parser.add_argument("--layers", type=int, default=8)
     parser.add_argument("--conv-layout", choices=("DS", "SD"), default="DS")
+    parser.add_argument(
+        "--bf16-conv-weight",
+        action="store_true",
+        help="BF16 conv1d weight (not the model's): KdaWide then cannot match",
+    )
     args = parser.parse_args()
 
+    from vllm.models.kimi_k3.nvidia.recoverssm import wide_verify
     from vllm.platforms import current_platform
 
     if not current_platform.is_device_capability_family(100):
@@ -218,15 +263,17 @@ def main() -> None:
     dev = torch.device("cuda")
     print(
         f"heads {args.heads}, q {args.window}, {args.layers} layers, conv "
-        f"{args.conv_layout}; us per layer (graph: CUDA graph replay, L2 flushed)"
+        f"{args.conv_layout}, conv1d weight "
+        f"{'BF16' if args.bf16_conv_weight else 'FP32'}; us per layer"
     )
     header = (
-        f"{'batch':>5} {'step':>8} {'records':>9} | {'triton':>8} {'kdawide':>8} "
-        f"{'speedup':>7} | {'eager tri':>9} {'eager kw':>9} | {'max|d|':>8} "
-        f"{'mean|d|':>8}"
+        f"{'batch':>5} {'step':>8} {'records':>7} | {'graph tri':>9} {'kw':>6} "
+        f"{'speedup':>7} | {'eager tri':>9} {'kw':>6} | {'host tri':>8} {'kw':>6} "
+        f"| {'same':>6} {'max|d|/rms':>10}"
     )
     print(header)
     print("-" * len(header))
+    breakdown = []
     for batch in args.batches:
         slots = 2 * batch + 1
         tokens = batch * args.window
@@ -254,27 +301,41 @@ def main() -> None:
                     slots,
                     record_rows,
                     args.conv_layout == "DS",
+                    args,
                 )
                 for _ in range(args.layers)
             ]
             for norm in (True, False):
-                diff = _difference(layers[0], meta, norm, live_tokens)
+                wide_verify.WideRecoverSSMVerify._failed = None
+                same, worst = _difference(layers[0], meta, norm, live_tokens)
                 times = {}
                 for path in ("triton", "kdawide"):
                     calls = [
                         functools.partial(getattr(layer, path), meta, norm)
                         for layer in layers
                     ]
-                    times[path] = (_graph_us(calls), _eager_us(calls))
-                (tri, tri_eager), (wide, wide_eager) = times["triton"], times["kdawide"]
+                    times[path] = (_graph_us(calls), _eager_us(calls), _host_us(calls))
+                (tri, tri_eager, tri_host) = times["triton"]
+                (wide, wide_eager, wide_host) = times["kdawide"]
                 print(
                     f"{batch:>5} {'+norm' if norm else 'pre-norm':>8} "
-                    f"{'slot' if record_rows else 'row':>9} | {tri:>8.1f} "
-                    f"{wide:>8.1f} {tri / wide:>6.2f}x | {tri_eager:>9.1f} "
-                    f"{wide_eager:>9.1f} | {diff[0]:>8.2e} {diff[1]:>8.2e}"
+                    f"{'slot' if record_rows else 'row':>7} | {tri:>9.1f} "
+                    f"{wide:>6.1f} {tri / wide:>6.2f}x | {tri_eager:>9.1f} "
+                    f"{wide_eager:>6.1f} | {tri_host:>8.1f} {wide_host:>6.1f} | "
+                    f"{same:>6.4f} {worst:>10.2e}"
                 )
+            if not record_rows:
+                stages = [
+                    _host_us([functools.partial(getattr(layer, stage), meta)])
+                    for stage in ("conv1d", "verify", "norm")
+                    for layer in layers[:1]
+                ]
+                breakdown.append((batch, *stages))
             del layers
             torch.cuda.empty_cache()
+    print("\nTriton path host us per layer: conv1d update / verify / o_norm")
+    for batch, conv, verify, norm in breakdown:
+        print(f"{batch:>5}: {conv:.1f} / {verify:.1f} / {norm:.1f}")
 
 
 if __name__ == "__main__":
