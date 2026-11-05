@@ -720,3 +720,94 @@ def test_cute_state_commit_align_matches_triton(window, batch, monkeypatch):
         torch.testing.assert_close(
             cute_state.float(), triton_state.float(), atol=2e-2, rtol=2e-2
         )
+
+
+@torch.inference_mode()
+def test_triton_records_at_record_rows_match_records_at_batch_rows():
+    """A non-last PP rank keeps a step's verify records at its requests' slots
+    (``record_rows``) until the commit, which runs after the next step's verify:
+    verify + commit through any record rows give the outputs and states of the
+    batch-row records, and write each request's records only at its slot."""
+    heads, window, batch, num_layers = 16, 5, 6, 2
+    torch.manual_seed(0)
+    slots = 2 * batch + 1
+    lens = torch.full((batch,), window, dtype=torch.int32)
+    lens[1] = 2
+    query_start = torch.zeros(batch + 1, dtype=torch.int32)
+    query_start[1:] = torch.cumsum(lens, 0)
+    query_start = query_start.to(DEVICE)
+    tokens = int(query_start[-1])
+    q, k, v, raw_g = (
+        torch.randn(1, tokens, heads, D, device=DEVICE, dtype=torch.bfloat16)
+        for _ in range(4)
+    )
+    raw_beta = torch.randn(1, tokens, heads, device=DEVICE, dtype=torch.bfloat16)
+    state_indices = torch.randperm(slots - 1, device=DEVICE)[:batch].to(torch.int32) + 1
+    state_indices[3] = 0  # a CUDA graph padding row
+    accepted = torch.randint(0, window + 1, (batch,), dtype=torch.int32, device=DEVICE)
+    num_rows = batch + 4
+    slot_rows = torch.randperm(num_rows, device=DEVICE)[:batch].to(torch.int32)
+    base_pages = [_pages(slots, heads, window, dim_first=True) for _ in range(2)]
+    params = [
+        (torch.randn(heads, device=DEVICE) * 0.5, torch.randn(heads * D, device=DEVICE))
+        for _ in range(num_layers)
+    ]
+
+    def run(record_rows):
+        layers, outs = [], []
+        for pages, (A_log, dt_bias) in zip(base_pages, params):
+            pages = _clone_pages(pages)
+            records = _records(num_rows, heads, window)
+            # Any read of a row the verify did not write turns a state NaN.
+            records.correction.fill_(float("nan"))
+            records.key_gate.fill_(float("nan"))
+            outs.append(
+                kda_recoverssm_verify(
+                    q=q,
+                    k=k,
+                    v=v,
+                    raw_g=raw_g,
+                    raw_beta=raw_beta,
+                    A_log=A_log,
+                    dt_bias=dt_bias,
+                    lower_bound=LOWER_BOUND,
+                    checkpoint_state=pages[2],
+                    records=records,
+                    query_start_loc=query_start,
+                    state_indices=state_indices,
+                    spec_query_len=window,
+                    record_rows=record_rows,
+                )
+            )
+            layer = _layer(pages, records, heads)
+            layer.A_log, layer.dt_bias = A_log, dt_bias
+            layers.append(layer)
+        context = KDARecoverSSMCommitContext.create(
+            layers, spec_query_len=window, max_num_reqs=batch, backend="triton"
+        )
+        context.commit(accepted, state_indices, query_start, record_rows=record_rows)
+        torch.accelerator.synchronize()
+        return outs, layers
+
+    batch_outs, batch_layers = run(None)
+    slot_outs, slot_layers = run(slot_rows)
+
+    live = [b for b in range(batch) if int(state_indices[b]) > 0]
+    for batch_out, slot_out in zip(batch_outs, slot_outs):
+        assert torch.equal(batch_out, slot_out)
+    for batch_layer, slot_layer in zip(batch_layers, slot_layers):
+        for batch_cache, slot_cache in zip(batch_layer.kv_cache, slot_layer.kv_cache):
+            assert torch.equal(batch_cache, slot_cache)
+        for b in live:
+            row, n = int(slot_rows[b]), int(lens[b])
+            for batch_rec, slot_rec in zip(
+                (
+                    batch_layer.recoverssm_records.correction,
+                    batch_layer.recoverssm_records.key_gate,
+                ),
+                (
+                    slot_layer.recoverssm_records.correction,
+                    slot_layer.recoverssm_records.key_gate,
+                ),
+            ):
+                assert torch.equal(slot_rec[row, :, :n], batch_rec[b, :, :n])

@@ -3,6 +3,7 @@
 """Pipeline Parallelism utils for V2 Model Runner."""
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -36,6 +37,9 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
+    # Restores the model state's postprocess inputs of this step (see
+    # ModelState.defer_postprocess_state) before its postprocess runs.
+    restore_model_state: Callable[[], None] | None = None
     # Whether the matching broadcasts were posted on the broadcast stream.
     launched: bool = False
 
@@ -256,6 +260,8 @@ class PPHandler:
 
         assert slot.event is not None
         self.main_stream.wait_event(slot.event)
+        if slot.restore_model_state is not None:
+            slot.restore_model_state()
         return dict(
             sampled_tokens=slot.sampled_tokens,
             num_sampled=slot.num_sampled,
@@ -275,10 +281,16 @@ class PPHandler:
                 )
                 draft_tokens.record_stream(self.broadcast_stream)
 
-    def receive(self, input_batch: InputBatch, recv_drafts: bool) -> bool:
+    def receive(
+        self,
+        input_batch: InputBatch,
+        recv_drafts: bool,
+        restore_model_state: Callable[[], None] | None = None,
+    ) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
         requests in the batch. `recv_drafts` must match whether the last rank
-        calls `broadcast_drafts` for this step."""
+        calls `broadcast_drafts` for this step. `restore_model_state` runs right
+        before this step's postprocess, once its sampled tokens arrive."""
         assert not self.is_last_rank
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:
@@ -314,6 +326,7 @@ class PPHandler:
             need_sampled_mask,
             gen_at_receive_np,
             draft_tokens,
+            restore_model_state,
         )
         self.queue[-1] = slot
         if self.recv_launch_delay == 0:

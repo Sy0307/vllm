@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, ClassVar, cast
 
 import torch
@@ -172,6 +173,13 @@ class ModelState(ABC):
         num_sampled: torch.Tensor,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
+        return None
+
+    def defer_postprocess_state(self) -> Callable[[], None] | None:
+        """On a non-last PP rank, detach this step's postprocess inputs: the
+        returned function, called when the step's sampled tokens arrive (at the
+        start of a later step), restores them for that ``postprocess_state``.
+        None: nothing to restore."""
         return None
 
     @abstractmethod

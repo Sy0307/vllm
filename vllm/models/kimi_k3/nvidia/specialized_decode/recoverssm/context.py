@@ -329,6 +329,7 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
             self.A_log,
             self.dt_bias,
             state_indices,
+            None,
             self.commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
@@ -357,6 +358,7 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
+            HAS_RECORD_ROWS=False,
             num_warps=4,
             num_stages=2,
         )

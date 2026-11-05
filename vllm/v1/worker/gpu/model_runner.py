@@ -2262,7 +2262,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch = self.pcp_manager.global_batch
             assert self.pp_handler is not None
             all_decode_next = self.pp_handler.receive(
-                input_batch, recv_drafts=num_spec_tokens > 0
+                input_batch,
+                recv_drafts=num_spec_tokens > 0,
+                restore_model_state=self.model_state.defer_postprocess_state(),
             )
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.

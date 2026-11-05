@@ -205,15 +205,19 @@ def _decode_batch():
     return batch
 
 
-def _run_steps(handler, log, num_steps):
+def _run_steps(handler, log, num_steps, first_step=0):
     """Drive the non-last-rank call order of GPUModelRunner for each step."""
     tensors = {}
-    for step in range(num_steps):
+    for step in range(first_step, first_step + num_steps):
         out = handler.get_prev_sampled_outputs()
         log.append(("consume", step, None if out is None else out["num_sampled"]))
         log.append(("model", step))
         handler.launch_post_model_receive()
-        handler.receive(_decode_batch(), recv_drafts=True)
+        handler.receive(
+            _decode_batch(),
+            recv_drafts=True,
+            restore_model_state=lambda step=step: log.append(("restore", step)),
+        )
         slot = handler.queue[-1]
         for t in (slot.sampled_tokens, slot.combined, slot.draft_tokens):
             tensors[id(t)] = step
@@ -269,3 +273,29 @@ def test_no_forward_step_posts_pending_receive(monkeypatch):
     handler.get_prev_sampled_outputs()
     handler.launch_post_model_receive()
     assert _posted_steps(log, tensors) == [0, 0, 0, 1, 1, 1]
+
+
+def test_postprocess_state_is_restored_once_right_before_its_step_is_consumed(
+    monkeypatch,
+):
+    """Step T's model state (e.g. the RecoverSSM commit inputs) is restored when
+    step T is consumed, after its receive was posted and before the outputs go
+    to its postprocess, and never for a step none of whose requests survive."""
+    log: list = []
+    handler = _deferred_handler(monkeypatch, log, delay=1)
+    _run_steps(handler, log, num_steps=4)
+
+    restores = [e[1] for e in log if e[0] == "restore"]
+    assert restores == [0, 1]  # steps 2 and 3 are not consumed yet
+    for step in restores:
+        restore = log.index(("restore", step))
+        assert log.index(("model", step + 1)) < restore
+        consume = next(i for i, e in enumerate(log) if e[:2] == ("consume", step + 2))
+        assert restore < consume
+
+    # Both requests of step 2 are freed before step 4 consumes it.
+    handler.on_req_idx_freed(0)
+    handler.on_req_idx_freed(1)
+    _run_steps(handler, log, num_steps=1, first_step=4)
+    assert ("restore", 2) not in log
+    assert ("consume", 4, None) in log

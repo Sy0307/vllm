@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import TypeVar
 from unittest.mock import Mock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -702,6 +703,95 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     assert args[0] is num_accepted_tokens
     torch.testing.assert_close(args[1], commit_metadata.state_indices[:, 0])
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
+
+
+def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_build(
+    monkeypatch,
+):
+    """On a non-last PP rank a step's commit runs after the next step's build
+    and verify: its verify records live at each request's slot (not its row of
+    the step), and its deferred-commit snapshot keeps the step's own inputs."""
+    monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
+    monkeypatch.setattr("vllm.v1.attention.backends.utils.PIN_MEMORY", False)
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.nvidia.kda_metadata.uses_slot_records", lambda _: True
+    )
+    kv_cache_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        mamba_cache_mode="none",
+    )
+    builder_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(linear_key_head_dim=32),
+        ),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="none",
+            use_kda_recoverssm=True,
+            prefix_match_unit=None,
+            hash_block_size=BLOCK_SIZE,
+            cache_hit_alignment_tokens=BLOCK_SIZE,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens=2,
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+            use_eagle_block_drop=Mock(return_value=False),
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            max_cudagraph_capture_size=None,
+            static_forward_context={},
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=16),
+        additional_config={},
+        num_speculative_tokens=2,
+        num_hash_lookahead_tokens=0,
+        use_v2_model_runner=True,
+    )
+    builder = KimiK3KDAMetadataBuilder(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["layer.0"],
+        vllm_config=builder_config,
+        device=DEVICE,
+    )
+    builder.recoverssm_context = Mock()
+
+    def build(req_idx: list[int]) -> KimiK3KDAMetadata:
+        batch = BatchSpec(seq_lens=[100, 30, 20], query_lens=[1, 3, 3])
+        common = create_common_attn_metadata(batch, BLOCK_SIZE, DEVICE).replace(
+            is_prefilling=torch.tensor([True, False, False]),
+            req_idx=np.array(req_idx),
+        )
+        return builder.build(
+            0,
+            common,
+            num_decode_draft_tokens_cpu=torch.tensor([-1, 2, 2], dtype=torch.int32),
+            num_accepted_tokens=torch.ones(3, dtype=torch.int32),
+        )
+
+    step = build([7, 4, 9])
+    commit = step.recoverssm_commit
+    assert commit is not None and commit.record_rows is not None
+    # The speculative rows 1 and 2 hold requests 4 and 9.
+    assert step.recoverssm_record_rows is commit.record_rows
+    assert commit.record_rows[:2].tolist() == [4, 9]
+    snapshot = step.snapshot_for_deferred_commit()
+    state_indices = commit.state_indices[:2].clone()
+
+    build([3, 1, 2])
+
+    snapshot_commit = snapshot.recoverssm_commit
+    assert snapshot_commit is not None and snapshot_commit.record_rows is not None
+    assert snapshot_commit.record_rows.tolist() == [4, 9]
+    torch.testing.assert_close(snapshot_commit.state_indices, state_indices)
+    num_accepted = torch.tensor([1, 3, 2], dtype=torch.int32)
+    snapshot.commit_recoverssm_state(num_accepted)
+    commit_call = builder.recoverssm_context.commit.call_args
+    assert commit_call.kwargs["record_rows"].tolist() == [4, 9]
 
 
 def test_recoverssm_distinguishes_draftless_decode_from_one_token_prefill():

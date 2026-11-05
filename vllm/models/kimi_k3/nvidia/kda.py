@@ -50,6 +50,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
+    uses_slot_records,
 )
 from vllm.models.kimi_k3.nvidia.ops.kda_conv import (
     packed_causal_conv1d_fn,
@@ -767,6 +768,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 conv_weight_dtype=self.conv1d.weight.dtype,
                 lower_bound=self.gate_lower_bound,
             )
+            if supported and uses_slot_records(vllm_config):
+                # Only the Triton kernels address records by request slot.
+                supported, reason = False, "slot-indexed records (PP)"
             self.recoverssm_backend = "cute" if supported else "triton"
             if self.recoverssm_backend == "triton":
                 logger.info_once(
@@ -1077,6 +1081,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             state_indices=state_indices,
             spec_query_len=self.spec_query_len,
             out=out,
+            record_rows=m.recoverssm_record_rows,
         )
 
     @eager_break_during_capture

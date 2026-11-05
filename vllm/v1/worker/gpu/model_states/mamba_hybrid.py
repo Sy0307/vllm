@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -347,6 +348,9 @@ class MambaHybridModelState(DefaultModelState):
             )
         return attn_metadata
 
+    def defer_postprocess_state(self) -> Callable[[], None] | None:
+        return self.recoverssm.defer_step() if self.recoverssm is not None else None
+
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
@@ -387,9 +391,12 @@ class MambaHybridModelState(DefaultModelState):
         # Align: save the running state to the block-aligned position when
         # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
         # the V1 align postprocess). num_computed_tokens already holds the
-        # post-step advanced count.
+        # post-step advanced count. RecoverSSM's commit already wrote the
+        # boundary and final states; a copy here could only race a deferred
+        # (PP) commit's optimistic token counts into another request's block.
         if (
             self._align_mode
+            and self.recoverssm is None
             and num_computed_tokens is not None
             and self._mamba_ctx is not None
         ):

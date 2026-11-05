@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -15,6 +16,25 @@ class RecoverSSMState:
 
     def __init__(self) -> None:
         self._step: tuple[RecoverSSMMetadata, ...] | None = None
+        self._deferred = False
+
+    def defer_step(self) -> Callable[[], None]:
+        """Detach the recorded step for a commit that runs once its sampled
+        tokens arrive (non-last PP ranks, ``pp_size`` steps later). Calling the
+        returned function makes it the step the next ``commit_step`` commits."""
+        step = self._step
+        self._step = None
+        snapshot = (
+            tuple(meta.snapshot_for_deferred_commit() for meta in step)
+            if step is not None
+            else None
+        )
+
+        def restore() -> None:
+            self._step = snapshot
+            self._deferred = True
+
+        return restore
 
     def record_step(
         self,
@@ -45,8 +65,14 @@ class RecoverSSMState:
     ) -> None:
         step = self._step
         self._step = None
+        deferred = self._deferred
+        self._deferred = False
         if isinstance(num_sampled, int) or step is None:
             return
+        if deferred:
+            # Rows whose request was freed since the step (idx_mapping -1) may
+            # have had their state blocks reused: commit nothing for them.
+            num_sampled = torch.where(idx_mapping >= 0, num_sampled, 0)
 
         for metadata in step:
             postprocess_meta = metadata.commit_recoverssm_state(num_sampled)
@@ -90,6 +116,8 @@ def _postprocess_recoverssm_align_kernel(
     if req_state_idx < 0:
         return
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
+    if num_sampled <= 0:
+        return
     num_computed = tl.load(num_computed_ptr + batch_idx)
     tl.store(
         state_idx_ptr + req_state_idx,

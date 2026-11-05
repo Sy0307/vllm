@@ -75,6 +75,7 @@ def _kda_recoverssm_verify_kernel(
     out_ptr,
     query_start_loc_ptr,
     state_indices_ptr,
+    record_rows_ptr,
     lower_bound,
     null_block_id,
     stride_q_token,
@@ -103,6 +104,7 @@ def _kda_recoverssm_verify_kernel(
     BV: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    HAS_RECORD_ROWS: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -130,6 +132,9 @@ def _kda_recoverssm_verify_kernel(
                 mask=token_valid & mask_v,
             )
         return
+    record_row = pid_b.to(tl.int64)
+    if HAS_RECORD_ROWS:
+        record_row = tl.load(record_rows_ptr + pid_b).to(tl.int64)
 
     state_ptrs = (
         state_ptr
@@ -196,7 +201,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + pid_b * stride_correction_row
+            + record_row * stride_correction_row
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -208,7 +213,7 @@ def _kda_recoverssm_verify_kernel(
         if pid_v == 0:
             kg_ptr = (
                 kg_cache_ptr
-                + pid_b * stride_kg_row
+                + record_row * stride_kg_row
                 + pid_h * stride_kg_head
                 + token_offset * stride_kg_pos
             )
@@ -411,6 +416,7 @@ def _commit_kda_state_kernel(
     A_log_ptr,
     dt_bias_ptr,
     state_indices_ptr,
+    record_rows_ptr,
     commit_lens_ptr,
     final_state_indices_ptr,
     boundary_state_indices_ptr,
@@ -439,6 +445,7 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    HAS_RECORD_ROWS: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -473,16 +480,20 @@ def _commit_kda_state_kernel(
     correction_cache_ptr = correction_cache_base_addr.to(
         tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty)
     )
-    # The records are those of request pid_b of the step.
+    # The records are those of request pid_b of the step, at the verify's row.
+    record_row = pid_b.to(tl.int64)
+    if HAS_RECORD_ROWS:
+        record_row = tl.load(record_rows_ptr + pid_b).to(tl.int64)
     correction_cache_ptr += (
-        pid_b * correction_cache_block_stride + pid_h * stride_correction_cache_head
+        record_row * correction_cache_block_stride
+        + pid_h * stride_correction_cache_head
     )
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(
         tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty)
     )
-    kg_cache_ptr += pid_b * kg_cache_block_stride + pid_h * stride_kg_cache_head
+    kg_cache_ptr += record_row * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
@@ -627,9 +638,11 @@ def kda_recoverssm_verify(
     state_indices: torch.Tensor,
     spec_query_len: int,
     out: torch.Tensor | None = None,
+    record_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Verify a KDA speculative window without modifying its checkpoint. Request
-    ``b`` writes its verify records to row ``b`` of ``records``."""
+    ``b`` writes its verify records to row ``record_rows[b]`` of ``records``
+    (row ``b`` without ``record_rows``)."""
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
     _, total_tokens, num_heads, key_dim = q.shape
@@ -656,6 +669,8 @@ def kda_recoverssm_verify(
     batch = state_indices.shape[0]
     if query_start_loc.shape[0] != batch + 1:
         raise ValueError("KDA RecoverSSM query metadata is incompatible")
+    if record_rows is not None and record_rows.shape[0] < batch:
+        raise ValueError("KDA RecoverSSM record rows are too short")
     if total_tokens > batch * spec_query_len:
         raise ValueError(
             "KDA RecoverSSM speculative decode input exceeds its activation capacity"
@@ -705,6 +720,7 @@ def kda_recoverssm_verify(
         out,
         query_start_loc,
         state_indices,
+        record_rows,
         lower_bound or 0.0,
         NULL_BLOCK_ID,
         q.stride(1),
@@ -733,6 +749,7 @@ def kda_recoverssm_verify(
         BV=block_v,
         SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
+        HAS_RECORD_ROWS=record_rows is not None,
         num_warps=4,
         num_stages=2,
     )
@@ -895,13 +912,21 @@ class KDARecoverSSMCommitContext:
         block_table: torch.Tensor | None = None,
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
+        record_rows: torch.Tensor | None = None,
     ) -> None:
-        """Fold accepted KDA and convolution inputs into every layer."""
+        """Fold accepted KDA and convolution inputs into every layer.
+
+        ``record_rows`` are the verify's record rows of the speculative rows
+        (see ``kda_recoverssm_verify``); None reads row ``b`` for row ``b``."""
         batch = state_indices.shape[0]
         if batch == 0:
             return
         if batch > self.commit_lens.shape[0]:
             raise ValueError("KDA RecoverSSM commit batch exceeds its plan capacity")
+        if record_rows is not None and record_rows.shape[0] < batch:
+            raise ValueError("KDA RecoverSSM record rows are too short")
+        if record_rows is not None and self.backend != "triton":
+            raise ValueError("KDA RecoverSSM record rows need the Triton commit")
         if query_start_loc.shape[0] != batch + 1:
             raise ValueError("KDA RecoverSSM commit metadata is incompatible")
         if request_indices is not None and request_indices.shape[0] < batch:
@@ -1016,6 +1041,7 @@ class KDARecoverSSMCommitContext:
             self.A_log,
             self.dt_bias,
             state_indices,
+            record_rows,
             self.commit_lens,
             self.final_state_indices,
             self.boundary_state_indices,
@@ -1044,6 +1070,7 @@ class KDARecoverSSMCommitContext:
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
+            HAS_RECORD_ROWS=record_rows is not None,
             num_warps=4,
             num_stages=2,
         )

@@ -397,6 +397,45 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
 
 
+def test_recoverssm_deferred_commit_folds_its_own_step_and_skips_freed_rows():
+    """A non-last PP rank commits step T once its tokens arrive, after step
+    T+1 recorded its metadata: the commit must use step T's snapshot, and rows
+    whose request was freed meanwhile (idx_mapping -1) must fold nothing."""
+    state = RecoverSSMState()
+    attn_groups = _recoverssm_attn_groups("layer")
+    step_t, step_t1 = Mock(spec=RecoverSSMMetadata), Mock(spec=RecoverSSMMetadata)
+    snapshot_t = Mock(spec=RecoverSSMMetadata)
+    snapshot_t.commit_recoverssm_state.return_value = None
+    step_t.snapshot_for_deferred_commit.return_value = snapshot_t
+    accepted = torch.ones(3, dtype=torch.int32)
+
+    state.record_step({"layer": step_t}, attn_groups, for_capture=False)
+    restore_t = state.defer_step()
+    # Nothing is left to commit for step T until its tokens arrive.
+    state.commit_step(
+        torch.tensor([1, 1, 1]),
+        torch.tensor([0, 1, 2]),
+        state_indices=None,
+        num_accepted_tokens=accepted,
+    )
+    state.record_step({"layer": step_t1}, attn_groups, for_capture=False)
+    state.defer_step()
+
+    restore_t()
+    state.commit_step(
+        torch.tensor([3, 2, 4], dtype=torch.int32),
+        torch.tensor([5, -1, 7], dtype=torch.int32),
+        state_indices=None,
+        num_accepted_tokens=accepted,
+    )
+
+    snapshot_t.commit_recoverssm_state.assert_called_once()
+    (committed,) = snapshot_t.commit_recoverssm_state.call_args.args
+    assert committed.tolist() == [3, 0, 4]
+    step_t.commit_recoverssm_state.assert_not_called()
+    step_t1.commit_recoverssm_state.assert_not_called()
+
+
 @pytest.mark.skipif(not HAS_GPU, reason="Requires CUDA or XPU")
 @pytest.mark.parametrize(
     ("computed", "sampled", "expected_column"),

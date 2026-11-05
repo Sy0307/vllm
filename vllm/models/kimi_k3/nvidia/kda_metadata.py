@@ -11,13 +11,15 @@ For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
 RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -242,6 +244,15 @@ def stage_spec_decode_metadata(
     )
 
 
+def uses_slot_records(vllm_config: VllmConfig) -> bool:
+    """Whether RecoverSSM verify records are kept at each request's slot rather
+    than its row of the step: on a non-last PP rank, a step's commit waits for
+    its sampled tokens, after the next step's verify has run (a request is not
+    in two in-flight steps, so its slot holds its records until the commit)."""
+    pp_size = getattr(vllm_config.parallel_config, "pipeline_parallel_size", 1)
+    return pp_size > 1 and not get_pp_group().is_last_rank
+
+
 @dataclass
 class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
@@ -255,6 +266,8 @@ class KDARecoverSSMCommitMetadata:
     query_start_loc: torch.Tensor
     request_indices: torch.Tensor | None
     align: KDARecoverSSMAlignMetadata | None
+    # The verify's record row of each speculative row (None: row b).
+    record_rows: torch.Tensor | None = None
 
 
 @dataclass
@@ -267,6 +280,43 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
     )
+    # RecoverSSM verify record row of each speculative row, a persistent buffer
+    # (CUDA graphs); None: the row's index in the speculative batch.
+    recoverssm_record_rows: torch.Tensor | None = None
+
+    def snapshot_for_deferred_commit(self) -> "KimiK3KDAMetadata":
+        """Clone the commit inputs the builder overwrites on its next step, for a
+        commit that runs once a later step brings the sampled tokens."""
+        commit = self.recoverssm_commit
+        if commit is None:
+            return replace(self)
+        align = commit.align
+        if align is not None:
+            align = replace(
+                align,
+                block_table=align.block_table.clone(),
+                num_computed_tokens=align.num_computed_tokens.clone(),
+            )
+        n = self.num_spec_decodes
+        return replace(
+            self,
+            recoverssm_commit=replace(
+                commit,
+                state_indices=commit.state_indices[:n].clone(),
+                query_start_loc=commit.query_start_loc[: n + 1].clone(),
+                request_indices=(
+                    commit.request_indices.clone()
+                    if commit.request_indices is not None
+                    else None
+                ),
+                align=align,
+                record_rows=(
+                    commit.record_rows[:n].clone()
+                    if commit.record_rows is not None
+                    else None
+                ),
+            ),
+        )
 
     def commit_recoverssm_state(
         self, num_accepted_tokens: torch.Tensor
@@ -287,6 +337,12 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 align.num_computed_tokens if align is not None else None
             ),
             mamba_block_size=align.block_size if align is not None else None,
+            # The specialized decode's deferred context passes its own rows.
+            **(
+                {"record_rows": commit.record_rows}
+                if commit.record_rows is not None
+                else {}
+            ),
         )
         if align is None:
             return None
@@ -323,6 +379,15 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
         self.recoverssm_context: KDARecoverSSMCommitContext | None = None
+        # A non-last PP rank commits a step once its sampled tokens arrive,
+        # after its next step's verify ran: records go to each request's slot.
+        self.recoverssm_slot_rows: torch.Tensor | None = None
+        if self.use_recoverssm and uses_slot_records(vllm_config):
+            self.recoverssm_slot_rows = torch.zeros(
+                vllm_config.scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=device,
+            )
         if self.use_recoverssm:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self.spec_state_indices_tensor = torch.empty(
@@ -355,6 +420,23 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         self.recoverssm_context = context
         return context
+
+    def _stage_slot_rows(
+        self,
+        m: CommonAttentionMetadata,
+        num_spec_decodes: int,
+        spec_sequence_masks_cpu: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Stage each speculative row's request slot (its verify record row)
+        into the persistent buffer a CUDA graph's verify reads."""
+        rows = self.recoverssm_slot_rows
+        assert rows is not None and spec_sequence_masks_cpu is not None
+        spec_rows = spec_sequence_masks_cpu.nonzero(as_tuple=True)[0].numpy()
+        assert spec_rows.shape[0] == num_spec_decodes
+        # Dummy and capture batches carry no request table; their rows stand in.
+        slots = spec_rows if m.req_idx is None else np.asarray(m.req_idx)[spec_rows]
+        async_tensor_h2d(slots.astype(np.int32), out=rows[:num_spec_decodes])
+        return rows
 
     def build(  # type: ignore[override]
         self,
@@ -668,6 +750,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             ]
 
         recoverssm_commit = None
+        record_rows = None
         if self.use_recoverssm and num_spec_decodes > 0:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
@@ -678,11 +761,16 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                     num_computed_tokens=m.compute_num_computed_tokens(),
                     block_size=self.kv_cache_spec.block_size,
                 )
+            if self.recoverssm_slot_rows is not None:
+                record_rows = self._stage_slot_rows(
+                    m, num_spec_decodes, spec_sequence_masks_cpu
+                )
             recoverssm_commit = KDARecoverSSMCommitMetadata(
                 state_indices=spec_state_indices_tensor,
                 query_start_loc=spec_query_start_loc,
                 request_indices=spec_request_indices,
                 align=align,
+                record_rows=record_rows,
             )
 
         flashinfer_prefill_query_start_loc = None
@@ -733,6 +821,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 if recoverssm_commit is not None
                 else None
             ),
+            recoverssm_record_rows=record_rows,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
