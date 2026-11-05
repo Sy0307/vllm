@@ -206,7 +206,14 @@ def maybe_init_gemm_rs_ar(vllm_config: VllmConfig, use_sequence_parallel: bool) 
     # its singleton to exactly one mode.
     all_reduce = not use_sequence_parallel
     mode = "GEMM-AR" if all_reduce else "GEMM-RS"
-    enabled = envs.VLLM_KIMI_K3_GEMM_AR if all_reduce else envs.VLLM_ENABLE_GEMM_RS
+    if all_reduce:
+        enabled = envs.VLLM_KIMI_K3_GEMM_AR
+    else:
+        # On by default under SP (our K3 B200 deployment runs it); the shared
+        # setting still turns it off.
+        enabled = (
+            envs.VLLM_ENABLE_GEMM_RS if envs.is_set("VLLM_ENABLE_GEMM_RS") else True
+        )
     if not enabled:
         return False
 
