@@ -167,6 +167,16 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadat
             FlashInferMLAMetadata,
             supports_dcp_with_varlen=True,
         )
+        # A draft decode reads only views of the speculator's persistent buffers
+        # (block table, seq_lens, query_start_loc and, under DCP, the local seq
+        # lens the speculator recomputes before this update) and a max_seq_len
+        # fixed by the config; forward_mqa derives the per-token rows of
+        # non-causal blocks from them, so a captured graph recomputes those too.
+        # PCP gathers through host-built plans, which would go stale.
+        self.supports_draft_decode_metadata_update = not self.use_pcp
+
+    def update_draft_decode_metadata(self, _metadata: FlashInferMLAMetadata) -> None:
+        pass
 
     def _build_decode(
         self,
