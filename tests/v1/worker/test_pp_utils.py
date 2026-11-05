@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which rows the PP sampled-token broadcast must carry."""
 
+from collections import deque
+from contextlib import nullcontext
 from unittest.mock import Mock
 
 import numpy as np
+import torch
 
 from vllm.v1.worker.gpu import pp_utils
 
@@ -166,3 +169,103 @@ def test_finishing_prefill_row_does_not_drop_a_sibling_row():
 
     assert mask is not None
     assert mask.tolist() == [False, True]
+
+
+def _deferred_handler(monkeypatch, log, delay):
+    """A non-last-rank PPHandler on CPU whose collectives append to `log`."""
+    handler = pp_utils.PPHandler.__new__(pp_utils.PPHandler)
+    handler.is_last_rank = False
+    handler.last_rank = 1
+    handler.num_speculative_steps = 2
+    handler.max_sample_len = 3
+    handler.device = torch.device("cpu")
+    handler.main_stream = Mock()
+    handler.broadcast_stream = Mock()
+    handler.broadcast_group = None
+    handler.queue = deque([None, None])
+    handler.req_idx_gen_np = np.zeros(4, dtype=np.int32)
+    handler.deferred_recv_launch_delay = delay
+    handler.recv_launch_delay = delay
+    handler.pending_post_model_receive = None
+    monkeypatch.setattr(pp_utils.torch.cuda, "stream", lambda s: nullcontext())
+    monkeypatch.setattr(torch.Tensor, "record_stream", lambda self, s: None)
+    monkeypatch.setattr(
+        pp_utils.torch.distributed,
+        "broadcast",
+        lambda tensor, src, group: log.append(("recv", tensor)),
+    )
+    return handler
+
+
+def _decode_batch():
+    batch = _batch(num_computed=[10, 20], prefill_len=[5, 5], num_scheduled=[3, 3])
+    batch.idx_mapping_np = np.array([0, 1], dtype=np.int32)
+    batch.idx_mapping = torch.tensor([0, 1])
+    batch.num_draft_tokens = 4
+    return batch
+
+
+def _run_steps(handler, log, num_steps):
+    """Drive the non-last-rank call order of GPUModelRunner for each step."""
+    tensors = {}
+    for step in range(num_steps):
+        out = handler.get_prev_sampled_outputs()
+        log.append(("consume", step, None if out is None else out["num_sampled"]))
+        log.append(("model", step))
+        handler.launch_post_model_receive()
+        handler.receive(_decode_batch(), recv_drafts=True)
+        slot = handler.queue[-1]
+        for t in (slot.sampled_tokens, slot.combined, slot.draft_tokens):
+            tensors[id(t)] = step
+    return tensors
+
+
+def _posted_steps(log, tensors):
+    return [tensors[id(entry[1])] for entry in log if entry[0] == "recv"]
+
+
+def test_deferred_receive_posts_after_next_model_in_step_order(monkeypatch):
+    """The receive for step T waits until step T+1's model kernels are queued,
+    so its NCCL kernel never sits on SMs that step T+1's forward needs, and
+    receives are still posted once each, in the last rank's broadcast order."""
+    log: list = []
+    handler = _deferred_handler(monkeypatch, log, delay=1)
+    tensors = _run_steps(handler, log, num_steps=5)
+
+    # Three broadcasts (tokens, counts, drafts) per step, in step order; the
+    # last step's receive waits for a model that has not run yet.
+    assert _posted_steps(log, tensors) == [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]
+    for step in range(3):
+        first_recv = next(
+            i for i, e in enumerate(log) if e[0] == "recv" and tensors[id(e[1])] == step
+        )
+        assert log.index(("model", step + 1)) < first_recv
+        # Posted before the step that consumes it (step + 2) starts.
+        consume = next(i for i, e in enumerate(log) if e[:2] == ("consume", step + 2))
+        assert first_recv < consume
+        assert log[consume][2] is not None
+
+    handler.flush_pending_collectives()
+    assert _posted_steps(log, tensors)[12:] == [4, 4, 4]
+
+
+def test_immediate_receive_before_deferral_is_enabled(monkeypatch):
+    """Warmup keeps upstream timing: each receive is posted inside receive()."""
+    log: list = []
+    handler = _deferred_handler(monkeypatch, log, delay=0)
+    tensors = _run_steps(handler, log, num_steps=2)
+    first_recv = next(i for i, e in enumerate(log) if e[0] == "recv")
+    assert log.index(("model", 0)) < first_recv < log.index(("consume", 1, None))
+    assert _posted_steps(log, tensors) == [0, 0, 0, 1, 1, 1]
+
+
+def test_no_forward_step_posts_pending_receive(monkeypatch):
+    """An idle step has no model kernels to wait behind, so the pending receive
+    is posted before the next consume, keeping FIFO order with later steps."""
+    log: list = []
+    handler = _deferred_handler(monkeypatch, log, delay=1)
+    tensors = _run_steps(handler, log, num_steps=2)
+    # Step 2 is idle: consume, then the no-forward branch posts step 1.
+    handler.get_prev_sampled_outputs()
+    handler.launch_post_model_receive()
+    assert _posted_steps(log, tensors) == [0, 0, 0, 1, 1, 1]

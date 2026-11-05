@@ -341,6 +341,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs=self.max_num_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
+                async_scheduling=self.scheduler_config.async_scheduling,
             )
 
         # Samplers and decode_query_len created in load_model() after
@@ -1864,6 +1865,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
+                if self.pp_handler is not None:
+                    self.pp_handler.launch_post_model_receive()
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
@@ -1921,6 +1924,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
+            if not dummy_run and self.pp_handler is not None:
+                self.pp_handler.launch_post_model_receive()
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
@@ -2216,6 +2221,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
         )
 
+        if not dummy_run and self.pp_handler is not None:
+            self.pp_handler.launch_post_model_receive()
+
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
@@ -2485,6 +2493,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self.pp_handler is not None:
+            self.pp_handler.flush_pending_collectives()
         torch.accelerator.synchronize()
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:

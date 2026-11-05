@@ -1299,6 +1299,15 @@ class Worker(WorkerBase):
         # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
         enable_gpu_sync_check()
 
+        if self.use_v2_model_runner:
+            pp_handler = self._v2_model_runner().pp_handler
+            if pp_handler is not None:
+                pp_handler.enable_deferred_collectives()
+                logger.info(
+                    "PP sampled-token receive deferred by %d step(s)",
+                    pp_handler.recv_launch_delay,
+                )
+
         num_kv_blocks = None
         if self.cache_config.enable_extensible_kv_cache:
             kv_cache = self._v2_model_runner().extensible_kv_cache
@@ -1540,6 +1549,10 @@ class Worker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if not forward_pass and self.use_v2_model_runner:
+            pp_handler = self._v2_model_runner().pp_handler
+            if pp_handler is not None:
+                pp_handler.flush_pending_collectives()
         all_gather_group = (
             None
             if getattr(self, "pp_intermediate_tensors_are_sequence_sharded", False)

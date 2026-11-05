@@ -20,9 +20,12 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
 
-    event: torch.cuda.Event
+    # Recorded when the receive is posted; None until then.
+    event: torch.cuda.Event | None
 
     sampled_tokens: torch.Tensor  # [num_reqs, sample_len]
+    # [2, num_reqs] broadcast target; num_sampled/num_rejected are views of it.
+    combined: torch.Tensor
     num_sampled: torch.Tensor  # [num_reqs]
     num_rejected: torch.Tensor  # [num_reqs]
     idx_mapping: torch.Tensor  # [num_reqs]
@@ -33,6 +36,24 @@ class PendingRecv:
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
     draft_tokens: torch.Tensor | None = None  # [num_reqs, num_speculative_steps]
+    # Whether the matching broadcasts were posted on the broadcast stream.
+    launched: bool = False
+
+
+def default_recv_launch_delay(pp_size: int, async_scheduling: bool | None) -> int:
+    """Steps by which a non-last rank defers posting its sampled-token receive.
+
+    A receive posted right after a step's forward sits on the GPU until the
+    last rank samples that step, and its NCCL kernel keeps SMs that whole-grid
+    kernels of the next forward (e.g. MegaMoE) wait for, which serializes the
+    pipeline stages. With async scheduling `pp_size` steps are in flight, so
+    the receive can instead be posted behind a later step's forward and still
+    complete before it is consumed. Synchronous scheduling keeps immediate
+    posting.
+    """
+    if async_scheduling and current_platform.is_cuda_alike():
+        return max(0, pp_size - 1)
+    return 0
 
 
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
@@ -63,15 +84,31 @@ class PPHandler:
     """
 
     def __init__(
-        self, max_num_reqs: int, num_speculative_steps: int, device: torch.device
+        self,
+        max_num_reqs: int,
+        num_speculative_steps: int,
+        device: torch.device,
+        async_scheduling: bool | None = None,
     ):
-        self.is_last_rank = get_pp_group().is_last_rank
-        self.last_rank = get_pp_group().last_rank
+        pp_group = get_pp_group()
+        self.is_last_rank = pp_group.is_last_rank
+        self.last_rank = pp_group.last_rank
         self.max_sample_len = num_speculative_steps + 1
         self.num_speculative_steps = num_speculative_steps
         self.device = device
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
+
+        # Deferred receives are posted behind the model kernels of the step
+        # before they are due. Warmup keeps immediate posting; the worker calls
+        # `enable_deferred_collectives` afterwards.
+        self.deferred_recv_launch_delay = (
+            0
+            if self.is_last_rank
+            else default_recv_launch_delay(pp_group.world_size, async_scheduling)
+        )
+        self.recv_launch_delay = 0
+        self.pending_post_model_receive: PendingRecv | None = None
 
         # On non-last ranks, a FIFO with one entry per in-flight step: the entry
         # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
@@ -128,17 +165,81 @@ class PPHandler:
             }
         )
 
+    def enable_deferred_collectives(self) -> None:
+        self.recv_launch_delay = self.deferred_recv_launch_delay
+
+    def _launch_receive(self, slot: PendingRecv) -> None:
+        """Post the broadcasts matching one step of the last rank, once."""
+        if slot.launched:
+            return
+        with torch.cuda.stream(self.broadcast_stream):
+            # A deferred receive is launched after this rank's model kernels,
+            # so the dependency places it behind them.
+            self.broadcast_stream.wait_stream(self.main_stream)
+            torch.distributed.broadcast(
+                slot.sampled_tokens, src=self.last_rank, group=self.broadcast_group
+            )
+            torch.distributed.broadcast(
+                slot.combined, src=self.last_rank, group=self.broadcast_group
+            )
+            if slot.draft_tokens is not None:
+                torch.distributed.broadcast(
+                    slot.draft_tokens, src=self.last_rank, group=self.broadcast_group
+                )
+            slot.event = self.broadcast_stream.record_event()
+            # Allocated on the broadcast stream but consumed on the main stream.
+            slot.sampled_tokens.record_stream(self.main_stream)
+            slot.combined.record_stream(self.main_stream)
+            if slot.draft_tokens is not None:
+                slot.draft_tokens.record_stream(self.main_stream)
+        slot.launched = True
+
+    def _advance_receive_queue(self) -> PendingRecv | None:
+        """Select the receive to post after this step's model and pop the due
+        one. Receives are always posted in step order (ordered collectives)."""
+        if self.recv_launch_delay:
+            launch_slot = self.queue[-self.recv_launch_delay]
+            if launch_slot is not None:
+                if self.pending_post_model_receive is not None:
+                    # The previous step had no post-model launch point.
+                    self._launch_receive(self.pending_post_model_receive)
+                self.pending_post_model_receive = launch_slot
+        due_slot = self.queue.popleft()
+        # Reserve this step's slot; `receive` overwrites it if applicable.
+        self.queue.append(None)
+        return due_slot
+
+    def launch_post_model_receive(self) -> None:
+        """Post the receive selected for this step behind its model kernels."""
+        slot = self.pending_post_model_receive
+        if slot is None:
+            return
+        self.pending_post_model_receive = None
+        self._launch_receive(slot)
+
+    def flush_pending_collectives(self) -> None:
+        """Post every deferred receive (idle step or shutdown). All non-last
+        ranks reach this at the same logical step, so collective order holds."""
+        if self.is_last_rank:
+            return
+        # The pending slot is still queued, so FIFO order covers it.
+        self.pending_post_model_receive = None
+        for slot in self.queue:
+            if slot is not None:
+                self._launch_receive(slot)
+
     def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor | None] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
         """
         if not self.queue:
             return None
-        slot = self.queue.popleft()
-        # Reserve this step's slot; `receive` overwrites it if applicable.
-        self.queue.append(None)
+        slot = self._advance_receive_queue()
         if slot is None:
             return None
+        # Post before filtering: the last rank broadcast this step regardless
+        # of which local requests still need it.
+        self._launch_receive(slot)
 
         # Skip requests which did not need sampled output and/or those already
         # finished. The post_update kernel skips the -1 entries.
@@ -153,6 +254,7 @@ class PPHandler:
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
             idx_mapping = async_tensor_h2d(idx_mapping_np, device=self.device)
 
+        assert slot.event is not None
         self.main_stream.wait_event(slot.event)
         return dict(
             sampled_tokens=slot.sampled_tokens,
@@ -189,37 +291,22 @@ class PPHandler:
 
         num_reqs = input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
-            self.broadcast_stream.wait_stream(self.main_stream)
             sample_len = self._sample_len(input_batch)
             sampled_tokens = torch.empty(
                 num_reqs, sample_len, dtype=torch.int64, device=self.device
             )
             combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
-            torch.distributed.broadcast(
-                sampled_tokens, src=self.last_rank, group=self.broadcast_group
-            )
-            torch.distributed.broadcast(
-                combined, src=self.last_rank, group=self.broadcast_group
-            )
             draft_tokens = None
             if recv_drafts:
                 draft_tokens = sampled_tokens.new_empty(
                     num_reqs, self.num_speculative_steps
                 )
-                torch.distributed.broadcast(
-                    draft_tokens, src=self.last_rank, group=self.broadcast_group
-                )
-            event = self.broadcast_stream.record_event()
-            num_sampled, num_rejected = combined.unbind(dim=0)
-            # Must record_stream since these were allocated on broadcast stream but
-            # later used on the main stream.
-            sampled_tokens.record_stream(self.main_stream)
-            combined.record_stream(self.main_stream)
-            if draft_tokens is not None:
-                draft_tokens.record_stream(self.main_stream)
-        self.queue[-1] = PendingRecv(
-            event,
+        # Views of the broadcast target, filled in place when it is posted.
+        num_sampled, num_rejected = combined.unbind(dim=0)
+        slot = PendingRecv(
+            None,
             sampled_tokens,
+            combined,
             num_sampled,
             num_rejected,
             input_batch.idx_mapping,
@@ -228,6 +315,9 @@ class PPHandler:
             gen_at_receive_np,
             draft_tokens,
         )
+        self.queue[-1] = slot
+        if self.recv_launch_delay == 0:
+            self._launch_receive(slot)
         return bool(need_sampled_mask.all())
 
     def broadcast(
