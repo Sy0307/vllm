@@ -194,6 +194,7 @@ _grouped_fp4_impl: Callable[..., Any] | None = None
 _fp8_fp4_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
+_get_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _fp8_fp4_sparse_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_sparse_mqa_logits_impl: Callable[..., Any] | None = None
 _get_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
@@ -272,7 +273,7 @@ def _lazy_init() -> None:
     global _fp8_gemm_nt_impl, _fp8_einsum_impl
     global _grouped_impl, _grouped_masked_impl, _grouped_fp4_impl
     global _fp8_fp4_mqa_logits_impl, _fp8_fp4_paged_mqa_logits_impl
-    global _get_paged_mqa_logits_metadata_impl
+    global _get_paged_mqa_logits_metadata_impl, _get_mqa_logits_metadata_impl
     global _fp8_fp4_sparse_mqa_logits_impl, _fp8_fp4_paged_sparse_mqa_logits_impl
     global _get_sparse_mqa_logits_metadata_impl
     global _get_paged_sparse_mqa_logits_metadata_impl
@@ -338,6 +339,7 @@ def _lazy_init() -> None:
     # handle both the FP8 and FP4 Q/K paths via a tuple-typed `q`.
     _fp8_fp4_mqa_logits_impl = getattr(_dg, "fp8_fp4_mqa_logits", None)
     _fp8_fp4_paged_mqa_logits_impl = getattr(_dg, "fp8_fp4_paged_mqa_logits", None)
+    _get_mqa_logits_metadata_impl = getattr(_dg, "get_mqa_logits_metadata", None)
     _get_paged_mqa_logits_metadata_impl = getattr(
         _dg, "get_paged_mqa_logits_metadata", None
     )
@@ -682,6 +684,7 @@ def fp8_fp4_mqa_logits(
     cu_seqlen_ke: torch.Tensor,
     max_seqlen_k: int,
     logits_dtype: torch.dtype = torch.float32,
+    schedule_meta: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
@@ -703,6 +706,9 @@ def fp8_fp4_mqa_logits(
             position, shape [M], dtype int32.
         max_seqlen_k: Upper bound on ``cu_seqlen_ke - cu_seqlen_ks``.
         logits_dtype: Output dtype, fp32 or bf16.
+        schedule_meta: From `get_mqa_logits_metadata` for these row bounds;
+            the kernel then spreads each row's K range over the SMs instead
+            of one 4-row task per CTA. None keeps the unscheduled kernel.
 
     Returns:
         Compressed logits of shape [M, max_seqlen_k]: row ``i`` holds K
@@ -713,6 +719,17 @@ def fp8_fp4_mqa_logits(
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
+    if schedule_meta is not None:
+        return _fp8_fp4_mqa_logits_impl(
+            q,
+            kv,
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            max_seqlen_k,
+            logits_dtype=logits_dtype,
+            schedule_meta=schedule_meta,
+        )
     return _fp8_fp4_mqa_logits_impl(
         q,
         kv,
@@ -721,6 +738,46 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ke,
         max_seqlen_k,
         logits_dtype=logits_dtype,
+    )
+
+
+# Query rows per CTA task of the unscheduled SM100 MQA logits kernel.
+_MQA_LOGITS_BLOCK_Q = 4
+# Shortest K range worth a scheduled launch: below it a 4-row task scans its
+# keys about as fast as the metadata kernel runs.
+_MQA_LOGITS_SCHEDULE_MIN_KEYS = 16384
+
+
+def get_mqa_logits_metadata(
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    num_kv_tokens: int,
+    num_heads: int,
+    max_seqlen_k: int,
+) -> torch.Tensor | None:
+    """K-range schedule for an SM100 `fp8_fp4_mqa_logits` call, or None when
+    the unscheduled kernel already fills the GPU.
+
+    Unscheduled, each CTA scores 4 query rows over their whole K range, so a
+    call of few rows over a long context runs a handful of CTAs serially down
+    hundreds of thousands of keys (a 6-row DCP ShardQ tail over ~460K keys:
+    0.65 ms unscheduled, 0.02 ms scheduled on B200; logits bit-identical).
+    """
+    if not current_platform.is_device_capability_family(100):
+        return None
+    _lazy_init()
+    if _get_mqa_logits_metadata_impl is None:
+        return None
+    num_rows = cu_seqlen_ks.shape[0]
+    num_tasks = -(-num_rows // _MQA_LOGITS_BLOCK_Q)
+    if (
+        num_rows == 0
+        or max_seqlen_k < _MQA_LOGITS_SCHEDULE_MIN_KEYS
+        or num_tasks >= get_num_sms()
+    ):
+        return None
+    return _get_mqa_logits_metadata_impl(
+        cu_seqlen_ks, cu_seqlen_ke, num_kv_tokens, num_heads
     )
 
 

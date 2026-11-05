@@ -52,6 +52,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
+    get_mqa_logits_metadata,
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
@@ -1045,6 +1046,13 @@ def sparse_attn_indexer(
                             cu_seqlen_ke[rows],
                             chunk.max_seqlen_k,
                             logits_dtype=logits_dtype,
+                            schedule_meta=get_mqa_logits_metadata(
+                                cu_seqlen_ks[rows],
+                                cu_seqlen_ke[rows],
+                                k_quant_cast.shape[0],
+                                q_slice_cast.shape[1],
+                                chunk.max_seqlen_k,
+                            ),
                         )
                         # DeepSelect ranks the bf16 logits in place of their
                         # exact fp32 copy (only ties at the cutoff may resolve
