@@ -624,6 +624,16 @@ def sparse_attn_indexer(
         full_context=use_pcp or dcp_world_size == 1,
         candidate_selection=candidate_blocks is not None,
     )
+    # DCP ShardQ steps score their prefill rows over the gathered context, so
+    # their chunks can take the fused kernel too (its FP32 scores match an
+    # FP32-logits top-k; the BF16 logits path drops ~1% of those keys).
+    shardq_fused_mqa_topk = bool(shardq_layer_name) and use_fused_mqa_topk(
+        query_shape=q_quant.shape[1:],
+        topk=topk_tokens,
+        fp4_cache=use_fp4_cache,
+        full_context=True,
+        candidate_selection=candidate_blocks is not None,
+    )
 
     # DeepSelect ranks BF16 decode logits directly; other top-k backends and
     # the DCP merge read an FP32 copy.
@@ -662,7 +672,7 @@ def sparse_attn_indexer(
             )
             profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
-        if fused_mqa_topk:
+        if fused_mqa_topk or shardq_fused_mqa_topk:
             # Allocate the largest fused_mqa_topk workspaces so they are
             # accounted for (freed again, they overlap the dense logits below).
             get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
@@ -844,6 +854,7 @@ def sparse_attn_indexer(
             )
             prefill_chunks = shardq.gathered_context.indexer_chunks
             prefill_dcp_world_size = 1
+            fused_mqa_topk = shardq_fused_mqa_topk
 
     # The caller may have computed the query (and weights) of the indexer rows
     # only (ShardQ.indexer_rows): decode rows first, so those keep their index.

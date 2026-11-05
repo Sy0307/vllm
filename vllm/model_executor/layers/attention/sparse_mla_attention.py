@@ -339,10 +339,15 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 "prefill steps keep the DCP path."
             )
             return False
+        from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+            use_fused_mqa_topk,
+        )
         from vllm.v1.attention.backends.mla.indexer import (
             DeepseekV32IndexerMetadataBuilder,
             get_max_prefill_buffer_size,
         )
+
+        text_config = vllm_config.model_config.hf_text_config
 
         decode_query_len = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
             vllm_config
@@ -364,6 +369,16 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             self.device,
             label=f"{self.layer_names[0]}, {len(self.layer_names)} layers",
             max_fallback_tokens=dcp_fallback_max_tokens(vllm_config, decode_query_len),
+            # ShardQ steps hold the whole context (fp8 indexer keys only).
+            fused_mqa_topk_eligible=use_fused_mqa_topk(
+                query_shape=(
+                    getattr(text_config, "index_n_heads", 0),
+                    getattr(text_config, "index_head_dim", 0),
+                ),
+                topk=self.topk_tokens,
+                fp4_cache=False,
+                full_context=True,
+            ),
         )
         register_warmup(layout, self.dcp_world_size, self.topk_tokens)
         return True

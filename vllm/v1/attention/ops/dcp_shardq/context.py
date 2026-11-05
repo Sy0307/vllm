@@ -419,6 +419,7 @@ def build_dcp_shardq_context(
     rank: int,
     device: torch.device,
     num_decodes: int = 0,
+    fused_mqa_topk_eligible: bool = False,
 ) -> DcpShardQContext | None:
     """The context plan of a step's prefill rows (its requests from
     ``num_decodes`` on) on DCP rank ``rank`` of ``world``, or None when they
@@ -466,6 +467,7 @@ def build_dcp_shardq_context(
         torch.from_numpy(query_lens),
         max_indexer_keys,
         max_logits_bytes,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
     )
     indexer_chunks = [
         build_prefill_chunk_metadata(
@@ -630,8 +632,12 @@ class DcpShardQPlanner:
         device: torch.device,
         label: str = "",
         max_fallback_tokens: int | None = None,
+        fused_mqa_topk_eligible: bool = False,
     ) -> None:
         self.layout = layout
+        # Chunks for the fused MQA+top-k kernel are not bounded by the logits
+        # budget (the indexer row-splits any it keeps on the dense path).
+        self.fused_mqa_topk_eligible = fused_mqa_topk_eligible
         # Most tokens of a DCP-path step the memory profile reserved.
         self.max_fallback_tokens = (
             max_fallback_tokens if max_fallback_tokens is not None else 1 << 62
@@ -689,6 +695,7 @@ class DcpShardQPlanner:
                 self.rank,
                 self.device,
                 num_decodes,
+                self.fused_mqa_topk_eligible,
             )
             path = SHARDQ if context is not None else WORKSPACE
         self.stats.record(path, num_prefill_tokens)
