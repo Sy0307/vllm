@@ -808,6 +808,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 window=self.spec_query_len,
                 activation_dtype=vllm_config.model_config.dtype,
                 conv_state_dtype=conv_state_dtype,
+                conv_weight_dtype=self.conv1d.weight.dtype,
                 state_dtype=recurrent_state_dtype,
                 lower_bound=self.gate_lower_bound,
                 f_b_weight=self.f_b_proj.weight,
@@ -927,6 +928,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             set_weight_attrs(
                 self.o_norm.weight,
                 {"weight_loader": _make_decode_norm_weight_loader(decode_norm_weight)},
+            )
+        if self.recoverssm_wide is not None:
+            # Before CUDA graph capture: FULL graphs capture _forward.
+            self.recoverssm_wide.compile(
+                conv_state_dtype=conv_state_dtype,
+                conv_dim_first=is_conv_state_dim_first(),
+                slot_records=uses_slot_records(vllm_config),
             )
         self.o_proj = RowParallelLinear(
             self.projection_size,
