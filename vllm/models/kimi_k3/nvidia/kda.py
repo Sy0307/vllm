@@ -412,6 +412,11 @@ def is_flashinfer_recurrent_kda_prefill_supported(
     )
 
 
+# FlashInfer's prefill policy runs a single FP32-state sequence on cuDNN from
+# 4K tokens; below that it picks kernels slower than FlashKDA.
+_FLASHINFER_LONG_PREFILL_MIN_TOKENS = 4096
+
+
 def _flashkda_prefill(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -869,6 +874,19 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             recurrent_state_dtype,
             self.gate_lower_bound,
+        )
+        # Under "auto", FlashKDA keeps the prefill contract (checkpoint export,
+        # alignment) and a lone long sequence takes FlashInfer's SM100 prefill,
+        # which runs it over more CTAs than FlashKDA's one per head.
+        self._flashinfer_long_prefill = (
+            backend == "auto"
+            and self.kda_prefill_backend == "flashkda"
+            and is_flashinfer_recurrent_kda_prefill_supported(
+                self.head_dim,
+                vllm_config.model_config.dtype,
+                recurrent_state_dtype,
+                self.gate_lower_bound,
+            )
         )
         self._flashkda_buffer_specs: (
             tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
@@ -1532,6 +1550,28 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                             recurrent_checkpoint=checkpoint_state,
                             recurrent_state=recurrent_state,
                             cu_seqlens=non_spec_query_start_loc,
+                        )
+                    elif (
+                        self._flashinfer_long_prefill
+                        and initial_state.shape[0] == 1
+                        and q_ns.shape[1] >= _FLASHINFER_LONG_PREFILL_MIN_TOKENS
+                    ):
+                        (
+                            core_attn_out_non_spec,
+                            last_recurrent_state,
+                        ) = _flashinfer_kda_prefill(
+                            q=q_ns,
+                            k=k_ns,
+                            v=v_ns,
+                            raw_g=g1_ns,
+                            raw_beta=beta_ns,
+                            A_log=self.A_log,
+                            dt_bias=self.dt_bias,
+                            lower_bound=self.gate_lower_bound,
+                            initial_state=initial_state,
+                            # One sequence; drop any cudagraph padding rows.
+                            cu_seqlens=non_spec_query_start_loc[:2],
+                            out=flashkda_out,
                         )
                     else:
                         (
