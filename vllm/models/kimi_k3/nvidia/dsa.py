@@ -216,8 +216,8 @@ class KimiK3DSAIndexer(nn.Module):
         # op then follows that layer's token split.
         self.shardq_layer_name = ""
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
-        # MQA-logits dtype: "auto" keeps FP32 for Kimi-K3.1 (only DeepSeek
-        # defaults to BF16, see AttentionConfig.indexer_logits_dtype).
+        # MQA-logits dtype; "auto" was resolved by the K3 config verifier
+        # (BF16 on SM100, as DeepSeek).
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
             vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
         ]

@@ -617,6 +617,10 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
         from vllm.platforms import current_platform
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        # Same indexer logits rule as DeepSeek: BF16 where the MQA logits
+        # kernels reduce in BF16 (SM100). Top-2048 recall on K3.1 weights is
+        # within 0.2 points of FP32 logits; the FP8 key cache dominates.
+        _set_deepseek_indexer_logits_dtype(vllm_config)
         cache_config = vllm_config.cache_config
         backend = vllm_config.attention_config.backend
         if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE or (
