@@ -723,11 +723,17 @@ def test_cute_state_commit_align_matches_triton(window, batch, monkeypatch):
 
 
 @torch.inference_mode()
-def test_triton_records_at_record_rows_match_records_at_batch_rows():
+@torch.inference_mode()
+def test_triton_records_at_record_rows_match_records_at_batch_rows(monkeypatch):
     """A non-last PP rank keeps a step's verify records at its requests' slots
     (``record_rows``) until the commit, which runs after the next step's verify:
     verify + commit through any record rows give the outputs and states of the
     batch-row records, and write each request's records only at its slot."""
+    # The pages are dim-first (the production DS conv state layout).
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+        lambda: "DS",
+    )
     heads, window, batch, num_layers = 16, 5, 6, 2
     torch.manual_seed(0)
     slots = 2 * batch + 1
