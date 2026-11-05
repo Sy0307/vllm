@@ -1189,12 +1189,13 @@ def test_kda_projection_overlap_cuda_graph(num_tokens: int) -> None:
     capture_stream.wait_stream(torch.cuda.current_stream())
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=capture_stream):
-        projected_qkvg, g1, beta = k3_gemm.run_kda_projection_overlap(
+        projected_qkvg, g1, beta, f_a = k3_gemm.run_kda_projection_overlap(
             hidden_states,
             packed_weight,
             f_b_weight,
             aux_stream,
             events,
+            with_f_a=True,
         )
     torch.cuda.current_stream().wait_stream(capture_stream)
     graph.replay()
@@ -1216,6 +1217,7 @@ def test_kda_projection_overlap_cuda_graph(num_tokens: int) -> None:
         (projected_qkvg, expected_qkvg),
         (g1, expected_g1),
         (beta, expected_fab[:, 128:]),
+        (f_a, expected_fab[:, :128]),
     ):
         cosine = torch.nn.functional.cosine_similarity(
             actual.float().flatten(), expected.flatten(), dim=0
