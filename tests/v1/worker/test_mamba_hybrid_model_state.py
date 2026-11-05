@@ -125,6 +125,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         num_reqs_after_padding=3,
         num_tokens_after_padding=12,
         idx_mapping=torch.arange(3),
+        idx_mapping_np=np.arange(3),
         query_start_loc_np=query_start_loc,
         query_start_loc=torch.from_numpy(query_start_loc),
         num_scheduled_tokens=np.array(query_lens, dtype=np.int32),
@@ -210,6 +211,7 @@ def _input_batch(
         if num_draft_tokens_per_req is None
         else np.array(num_draft_tokens_per_req, dtype=np.int32),
         idx_mapping=torch.arange(num_reqs),
+        idx_mapping_np=np.arange(num_reqs),
         query_start_loc=torch.from_numpy(query_start_loc),
         seq_lens=seq_lens,
         dcp_local_seq_lens=None,
