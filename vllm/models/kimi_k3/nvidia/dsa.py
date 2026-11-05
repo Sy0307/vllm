@@ -442,6 +442,7 @@ class KimiK3DSAAttention(nn.Module):
         reduce_results: bool = True,
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream: torch.cuda.Stream | None = None,
+        run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__()
         if config.dsa_config is None:
@@ -522,6 +523,17 @@ class KimiK3DSAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.gemm_rs_ar = None
+        if run_gemm_rs_ar:
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import (
+                get_gemm_rs_ar,
+            )
+
+            gemm_rs_ar = get_gemm_rs_ar()
+            if gemm_rs_ar.can_run(self.o_proj):
+                self.gemm_rs_ar = gemm_rs_ar
+            else:
+                gemm_rs_ar.warn_incompatible_projection()
 
         # Full-attention layers are NoPE; the rope path below only runs for
         # checkpoints whose MLA uses positional encoding (GPT-J interleaved
@@ -796,7 +808,10 @@ class KimiK3DSAAttention(nn.Module):
         else:
             attn_out = self._fused_attention(hidden_states)
             gate = self.g_proj(hidden_states)[0]
-        return self.o_proj(_gate_sigmoid_mul(attn_out, gate))[0]
+        attn_out = _gate_sigmoid_mul(attn_out, gate)
+        if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(attn_out):
+            return self.gemm_rs_ar.apply(attn_out, self.o_proj)
+        return self.o_proj(attn_out)[0]
 
     def _fused_attention(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert self.q_lora_rank is not None and self._packed is not None

@@ -791,6 +791,7 @@ class KimiDecoderLayer(nn.Module):
                     prefix=f"{prefix}.self_attn",
                     topk_indices_buffer=topk_indices_buffer,
                     aux_stream=aux_stream,
+                    run_gemm_rs_ar=run_gemm_rs_ar,
                 )
             # q_lora_rank may be None (Kimi-Linear): the MLA layer then uses an
             # uncompressed q_proj instead of the fused q-LoRA front-end.
