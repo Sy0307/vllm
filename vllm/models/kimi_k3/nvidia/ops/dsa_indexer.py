@@ -188,21 +188,35 @@ def _indexer_q_quant_fold_weights_kernel(
     w_out_ptr,
     w_out_stride,
     weight_scale,
+    num_heads,
     HEAD_DIM: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
     FP8_MAX: tl.constexpr,
     USE_FNUZ: tl.constexpr,
 ):
+    # One program per (token, HEAD_BLOCK heads): a (token, head) grid launches
+    # T * H single-warp programs, which is scheduling-bound for long prefills.
     tok = tl.program_id(0).to(tl.int64)
-    head = tl.program_id(1)
+    heads = tl.program_id(1) * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
+    head_mask = heads < num_heads
     offs = tl.arange(0, HEAD_DIM)
-    q = tl.load(q_ptr + tok * q_stride0 + head * q_stride1 + offs).to(tl.float32)
+    q = tl.load(
+        q_ptr + tok * q_stride0 + heads[:, None] * q_stride1 + offs[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
     # Same math as per_token_group_quant_fp8(use_ue8m0=True) (eps=1e-10).
-    scale = _ue8m0_scale(tl.max(tl.abs(q), axis=0), 1e-10, FP8_MAX)
+    scale = _ue8m0_scale(tl.max(tl.abs(q), axis=1), 1e-10, FP8_MAX)
     fp8_dtype = tl.float8e4b8 if USE_FNUZ else tl.float8e4nv
-    q_fp8 = tl.clamp(tl.div_rn(q, scale), -FP8_MAX, FP8_MAX).to(fp8_dtype)
-    tl.store(q_fp8_ptr + tok * q_fp8_stride0 + head * q_fp8_stride1 + offs, q_fp8)
-    w = tl.load(w_ptr + tok * w_stride + head).to(tl.float32)
-    tl.store(w_out_ptr + tok * w_out_stride + head, w * scale * weight_scale)
+    q_fp8 = tl.clamp(tl.div_rn(q, scale[:, None]), -FP8_MAX, FP8_MAX).to(fp8_dtype)
+    q_fp8_rows = q_fp8_ptr + tok * q_fp8_stride0 + heads[:, None] * q_fp8_stride1
+    tl.store(q_fp8_rows + offs[None, :], q_fp8, mask=head_mask[:, None])
+    w = tl.load(w_ptr + tok * w_stride + heads, mask=head_mask).to(tl.float32)
+    tl.store(
+        w_out_ptr + tok * w_out_stride + heads,
+        w * scale * weight_scale,
+        mask=head_mask,
+    )
 
 
 def indexer_q_quant_fold_weights(
@@ -233,7 +247,10 @@ def indexer_q_quant_fold_weights(
     )
     if num_tokens == 0:
         return q_fp8, weights
-    _indexer_q_quant_fold_weights_kernel[(num_tokens, num_heads)](
+    head_block = min(16, triton.next_power_of_2(num_heads))
+    _indexer_q_quant_fold_weights_kernel[
+        (num_tokens, triton.cdiv(num_heads, head_block))
+    ](
         index_q,
         index_q.stride(0),
         index_q.stride(1),
@@ -245,10 +262,12 @@ def indexer_q_quant_fold_weights(
         weights,
         weights.stride(0),
         weight_scale,
+        num_heads,
         HEAD_DIM=head_dim,
+        HEAD_BLOCK=head_block,
         FP8_MAX=_FP8_MAX,
         USE_FNUZ=_USE_FNUZ,
-        num_warps=1,
+        num_warps=4,
     )
     return q_fp8, weights
 
