@@ -339,9 +339,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 "prefill steps keep the DCP path."
             )
             return False
+        from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backends.mla.indexer import (
             DeepseekV32IndexerMetadataBuilder,
             get_max_prefill_buffer_size,
+            prefill_logits_elem_bytes,
         )
 
         decode_query_len = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
@@ -364,6 +366,15 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             self.device,
             label=f"{self.layer_names[0]}, {len(self.layer_names)} layers",
             max_fallback_tokens=dcp_fallback_max_tokens(vllm_config, decode_query_len),
+            # A ShardQ step scores its prefill rows over the gathered context
+            # (no DCP top-k merge), so its logits can stay BF16.
+            logits_elem_bytes=prefill_logits_elem_bytes(
+                STR_DTYPE_TO_TORCH_DTYPE[
+                    vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
+                ],
+                vllm_config.kernel_config.sparse_indexer_topk_backend,
+                self.topk_tokens,
+            ),
         )
         register_warmup(layout, self.dcp_world_size, self.topk_tokens)
         return True

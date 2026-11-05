@@ -71,6 +71,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
+    prefill_logits_elem_bytes,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.dcp_topk_merge import (
@@ -963,8 +964,16 @@ def sparse_attn_indexer(
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
             row_starts: torch.Tensor | None = None
-            # Rows per dense logits call under the logits budget.
-            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
+            # Rows per dense logits call under the logits budget; a ShardQ
+            # step's full-context rows rank BF16 logits without an FP32 copy.
+            dense_rows = dense_logits_rows(
+                chunk.max_seqlen_k,
+                elem_bytes=(
+                    prefill_logits_elem_bytes(logits_dtype, topk_backend, topk_tokens)
+                    if shardq is not None and prefill_dcp_world_size == 1
+                    else 4
+                ),
+            )
             use_deep_select = False
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)

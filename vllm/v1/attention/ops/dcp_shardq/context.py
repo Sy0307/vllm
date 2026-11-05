@@ -409,6 +409,63 @@ class DcpShardQContext:
         return index_view
 
 
+def plan_local_indexer_chunks(
+    query_lens: np.ndarray,
+    seq_lens: np.ndarray,
+    world: int,
+    rank: int,
+    max_indexer_keys: int,
+    max_logits_bytes: int,
+    logits_elem_bytes: int = 4,
+) -> list[tuple[slice, slice, bool]]:
+    """Indexer prefill chunks of the rows a ShardQ step scores on ``rank``.
+
+    The step's rows are split by ``fold_split`` (two pieces per request and
+    rank), and each rank scores only its own. The logits budget is charged
+    with those rows, so a chunk carries up to the budget's rows of this rank
+    rather than a ``world``-th of them, and a request's sub-chunks follow its
+    pieces instead of cutting them into short tails.
+
+    Returns ``(req_slice, query_slice, skip_kv_gather)``: requests relative to
+    the first prefill request, and query rows relative to the chunk's first
+    request, spanning every rank's rows between this rank's first and last row
+    of the chunk (the indexer scores this rank's rows among them).
+    ``skip_kv_gather`` marks a request's sub-chunks after its first one, which
+    reuse its gathered keys.
+    """
+    pieces = 2 * world
+    mirror = pieces - 1 - rank
+    bounds = (np.arange(pieces + 1) * query_lens[:, None]) // pieces
+    front_start, front_len = bounds[:, rank], bounds[:, rank + 1] - bounds[:, rank]
+    back_start, back_len = bounds[:, mirror], bounds[:, mirror + 1] - bounds[:, mirror]
+    local_lens = front_len + back_len
+
+    def to_request_row(req: int, local_row: int) -> int:
+        if local_row < front_len[req]:
+            return int(front_start[req] + local_row)
+        return int(back_start[req] + local_row - front_len[req])
+
+    specs = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+        torch.from_numpy(seq_lens.astype(np.int64)),
+        torch.from_numpy(local_lens.astype(np.int64)),
+        max_indexer_keys,
+        max_logits_bytes,
+        logits_elem_bytes=logits_elem_bytes,
+    )
+    chunks: list[tuple[slice, slice, bool]] = []
+    for req_slice, local_slice in specs:
+        if req_slice.stop - req_slice.start > 1:
+            # Whole requests (only a single request is cut into sub-chunks).
+            rows = int(query_lens[req_slice].sum())
+            chunks.append((req_slice, slice(0, rows), False))
+            continue
+        req = req_slice.start
+        first = to_request_row(req, local_slice.start)
+        last = to_request_row(req, local_slice.stop - 1)
+        chunks.append((req_slice, slice(first, last + 1), local_slice.start > 0))
+    return chunks
+
+
 def build_dcp_shardq_context(
     common_attn_metadata: CommonAttentionMetadata,
     layout: ContextLayout,
@@ -419,6 +476,7 @@ def build_dcp_shardq_context(
     rank: int,
     device: torch.device,
     num_decodes: int = 0,
+    logits_elem_bytes: int = 4,
 ) -> DcpShardQContext | None:
     """The context plan of a step's prefill rows (its requests from
     ``num_decodes`` on) on DCP rank ``rank`` of ``world``, or None when they
@@ -461,11 +519,14 @@ def build_dcp_shardq_context(
 
     block_table_gpu = to_device(block_table, torch.int32)
     seq_lens_gpu = common_attn_metadata.seq_lens[:num_reqs]
-    chunk_specs = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
-        seq_lens_cpu[num_decodes:],
-        torch.from_numpy(query_lens),
+    chunk_specs = plan_local_indexer_chunks(
+        query_lens,
+        seq_lens,
+        world,
+        rank,
         max_indexer_keys,
         max_logits_bytes,
+        logits_elem_bytes,
     )
     indexer_chunks = [
         build_prefill_chunk_metadata(
@@ -479,9 +540,9 @@ def build_dcp_shardq_context(
             block_table_gpu,
             1,
             query_slice=query_slice,
-            skip_kv_gather=query_slice.start > 0,
+            skip_kv_gather=skip_kv_gather,
         )
-        for req_slice, query_slice in chunk_specs
+        for req_slice, query_slice, skip_kv_gather in chunk_specs
     ]
     return DcpShardQContext(
         layout=layout,
@@ -630,8 +691,10 @@ class DcpShardQPlanner:
         device: torch.device,
         label: str = "",
         max_fallback_tokens: int | None = None,
+        logits_elem_bytes: int = 4,
     ) -> None:
         self.layout = layout
+        self.logits_elem_bytes = logits_elem_bytes
         # Most tokens of a DCP-path step the memory profile reserved.
         self.max_fallback_tokens = (
             max_fallback_tokens if max_fallback_tokens is not None else 1 << 62
@@ -689,6 +752,7 @@ class DcpShardQPlanner:
                 self.rank,
                 self.device,
                 num_decodes,
+                self.logits_elem_bytes,
             )
             path = SHARDQ if context is not None else WORKSPACE
         self.stats.record(path, num_prefill_tokens)
