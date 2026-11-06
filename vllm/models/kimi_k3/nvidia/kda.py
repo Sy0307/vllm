@@ -1487,6 +1487,23 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         has_initial_state,
                         self.local_projection_size,
                     ).unbind(0)
+                elif (
+                    mixed_qkv_ns.dim() == 2
+                    and mixed_qkv_ns.stride(-1) == 1
+                    and mixed_qkv_ns.size(-1) == 3 * self.local_projection_size
+                ):
+                    # Depthwise conv: every channel is computed on its own, so one
+                    # stock launch over the packed Q|K|V channels gives the same
+                    # outputs and conv-state updates as three launches. One copy
+                    # then lays out dense Q/K/V exactly as the separate calls did.
+                    # Saves two Triton launches of host time per layer in mixed steps.
+                    packed = _prefill_conv(mixed_qkv_ns, conv_state, conv_weights)
+                    q_ns, k_ns, v_ns = (
+                        packed.view(packed.size(0), 3, self.local_projection_size)
+                        .transpose(0, 1)
+                        .contiguous()
+                        .unbind(0)
+                    )
                 else:
                     q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
                     k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
