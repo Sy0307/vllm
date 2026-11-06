@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import os
 from typing import TYPE_CHECKING
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -571,6 +573,52 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+# Kimi-K3.1-Pro (93 layers) on PP2 with the DSpark draft on the last stage: the
+# last stage also runs the draft, LM head and sampling, so it takes fewer
+# target layers (measured on 2x8 B200 AgentX: 53/40 beats 48/45 by 2.5%).
+_KIMI_K31_PP2_LAYER_PARTITION = "53,40"
+# Mooncake transfer settings of the K3/K3.1 B200 deployments.
+_KIMI_K3_MOONCAKE_ENV_DEFAULTS = {
+    "MC_STORE_MEMCPY": "1",
+    "MC_SLICE_SIZE": "1048576",
+    "MC_WORKERS_PER_CTX": "4",
+    "MC_ENABLE_DEST_DEVICE_AFFINITY": "1",
+    "VLLM_MOONCAKE_LOAD_RECV_THREADS": "4",
+}
+
+
+def _apply_kimi_k3_deploy_defaults(vllm_config: "VllmConfig") -> None:
+    """Default the tuned Kimi-K3 deployment environment, keeping explicit values.
+
+    Runs while the engine config is built, before any worker is spawned, so the
+    workers inherit these variables. ``VLLM_KIMI_K3_DEPLOY_DEFAULTS=0`` skips it.
+    """
+    if not envs.VLLM_KIMI_K3_DEPLOY_DEFAULTS:
+        return
+    defaults: dict[str, str] = {
+        # NVLS symmetric-memory all-gather / reduce-scatter / all-reduce.
+        "VLLM_USE_NCCL_SYMM_MEM": "1",
+        # Agentic clients keep connections open between turns.
+        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": "900",
+    }
+    parallel_config = vllm_config.parallel_config
+    hf_text_config = vllm_config.model_config.hf_text_config
+    if (
+        parallel_config.pipeline_parallel_size == 2
+        and getattr(hf_text_config, "num_hidden_layers", None) == 93
+    ):
+        defaults["VLLM_PP_LAYER_PARTITION"] = _KIMI_K31_PP2_LAYER_PARTITION
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None and "Mooncake" in str(
+        kv_transfer_config.kv_connector
+    ):
+        defaults.update(_KIMI_K3_MOONCAKE_ENV_DEFAULTS)
+    applied = {k: v for k, v in defaults.items() if k not in os.environ}
+    os.environ.update(applied)
+    if applied:
+        logger.info("Kimi-K3 deployment defaults: %s", applied)
+
+
 class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
 
@@ -608,6 +656,7 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
         """Default the kv-cache dtype when the text backbone carries DSA:
         per-tensor fp8 for FLASHINFER_MLA_SPARSE, the default on SM10x, and
         "fp8_ds_mla" otherwise."""
+        _apply_kimi_k3_deploy_defaults(vllm_config)
         hf_config = vllm_config.model_config.hf_config
         # Multimodal composite configs carry dsa_config on text_config;
         # text-only models have it at the top level.

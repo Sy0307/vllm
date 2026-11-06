@@ -56,9 +56,10 @@ if TYPE_CHECKING:
 # re-queued at the LRU tail when the request is freed (no capacity is held).
 # HOLD keeps the newest released state of a request referenced until the
 # request is freed (one block per request and Mamba group).
-# Ported from our K3 B200 release; same env names as the K3 deployment.
-_MAMBA_CKPT_REFRESH = os.environ.get("VLLM_K3_MAMBA_CKPT_REFRESH", "0") == "1"
-_MAMBA_CKPT_HOLD = os.environ.get("VLLM_K3_MAMBA_CKPT_HOLD", "0") == "1"
+# Ported from our K3 B200 release; same env names as the K3 deployment. Both
+# are on by default; set them to 0 to disable.
+_MAMBA_CKPT_REFRESH = os.environ.get("VLLM_K3_MAMBA_CKPT_REFRESH", "1") == "1"
+_MAMBA_CKPT_HOLD = os.environ.get("VLLM_K3_MAMBA_CKPT_HOLD", "1") == "1"
 
 
 class SingleTypeKVCacheManager(ABC):

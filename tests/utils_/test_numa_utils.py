@@ -97,6 +97,46 @@ def test_get_numactl_args_with_cpu_binding():
     )
 
 
+def _b200_node_cores(numa_node: int) -> list[list[int]]:
+    # Two 56-core sockets; CPU c has hyperthread sibling c + 112.
+    base = 56 * numa_node
+    return [[cpu, cpu + 112] for cpu in range(base, base + 56)]
+
+
+def test_exclusive_cpu_slices_split_each_numa_node(monkeypatch):
+    """Four GPUs per socket each get 12 of the socket's 14-core slice (two kept
+    for the host) with their hyperthread siblings, never overlapping."""
+    monkeypatch.setattr(numa_utils, "_node_physical_cores", _b200_node_cores)
+    config = _make_config(
+        numa_bind=True, numa_bind_nodes=[0] * 4 + [1] * 4, tensor_parallel_size=8
+    )
+    args = [
+        numa_utils._get_numactl_worker_args(config.parallel_config, local_rank=r)
+        for r in range(8)
+    ]
+
+    def expected(first: int, node: int) -> str:
+        cpus = [*range(first, first + 12), *range(first + 112, first + 124)]
+        return f"--physcpubind={','.join(map(str, cpus))} --membind={node}"
+
+    assert args[0] == expected(2, 0)
+    assert args[3] == expected(44, 0)
+    assert args[4] == expected(58, 1)
+    assert args[7] == expected(100, 1)
+
+
+def test_exclusive_cpu_slices_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(numa_utils, "_node_physical_cores", _b200_node_cores)
+    monkeypatch.setenv("VLLM_NUMA_EXCLUSIVE_CPUS", "0")
+    config = _make_config(
+        numa_bind=True, numa_bind_nodes=[0] * 4 + [1] * 4, tensor_parallel_size=8
+    )
+    assert (
+        numa_utils._get_numactl_worker_args(config.parallel_config, local_rank=5)
+        == "--cpunodebind=1 --membind=1"
+    )
+
+
 def _patch_pct_gates(
     monkeypatch,
     *,

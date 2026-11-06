@@ -400,6 +400,65 @@ def _maybe_get_pct_cpu_binding(numa_nodes: list[int]) -> list[int] | None:
     return sorted(union_cpus)
 
 
+# Cores at the start of each worker's slice left for the host (engine core,
+# API server, NIC interrupts, monitoring agents).
+_EXCLUSIVE_SLICE_RESERVED_CORES = 2
+
+
+def _node_physical_cores(numa_node: int) -> list[list[int]] | None:
+    """The NUMA node's physical cores, each as its sorted hyperthread CPUs."""
+    from vllm.utils.cpu_resource_utils import parse_id_list
+
+    try:
+        node_cpus = set(
+            parse_id_list(
+                Path(f"/sys/devices/system/node/node{numa_node}/cpulist")
+                .read_text()
+                .strip()
+            )
+        )
+        cores: dict[int, list[int]] = {}
+        for cpu in node_cpus:
+            siblings = parse_id_list(
+                Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
+                .read_text()
+                .strip()
+            )
+            core = sorted(c for c in siblings if c in node_cpus)
+            cores[core[0]] = core
+    except (OSError, ValueError, IndexError):
+        return None
+    return [cores[k] for k in sorted(cores)]
+
+
+def _maybe_get_exclusive_cpu_slice(
+    parallel_config, gpu_index: int, numa_node: int
+) -> str | None:
+    """Split a NUMA node's physical cores evenly among the GPUs bound to it.
+
+    Each GPU worker gets a contiguous slice (with hyperthread siblings) minus
+    ``_EXCLUSIVE_SLICE_RESERVED_CORES`` host cores, so workers sharing a node
+    stop competing for cores: a worker that launches kernels late stalls every
+    TP collective it takes part in.
+    """
+    if not envs.VLLM_NUMA_EXCLUSIVE_CPUS:
+        return None
+    numa_nodes = parallel_config.numa_bind_nodes or []
+    gpus_on_node = [i for i, node in enumerate(numa_nodes) if node == numa_node]
+    if len(gpus_on_node) < 2 or gpu_index not in gpus_on_node:
+        return None
+    cores = _node_physical_cores(numa_node)
+    if not cores:
+        return None
+    per_gpu = len(cores) // len(gpus_on_node)
+    if per_gpu <= _EXCLUSIVE_SLICE_RESERVED_CORES:
+        return None
+    slot = gpus_on_node.index(gpu_index)
+    chunk = cores[slot * per_gpu : (slot + 1) * per_gpu]
+    cpus = sorted(c for core in chunk[_EXCLUSIVE_SLICE_RESERVED_CORES:] for c in core)
+    return ",".join(str(c) for c in cpus)
+
+
 def _get_cpu_binding(
     parallel_config, gpu_index: int, numa_nodes: list[int]
 ) -> str | None:
@@ -408,6 +467,10 @@ def _get_cpu_binding(
     if cpu_bindings is None:
         pct_cpus = _maybe_get_pct_cpu_binding(numa_nodes)
         if pct_cpus is None:
+            if len(numa_nodes) == 1:
+                return _maybe_get_exclusive_cpu_slice(
+                    parallel_config, gpu_index, numa_nodes[0]
+                )
             return None
         return ",".join(str(c) for c in pct_cpus)
 

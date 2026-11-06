@@ -222,7 +222,10 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
     VLLM_STEP5_SHARD_SP_SHARED_EXPERT: bool = False
-    VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
+    VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = True
+    VLLM_KIMI_K3_RECOVERSSM: bool = True
+    VLLM_KIMI_K3_DEPLOY_DEFAULTS: bool = True
+    VLLM_NUMA_EXCLUSIVE_CPUS: bool = True
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_KDA_WIDE_VERIFY: bool = True
@@ -1740,17 +1743,33 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_STEP5_SHARD_SP_SHARED_EXPERT": lambda: bool(
         int(os.getenv("VLLM_STEP5_SHARD_SP_SHARED_EXPERT", "0"))
     ),
-    # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
-    # are replicated on every rank, so each rank streams the whole weight to
-    # serve its own token shard. Shard them across TP instead: the MLP then
-    # all-gathers the full token set, computes this rank's partial, and
-    # reduce-scatters (which both sums across TP and restores the sequence
-    # sharding). Trades weight bandwidth and resident memory for two collectives
-    # per layer, so it only wins at low token counts: intended for decode
-    # instances in a P/D disaggregated deployment, not for prefill or unified
-    # serving.
+    # Kimi-K3 only. Under sequence-parallel MoE, TP-shard the dense and
+    # shared-expert MLPs: the MLP all-gathers the full token set, computes this
+    # rank's partial, and reduce-scatters. 0 replicates them instead (no
+    # collectives, but every rank streams the whole weight and holds it, which
+    # costs about 12 GiB of KV per GPU on K3.1). Sharded is the default: on the
+    # unified AgentX deployment (2x8 B200, TP8 x PP2, C128) replicated weights
+    # lost 4.6% throughput to the smaller KV cache and decode weight reads.
     "VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT": lambda: bool(
-        int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "0"))
+        int(os.getenv("VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT", "1"))
+    ),
+    # Kimi-K3 only. With speculative decoding, KDA layers use RecoverSSM by
+    # default when the configuration supports it; 0 requires --use-replayssm.
+    "VLLM_KIMI_K3_RECOVERSSM": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_RECOVERSSM", "1"))
+    ),
+    # Kimi-K3 only. Apply the tuned deployment environment defaults (NCCL
+    # symmetric memory, K3.1 PP layer split, Mooncake transfer settings, HTTP
+    # keep-alive) unless they are set explicitly; 0 leaves the environment as is.
+    "VLLM_KIMI_K3_DEPLOY_DEFAULTS": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_DEPLOY_DEFAULTS", "1"))
+    ),
+    # Under automatic NUMA binding, give each GPU worker its own slice of its
+    # NUMA node's physical cores (plus their hyperthread siblings) instead of
+    # the whole node, so co-located workers do not delay each other's kernel
+    # launches. 0 binds each worker to its whole NUMA node.
+    "VLLM_NUMA_EXCLUSIVE_CPUS": lambda: bool(
+        int(os.getenv("VLLM_NUMA_EXCLUSIVE_CPUS", "1"))
     ),
     # Kimi K3 only, and unrelated to the MoE flags above. Tap the pre-norm
     # AttnRes mixture, rather than the post-mixture sum, as the auxiliary

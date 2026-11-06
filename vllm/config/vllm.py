@@ -3915,12 +3915,25 @@ class VllmConfig:
             )
         return self
 
+    def _kda_recoverssm_by_default(self) -> bool:
+        """Whether a KDA model gets RecoverSSM without --use-replayssm: with
+        speculative decoding, wherever the explicit flag would be accepted."""
+        assert self.model_config is not None
+        uses_v2_if_needed = self.use_v2_model_runner or (
+            self.cache_config.mamba_cache_mode != "align"
+            and self.parallel_config.pipeline_parallel_size == 1
+        )
+        return (
+            envs.VLLM_KIMI_K3_RECOVERSSM
+            and self.num_speculative_tokens > 0
+            and self.model_config.supports_replayssm
+            and self.mamba_config.backend == MambaBackendEnum.TRITON
+            and not self.mamba_config.enable_stochastic_rounding
+            and uses_v2_if_needed
+        )
+
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
-        if not self.cache_config.use_replayssm:
-            self.cache_config.use_kda_recoverssm = False
-            return self
-
         kda_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
@@ -3930,6 +3943,20 @@ class VllmConfig:
             self.model_config is not None
             and self.model_config.architecture in kda_architectures
         )
+        if (
+            not self.cache_config.use_replayssm
+            and is_kda_model
+            and self._kda_recoverssm_by_default()
+        ):
+            logger.info(
+                "Enabling KDA RecoverSSM for speculative decoding by default "
+                "(VLLM_KIMI_K3_RECOVERSSM=0 disables it)."
+            )
+            self.cache_config.use_replayssm = True
+        if not self.cache_config.use_replayssm:
+            self.cache_config.use_kda_recoverssm = False
+            return self
+
         self.cache_config.use_kda_recoverssm = (
             self.num_speculative_tokens > 0 and is_kda_model
         )
