@@ -611,6 +611,10 @@ def _apply_kimi_k3_deploy_defaults(vllm_config: "VllmConfig") -> None:
         and getattr(hf_text_config, "num_hidden_layers", None) == 93
     ):
         defaults["VLLM_PP_LAYER_PARTITION"] = _KIMI_K31_PP2_LAYER_PARTITION
+        # One more in-flight batch (pp_size + 2): each stage's host starts a
+        # step about one step earlier ahead of its GPU (measured: host lead
+        # 32 -> 64 ms, first-stage idle 12.2% -> 11.5% on AgentX C128).
+        defaults["VLLM_PP_EXTRA_INFLIGHT_BATCHES"] = "2"
     kv_transfer_config = vllm_config.kv_transfer_config
     if kv_transfer_config is not None and "Mooncake" in str(
         kv_transfer_config.kv_connector
