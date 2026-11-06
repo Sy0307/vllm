@@ -575,8 +575,11 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
 
 # Kimi-K3.1-Pro (93 layers) on PP2 with the DSpark draft on the last stage: the
 # last stage also runs the draft, LM head and sampling, so it takes fewer
-# target layers (measured on 2x8 B200 AgentX: 53/40 beats 48/45 by 2.5%).
-_KIMI_K31_PP2_LAYER_PARTITION = "53,40"
+# target layers. Measured on 2x8 B200 AgentX (C128, 900 s, exclusive worker
+# cores): 50/43 and 48/45 both beat 53/40 by 1-2% and are within noise of each
+# other; 50/43 also holds 24% more KV than 53/40. (The earlier 53/40 choice was
+# measured together with the core binding that removed a straggling rank.)
+_KIMI_K31_PP2_LAYER_PARTITION = "50,43"
 # Mooncake transfer settings of the K3/K3.1 B200 deployments.
 _KIMI_K3_MOONCAKE_ENV_DEFAULTS = {
     "MC_STORE_MEMCPY": "1",
