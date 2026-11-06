@@ -329,6 +329,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner: PoolingRunner | None = None
 
         self.step_timing = StepTimingCollector()
+        # Set by the worker when VLLM_STEP_TIMELINE is on (step_timeline.py).
+        self.step_timeline: Any = None
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -2132,6 +2134,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
         )
         self.step_timing.forward_start()
+        if self.step_timeline is not None:
+            self.step_timeline.mark("fs")
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:

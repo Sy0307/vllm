@@ -276,6 +276,9 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        # Per-step host/device timestamps (VLLM_STEP_TIMELINE), made on first use.
+        self._step_timeline: Any = None
+        self._step_timeline_ready = False
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1533,11 +1536,44 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        timeline = self._step_timeline
+        if timeline is None:
+            return self.model_runner.sample_tokens(grammar_output)
+        timeline.begin("S", "")
+        try:
+            return self.model_runner.sample_tokens(grammar_output)
+        finally:
+            timeline.end()
+
+    def _get_step_timeline(self) -> Any:
+        if not self._step_timeline_ready:
+            self._step_timeline_ready = True
+            if envs.VLLM_STEP_TIMELINE and self.use_v2_model_runner:
+                from vllm.v1.worker.gpu.step_timeline import make_step_timeline
+
+                self._step_timeline = make_step_timeline(
+                    get_pp_group().rank_in_group, get_tp_group().rank_in_group
+                )
+                self.model_runner.step_timeline = self._step_timeline
+        return self._step_timeline
 
     @torch.inference_mode()
     @with_gpu_sync_check
     def execute_model(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        timeline = self._get_step_timeline()
+        if timeline is None or scheduler_output.total_num_scheduled_tokens == 0:
+            return self._execute_model(scheduler_output)
+        from vllm.v1.worker.gpu.step_timeline import step_info
+
+        timeline.begin("F", step_info(scheduler_output))
+        try:
+            return self._execute_model(scheduler_output)
+        finally:
+            timeline.end()
+
+    def _execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # Wait for the previous step's sends so this forward pass cannot
