@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     VLLM_PP_PREDICTED_RECV: bool = True
     VLLM_STEP_TIMELINE: str | None = None
     VLLM_PP_PREFILL_BALANCE_UNIT: int = 1024
+    VLLM_PP_EXTRA_INFLIGHT_BATCHES: int = 1
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -952,6 +953,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # budget-filling chunks.
     "VLLM_PP_PREFILL_BALANCE_UNIT": lambda: int(
         os.getenv("VLLM_PP_PREFILL_BALANCE_UNIT", "1024")
+    ),
+    # V2 model runner + async scheduling + PP: in-flight batches beyond
+    # pipeline_parallel_size (engine batch queue depth and UVA staging slots).
+    # 1 keeps pp_size + 1; 2 gives every stage's host one more step of lead.
+    "VLLM_PP_EXTRA_INFLIGHT_BATCHES": lambda: max(
+        1, int(os.getenv("VLLM_PP_EXTRA_INFLIGHT_BATCHES", "1"))
     ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB

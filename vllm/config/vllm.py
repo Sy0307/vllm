@@ -619,6 +619,11 @@ class VllmConfig:
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling:
             if self.use_v2_model_runner:
+                if pp_size > 1:
+                    # Each extra in-flight batch lets every stage's host start
+                    # a step one step earlier ahead of its GPU (the scheduler
+                    # waits for the oldest batch's output before the next one).
+                    return pp_size + envs.VLLM_PP_EXTRA_INFLIGHT_BATCHES
                 return pp_size + 1
             # V1 Model Runner does not fully support async scheduling with PP.
             if pp_size <= 1:
