@@ -279,6 +279,10 @@ class Worker(WorkerBase):
         # Per-step host/device timestamps (VLLM_STEP_TIMELINE), made on first use.
         self._step_timeline: Any = None
         self._step_timeline_ready = False
+        # Predicted PP receives (PredictedPPRecv): steps whose prediction matched
+        # the sender's metadata, and whether a mismatch turned them off for good.
+        self._pp_predicted_recv_checked = 0
+        self._pp_predicted_recv_disabled = not envs.VLLM_PP_PREDICTED_RECV
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1594,23 +1598,38 @@ class Worker(WorkerBase):
             if getattr(self, "pp_intermediate_tensors_are_sequence_sharded", False)
             else get_tp_group()
         )
+        predicted_recv: Any = None
+        received_tensor_dict: dict[str, Any] | None = None
         if forward_pass and not get_pp_group().is_first_rank:
-            tensor_dict, comm_handles, comm_postprocess = (
-                get_pp_group().irecv_tensor_dict(
-                    all_gather_group=all_gather_group,
+            if self._use_predicted_pp_recv(all_gather_group):
+                from vllm.v1.worker.gpu.pp_utils import PredictedPPRecv
+
+                predicted_recv = PredictedPPRecv()
+                intermediate_tensors = predicted_recv
+            else:
+                tensor_dict, comm_handles, comm_postprocess = (
+                    get_pp_group().irecv_tensor_dict(
+                        all_gather_group=all_gather_group,
+                    )
                 )
-            )
-            assert tensor_dict is not None
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+                assert tensor_dict is not None
+                received_tensor_dict = tensor_dict
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
+            if self.use_v2_model_runner:
+                self.model_runner.pp_recv_prediction = None
 
         with self.annotate_profile(scheduler_output):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            if predicted_recv is not None and predicted_recv.posted:
+                self._check_predicted_pp_recv(predicted_recv)
+            elif received_tensor_dict is not None:
+                self._validate_pp_recv_prediction(received_tensor_dict)
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1641,6 +1660,63 @@ class Worker(WorkerBase):
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
         return None
+
+    # Steps whose predicted receive must match the sender's metadata before the
+    # metadata-first receive is skipped.
+    _PP_PREDICTED_RECV_WARMUP_STEPS = 64
+
+    def _use_predicted_pp_recv(self, all_gather_group) -> bool:
+        return (
+            not self._pp_predicted_recv_disabled
+            and self._pp_predicted_recv_checked >= self._PP_PREDICTED_RECV_WARMUP_STEPS
+            and self.use_v2_model_runner
+            # Each TP rank receives its own SP-local rows (no all-gather slicing).
+            and all_gather_group is None
+            and not get_pp_group().use_cpu_custom_send_recv
+        )
+
+    def _validate_pp_recv_prediction(self, received: dict[str, Any]) -> None:
+        """Metadata-first step: does the runner's prediction match what came?"""
+        if self._pp_predicted_recv_disabled or not self.use_v2_model_runner:
+            return
+        from vllm.v1.worker.gpu.pp_utils import pp_recv_signature
+
+        predicted = self.model_runner.pp_recv_prediction
+        if predicted is None:
+            return
+        actual = (
+            pp_recv_signature(received)
+            if all(isinstance(v, torch.Tensor) for v in received.values())
+            else None
+        )
+        if actual != predicted:
+            self._pp_predicted_recv_disabled = True
+            logger.warning(
+                "Predicted PP receive disabled: predicted %s, sender sent %s.",
+                predicted,
+                actual,
+            )
+            return
+        self._pp_predicted_recv_checked += 1
+        if self._pp_predicted_recv_checked == self._PP_PREDICTED_RECV_WARMUP_STEPS:
+            logger.info(
+                "Predicted PP receive enabled after %d matching steps.",
+                self._pp_predicted_recv_checked,
+            )
+
+    def _check_predicted_pp_recv(self, predicted_recv: Any) -> None:
+        """Drain the sender's metadata for a step received by prediction."""
+        from vllm.v1.worker.gpu.pp_utils import pp_metadata_signature
+
+        pp = get_pp_group()
+        metadata = pp.recv_object(src=(pp.rank_in_group - 1) % pp.world_size)
+        sent = pp_metadata_signature(metadata)
+        if sent != predicted_recv.expected:
+            raise RuntimeError(
+                "Predicted PP receive does not match the previous stage: "
+                f"received {predicted_recv.expected}, sender sent {sent}. "
+                "Set VLLM_PP_PREDICTED_RECV=0."
+            )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
+    VLLM_PP_PREDICTED_RECV: bool = True
     VLLM_STEP_TIMELINE: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -934,6 +935,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
+    # Non-first PP stages post their intermediate-tensor receives from their own
+    # padded batch instead of first waiting for the previous stage's metadata
+    # (checked against it after the forward is launched). 0 restores the
+    # metadata-first receive.
+    "VLLM_PP_PREDICTED_RECV": lambda: bool(
+        int(os.getenv("VLLM_PP_PREDICTED_RECV", "1"))
+    ),
     # Directory for per-step host/device timestamps of TP rank 0 of every PP
     # stage (vllm/v1/worker/gpu/step_timeline.py). Unset disables it.
     "VLLM_STEP_TIMELINE": lambda: os.getenv("VLLM_STEP_TIMELINE", None),

@@ -10,11 +10,72 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import TensorMetadata, get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+# (key, dtype, shape) of each tensor a PP stage receives, in send order.
+PPRecvSignature = list[tuple[str, torch.dtype, tuple[int, ...]]]
+
+
+def pp_recv_signature(tensors: dict[str, torch.Tensor]) -> PPRecvSignature:
+    return [(key, t.dtype, tuple(t.shape)) for key, t in tensors.items()]
+
+
+def pp_metadata_signature(metadata_list: list) -> PPRecvSignature | None:
+    """Signature of a sender's tensor-dict metadata; None if it carries any
+    non-tensor entry (a predicted receive cannot reproduce those)."""
+    signature: PPRecvSignature = []
+    for key, value in metadata_list:
+        if not isinstance(value, TensorMetadata):
+            return None
+        signature.append((key, value.dtype, tuple(value.size)))
+    return signature
+
+
+class PredictedPPRecv(IntermediateTensors):
+    """Intermediate tensors a non-first PP stage receives without first waiting
+    for the sender's metadata.
+
+    Both stages pad a step to the same token count, so the previous stage sends
+    exactly the persistent receive buffers' keys and dtypes at a row count this
+    stage computes from its own batch. The model runner posts the NCCL receives
+    straight into those buffers once it knows the rows; the worker reads and
+    checks the metadata the sender still sends only after this stage's forward
+    is launched. The metadata receive otherwise blocks this stage's host until
+    the previous stage has launched its whole step, which serializes the two
+    stages' host time on steps that are not one CUDA graph (any step that
+    carries prefill).
+    """
+
+    def __init__(self) -> None:
+        super().__init__({})
+        self.posted = False
+        self.expected: PPRecvSignature | None = None
+
+    def post(
+        self, buffers: dict[str, torch.Tensor], rows: int
+    ) -> dict[str, torch.Tensor]:
+        pp = get_pp_group()
+        src = pp.ranks[(pp.rank_in_group - 1) % pp.world_size]
+        received: dict[str, torch.Tensor] = {}
+        works = []
+        # Same order and empty-tensor skip as GroupCoordinator.isend_tensor_dict.
+        for key, buffer in buffers.items():
+            dst = buffer[:rows]
+            received[key] = dst
+            if dst.numel() > 0:
+                works.append(
+                    torch.distributed.irecv(dst, src=src, group=pp.device_group)
+                )
+        for work in works:
+            # Orders the current stream after the receive; does not block the host.
+            work.wait()
+        self.expected = pp_recv_signature(received)
+        self.posted = True
+        return received
 
 
 @dataclass

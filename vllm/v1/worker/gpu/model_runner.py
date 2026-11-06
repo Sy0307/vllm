@@ -44,7 +44,11 @@ from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
     get_aux_output_connector,
 )
-from vllm.distributed.parallel_state import get_dcp_group, get_pp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
@@ -72,6 +76,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, get_intermediate_tensor_num_tokens
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -149,7 +154,11 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
-from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.pp_utils import (
+    PPHandler,
+    PPRecvSignature,
+    PredictedPPRecv,
+)
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_vocab_shards,
@@ -249,6 +258,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # PP broadcast/recv helper. Runs the collective on a side stream.
         self.pp_handler: PPHandler | None = None
+        # Non-first PP stages: what a predicted receive (see PredictedPPRecv)
+        # would post for the last real step; the worker checks it against the
+        # sender's metadata before it trusts predictions.
+        self.pp_recv_prediction: PPRecvSignature | None = None
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -2113,14 +2126,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
             if not dummy_run and self.pp_sequence_sharded:
-                # SP-local rows: cdiv(n, tp) per TP rank.
-                n = get_intermediate_tensor_num_tokens(intermediate_tensors)
-            new_tensors = {
-                k: v[:n]
-                if dummy_run
-                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
-                for k, v in self.intermediate_tensors.tensors.items()
-            }
+                # Both stages pad this step identically and the sender ships its
+                # SP-local cdiv(n, tp) rows of every persistent-buffer tensor.
+                predicted_rows = cdiv(n, get_tensor_model_parallel_world_size())
+                self.pp_recv_prediction = [
+                    (k, v.dtype, (predicted_rows, *v.shape[1:]))
+                    for k, v in self.intermediate_tensors.tensors.items()
+                ]
+            if isinstance(intermediate_tensors, PredictedPPRecv):
+                assert not dummy_run and self.pp_sequence_sharded
+                # Receive straight into the persistent buffers (the addresses the
+                # CUDA graphs captured), so no copy is needed.
+                new_tensors = intermediate_tensors.post(
+                    self.intermediate_tensors.tensors, predicted_rows
+                )
+            else:
+                if not dummy_run and self.pp_sequence_sharded:
+                    # SP-local rows: cdiv(n, tp) per TP rank.
+                    n = get_intermediate_tensor_num_tokens(intermediate_tensors)
+                new_tensors = {
+                    k: v[:n]
+                    if dummy_run
+                    else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                    for k, v in self.intermediate_tensors.tensors.items()
+                }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
