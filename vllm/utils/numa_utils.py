@@ -441,7 +441,9 @@ def _maybe_get_exclusive_cpu_slice(
     stop competing for cores: a worker that launches kernels late stalls every
     TP collective it takes part in.
     """
-    if not envs.VLLM_NUMA_EXCLUSIVE_CPUS:
+    # Only under automatic binding: an explicit --numa-bind keeps the node
+    # binding the user asked for.
+    if not envs.VLLM_NUMA_EXCLUSIVE_CPUS or not parallel_config._numa_bind_auto:
         return None
     numa_nodes = parallel_config.numa_bind_nodes or []
     gpus_on_node = [i for i, node in enumerate(numa_nodes) if node == numa_node]
