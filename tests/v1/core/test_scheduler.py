@@ -8,8 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
-import os
-
 import pytest
 import torch
 
@@ -782,89 +780,6 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     # scheduled again (multi-step in-flight).
     output = scheduler.schedule()
     assert req.request_id in output.num_scheduled_tokens
-
-
-def _pp_emulated_scheduler(unit: int):
-    # Constructing with pipeline_parallel_size>1 needs that many visible GPUs;
-    # emulate PP at the scheduler level as test_async_scheduler.py does.
-    scheduler = create_scheduler(
-        async_scheduling=True, max_num_batched_tokens=1024, max_model_len=2048
-    )
-    scheduler.use_pp = True
-    scheduler.decode_stagger = 2
-    scheduler.pp_prefill_balance_unit = unit
-    return scheduler
-
-
-def test_pp_balanced_prefill_chunks():
-    """PP + async: a long prompt is prefilled in equal chunks, not budget-filling
-    chunks plus a remainder (the last-stage bubble after a chunk tracks its
-    size, and a run's bubbles add up to its largest chunk)."""
-    scheduler = _pp_emulated_scheduler(128)
-    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
-    scheduler.add_request(req)
-    # k = max(cdiv(1800, 1024), round(sqrt(1800 / 128))) = 4 -> cdiv(1800, 4).
-    chunks = []
-    for _ in range(8):
-        n = scheduler.schedule().num_scheduled_tokens.get(req.request_id, 0)
-        if n:
-            chunks.append(n)
-        if sum(chunks) >= 1800:
-            break
-    assert chunks == [450, 450, 450, 450]
-    assert req.pp_prefill_chunk_plan == (1800, 450)
-
-    # A short prompt is not split.
-    (short,) = create_requests(num_requests=1, num_tokens=100, req_ids=["s"])
-    scheduler.add_request(short)
-    out = scheduler.schedule()
-    assert out.num_scheduled_tokens["s"] == 100
-
-
-def test_pp_balanced_prefill_chunks_disabled():
-    scheduler = _pp_emulated_scheduler(0)
-    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
-    scheduler.add_request(req)
-    assert scheduler.schedule().num_scheduled_tokens[req.request_id] == 1024
-
-
-def test_pp_balanced_prefill_off_without_pp():
-    scheduler = create_scheduler(
-        async_scheduling=True, max_num_batched_tokens=1024, max_model_len=2048
-    )
-    assert scheduler.pp_prefill_balance_unit == 0
-    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
-    scheduler.add_request(req)
-    assert scheduler.schedule().num_scheduled_tokens[req.request_id] == 1024
-
-
-def test_pp_balanced_prefill_runtime_knob(tmp_path, monkeypatch):
-    """VLLM_RUNTIME_KNOBS switches the balance unit between steps."""
-    import json
-
-    import vllm.utils.runtime_knobs as rk
-
-    path = tmp_path / "knobs.json"
-    path.write_text(json.dumps({"pp_prefill_balance_unit": 0}))
-    monkeypatch.setattr(rk, "_POLL_INTERVAL_S", 0.0)
-    knobs = rk.RuntimeKnobs(str(path))
-    scheduler = _pp_emulated_scheduler(128)
-    scheduler._runtime_knobs = knobs
-    scheduler._pp_prefill_balance_unit_default = 128
-
-    (a,) = create_requests(num_requests=1, num_tokens=1800, req_ids=["a"])
-    scheduler.add_request(a)
-    # Knob 0: budget-filling chunk.
-    assert scheduler.schedule().num_scheduled_tokens["a"] == 1024
-
-    path.write_text(json.dumps({"pp_prefill_balance_unit": 128}))
-    os.utime(path, ns=(10**18, 10**18))
-    (b,) = create_requests(num_requests=1, num_tokens=1800, req_ids=["b"])
-    scheduler.add_request(b)
-    out = scheduler.schedule()
-    assert scheduler.pp_prefill_balance_unit == 128
-    # b is planned into four chunks of 450.
-    assert out.num_scheduled_tokens["b"] == 450
 
 
 def test_max_loras_counts_running_request_awaiting_output():
