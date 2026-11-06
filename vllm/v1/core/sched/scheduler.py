@@ -471,6 +471,14 @@ class Scheduler(SchedulerInterface):
             if self.use_pp and self.scheduler_config.async_scheduling
             else 0
         )
+        self._pp_prefill_balance_unit_default = self.pp_prefill_balance_unit
+        from vllm.utils.runtime_knobs import get_runtime_knobs
+
+        self._runtime_knobs = (
+            get_runtime_knobs()
+            if self.use_pp and self.scheduler_config.async_scheduling
+            else None
+        )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -789,6 +797,13 @@ class Scheduler(SchedulerInterface):
         return -(-(num_computed_tokens + num_new_tokens) // page)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        if self._runtime_knobs is not None:
+            self._runtime_knobs.poll()
+            self.pp_prefill_balance_unit = int(
+                self._runtime_knobs.get(
+                    "pp_prefill_balance_unit", self._pp_prefill_balance_unit_default
+                )
+            )
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.

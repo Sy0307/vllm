@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import os
+
 import pytest
 import torch
 
@@ -834,6 +836,35 @@ def test_pp_balanced_prefill_off_without_pp():
     (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
     scheduler.add_request(req)
     assert scheduler.schedule().num_scheduled_tokens[req.request_id] == 1024
+
+
+def test_pp_balanced_prefill_runtime_knob(tmp_path, monkeypatch):
+    """VLLM_RUNTIME_KNOBS switches the balance unit between steps."""
+    import json
+
+    import vllm.utils.runtime_knobs as rk
+
+    path = tmp_path / "knobs.json"
+    path.write_text(json.dumps({"pp_prefill_balance_unit": 0}))
+    monkeypatch.setattr(rk, "_POLL_INTERVAL_S", 0.0)
+    knobs = rk.RuntimeKnobs(str(path))
+    scheduler = _pp_emulated_scheduler(128)
+    scheduler._runtime_knobs = knobs
+    scheduler._pp_prefill_balance_unit_default = 128
+
+    (a,) = create_requests(num_requests=1, num_tokens=1800, req_ids=["a"])
+    scheduler.add_request(a)
+    # Knob 0: budget-filling chunk.
+    assert scheduler.schedule().num_scheduled_tokens["a"] == 1024
+
+    path.write_text(json.dumps({"pp_prefill_balance_unit": 128}))
+    os.utime(path, ns=(10**18, 10**18))
+    (b,) = create_requests(num_requests=1, num_tokens=1800, req_ids=["b"])
+    scheduler.add_request(b)
+    out = scheduler.schedule()
+    assert scheduler.pp_prefill_balance_unit == 128
+    # b is planned into four chunks of 450.
+    assert out.num_scheduled_tokens["b"] == 450
 
 
 def test_max_loras_counts_running_request_awaiting_output():

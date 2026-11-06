@@ -74,6 +74,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.utils.runtime_knobs import RuntimeKnobs, get_runtime_knobs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     CheckpointState,
@@ -219,6 +220,10 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = vllm_config.max_concurrent_batches
+        # In-flight batch cap below batch_queue_size, switchable at runtime
+        # (VLLM_RUNTIME_KNOBS "pp_inflight_batches") for A/Bs on one server.
+        self.batch_queue_limit = self.batch_queue_size
+        self._runtime_knobs = get_runtime_knobs()
         self.batch_queue: (
             deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
@@ -771,9 +776,17 @@ class EngineCore:
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
 
+        limit = self.batch_queue_size
+        knobs = self._runtime_knobs
+        if isinstance(knobs, RuntimeKnobs):
+            knobs.poll()
+            limit = max(1, min(limit, int(knobs.get("pp_inflight_batches", limit))))
+        self.batch_queue_limit = limit
+
         model_executed = False
         deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        # Over the cap (it was just lowered): only drain the oldest batch.
+        if self.scheduler.has_requests() and len(batch_queue) < limit:
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
@@ -803,7 +816,7 @@ class EngineCore:
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output, exec_future))
-                if len(batch_queue) < self.batch_queue_size and (
+                if len(batch_queue) < limit and (
                     model_executed or self.scheduler.has_requests()
                 ):
                     # Don't block on next worker response unless the queue is full

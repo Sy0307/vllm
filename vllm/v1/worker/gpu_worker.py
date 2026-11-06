@@ -283,6 +283,9 @@ class Worker(WorkerBase):
         # the sender's metadata, and whether a mismatch turned them off for good.
         self._pp_predicted_recv_checked = 0
         self._pp_predicted_recv_disabled = not envs.VLLM_PP_PREDICTED_RECV
+        from vllm.utils.runtime_knobs import get_runtime_knobs
+
+        self._runtime_knobs = get_runtime_knobs()
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -1666,6 +1669,12 @@ class Worker(WorkerBase):
     _PP_PREDICTED_RECV_WARMUP_STEPS = 64
 
     def _use_predicted_pp_recv(self, all_gather_group) -> bool:
+        knobs = self._runtime_knobs
+        if knobs is not None:
+            knobs.poll()
+            if not int(knobs.get("pp_predicted_recv", 1)):
+                # Metadata-first this step; predictions keep being validated.
+                return False
         return (
             not self._pp_predicted_recv_disabled
             and self._pp_predicted_recv_checked >= self._PP_PREDICTED_RECV_WARMUP_STEPS
