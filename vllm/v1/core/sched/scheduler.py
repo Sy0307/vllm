@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -8,6 +9,7 @@ from dataclasses import replace
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+import vllm.envs as envs
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -463,6 +465,20 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        # PP microbatch balance for prefill (see _pp_balanced_prefill_cap).
+        self.pp_prefill_balance_unit = (
+            envs.VLLM_PP_PREFILL_BALANCE_UNIT
+            if self.use_pp and self.scheduler_config.async_scheduling
+            else 0
+        )
+        self._pp_prefill_balance_unit_default = self.pp_prefill_balance_unit
+        from vllm.utils.runtime_knobs import get_runtime_knobs
+
+        self._runtime_knobs = (
+            get_runtime_knobs()
+            if self.use_pp and self.scheduler_config.async_scheduling
+            else None
+        )
         # TODO: Support models with multiple Mamba specs that require different
         # prefill checkpoint alignments instead of selecting the first one.
         self.mamba_prefill_checkpoint_alignment = next(
@@ -577,6 +593,42 @@ class Scheduler(SchedulerInterface):
             min_num_output_tokens += 1
         # Reaching max_tokens finishes the request, so no step verifies the drafts.
         return min_num_output_tokens >= request.max_tokens
+
+    def _pp_balanced_prefill_cap(
+        self, request: Request, start: int, num_new_tokens: int
+    ) -> int:
+        """Cap a prompt's prefill chunk at its share of equal-size chunks.
+
+        With PP the two in-flight microbatches alternate steps, and a stage
+        cannot start a microbatch's next step before the last stage has sampled
+        its previous one. A prefill chunk therefore costs, besides its compute,
+        a bubble of about the last stage's time for it minus the first stage's
+        time for the step that follows; along a run of chunks these bubbles add
+        up to roughly the largest chunk's last-stage time. Filling the token
+        budget and leaving a remainder makes that peak as large as possible.
+        Instead the remaining prompt is planned once into k equal chunks,
+        k = max(steps the budget needs, round(sqrt(remaining / unit))): sqrt
+        balances the bubble, which falls as 1/k, against the fixed cost of
+        each extra prefill step, which grows with k.
+        """
+        remaining = request.num_prompt_tokens - start
+        if remaining <= 0 or num_new_tokens <= 0:
+            return num_new_tokens
+        plan = request.pp_prefill_chunk_plan
+        if plan is None or remaining > plan[0]:
+            # First chunk of this prompt (or restarted after preemption).
+            k = max(
+                cdiv(remaining, self.max_num_scheduled_tokens),
+                round(math.sqrt(remaining / self.pp_prefill_balance_unit)),
+            )
+            chunk = remaining
+            if k > 1:
+                # Chunk ends must stay block aligned for Mamba "align" mode.
+                align = self.block_size if self.need_mamba_block_aligned_split else 1
+                chunk = cdiv(cdiv(remaining, k), align) * align
+            plan = (remaining, chunk)
+            request.pp_prefill_chunk_plan = plan
+        return min(num_new_tokens, plan[1])
 
     def _mamba_block_aligned_split(
         self,
@@ -745,6 +797,13 @@ class Scheduler(SchedulerInterface):
         return -(-(num_computed_tokens + num_new_tokens) // page)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        if self._runtime_knobs is not None:
+            self._runtime_knobs.poll()
+            self.pp_prefill_balance_unit = int(
+                self._runtime_knobs.get(
+                    "pp_prefill_balance_unit", self._pp_prefill_balance_unit_default
+                )
+            )
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -894,6 +953,10 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = long_prefill_token_threshold
+            if self.pp_prefill_balance_unit > 0 and request.is_prefill_chunk:
+                num_new_tokens = self._pp_balanced_prefill_cap(
+                    request, request.num_computed_tokens, num_new_tokens
+                )
             num_new_tokens = min(
                 num_new_tokens, token_budget, input_budget - draft_slots
             )
@@ -1427,6 +1490,10 @@ class Scheduler(SchedulerInterface):
 
                     if 0 < long_prefill_token_threshold < num_new_tokens:
                         num_new_tokens = long_prefill_token_threshold
+                    if self.pp_prefill_balance_unit > 0 and not pad_spec_decode:
+                        num_new_tokens = self._pp_balanced_prefill_cap(
+                            request, num_computed_tokens, num_new_tokens
+                        )
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
