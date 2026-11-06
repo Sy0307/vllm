@@ -120,7 +120,7 @@ def test_exclusive_cpu_slices_split_each_numa_node(monkeypatch):
 
     def expected(first: int, node: int) -> str:
         cpus = [*range(first, first + 12), *range(first + 112, first + 124)]
-        return f"--physcpubind={','.join(map(str, cpus))} --preferred={node}"
+        return f"--physcpubind={','.join(map(str, cpus))} --membind={node}"
 
     assert args[0] == expected(2, 0)
     assert args[3] == expected(44, 0)

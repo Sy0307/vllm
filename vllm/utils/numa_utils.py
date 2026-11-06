@@ -492,6 +492,17 @@ def _get_numactl_worker_args(
     numa_node = _get_numa_node(parallel_config, gpu_index)
     cpu_binding = _get_cpu_binding(parallel_config, gpu_index, [numa_node])
     memory_policy = "preferred" if parallel_config._numa_bind_auto else "membind"
+    if (
+        memory_policy == "preferred"
+        and cpu_binding is not None
+        and parallel_config.numa_bind_cpus is None
+        and cpu_binding
+        == _maybe_get_exclusive_cpu_slice(parallel_config, gpu_index, numa_node)
+    ):
+        # An exclusive slice keeps the worker's host buffers (pinned staging,
+        # KV-connector segments) on its GPU's node, like an explicit binding;
+        # letting them spill to the other socket cost ~4% end to end.
+        memory_policy = "membind"
     memory_arg = f"--{memory_policy}={numa_node}"
 
     if cpu_binding is not None:
