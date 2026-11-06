@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_PP_PREFILL_BALANCE_UNIT: int = 1024
     VLLM_PP_EXTRA_INFLIGHT_BATCHES: int = 1
     VLLM_RUNTIME_KNOBS: str | None = None
+    VLLM_SCHED_TRACE: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -965,6 +966,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # runtime_knobs.py): pp_prefill_balance_unit, pp_inflight_batches,
     # pp_predicted_recv. Unset disables polling.
     "VLLM_RUNTIME_KNOBS": lambda: os.getenv("VLLM_RUNTIME_KNOBS", None),
+    # CSV file of every scheduled prefill chunk (scheduler.py
+    # _PrefillScheduleTrace). Unset disables it.
+    "VLLM_SCHED_TRACE": lambda: os.getenv("VLLM_SCHED_TRACE", None),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (

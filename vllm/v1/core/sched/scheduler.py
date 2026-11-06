@@ -92,6 +92,37 @@ class _RequeueEntries(list):
     """Deferred-free entry: (block, hash) pairs to move to the LRU tail."""
 
 
+
+class _PrefillScheduleTrace:
+    """VLLM_SCHED_TRACE=<file>: one CSV row per prefill chunk per step (the
+    request's prompt length, where the chunk starts, how many tokens it got and
+    the PP prefill plan), for checking chunking decisions on a live server."""
+
+    def __init__(self, path: str):
+        self._file = open(path, "w")  # noqa: SIM115
+        self._file.write("t,step,req,prompt,start,tokens,plan_remaining,plan_chunk\n")
+        self._unflushed = 0
+
+    def write(self, scheduler: "Scheduler", scheduler_output: SchedulerOutput) -> None:
+        now = time.time()
+        for req_id, n in scheduler_output.num_scheduled_tokens.items():
+            request = scheduler.requests.get(req_id)
+            if request is None:
+                continue
+            start = request.num_computed_tokens
+            if start >= request.num_prompt_tokens:
+                continue
+            plan = request.pp_prefill_chunk_plan
+            self._file.write(
+                f"{now:.3f},{scheduler.current_step},{req_id},"
+                f"{request.num_prompt_tokens},{start},{n},"
+                f"{plan[0] if plan else ''},{plan[1] if plan else ''}\n"
+            )
+            self._unflushed += 1
+        if self._unflushed >= 256:
+            self._file.flush()
+            self._unflushed = 0
+
 class Scheduler(SchedulerInterface):
     def __init__(
         self,
@@ -472,6 +503,11 @@ class Scheduler(SchedulerInterface):
             else 0
         )
         self._pp_prefill_balance_unit_default = self.pp_prefill_balance_unit
+        self._sched_trace = (
+            _PrefillScheduleTrace(envs.VLLM_SCHED_TRACE)
+            if envs.VLLM_SCHED_TRACE
+            else None
+        )
         from vllm.utils.runtime_knobs import get_runtime_knobs
 
         self._runtime_knobs = (
@@ -1968,6 +2004,8 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        if self._sched_trace is not None:
+            self._sched_trace.write(self, scheduler_output)
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output

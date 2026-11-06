@@ -867,6 +867,24 @@ def test_pp_balanced_prefill_runtime_knob(tmp_path, monkeypatch):
     assert out.num_scheduled_tokens["b"] == 450
 
 
+def test_prefill_schedule_trace(tmp_path, monkeypatch):
+    """VLLM_SCHED_TRACE records each scheduled prefill chunk, not decodes."""
+    path = tmp_path / "trace.csv"
+    monkeypatch.setenv("VLLM_SCHED_TRACE", str(path))
+    scheduler = _pp_emulated_scheduler(128)
+    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
+    scheduler.add_request(req)
+    for _ in range(4):
+        scheduler.schedule()
+    scheduler._sched_trace._file.flush()
+    rows = path.read_text().strip().splitlines()
+    assert rows[0].startswith("t,step,req,prompt,start,tokens")
+    starts = [int(r.split(",")[4]) for r in rows[1:]]
+    tokens = [int(r.split(",")[5]) for r in rows[1:]]
+    assert starts == [0, 450, 900, 1350] and tokens == [450] * 4
+    assert all(r.split(",")[6:] == ["1800", "450"] for r in rows[1:])
+
+
 def test_max_loras_counts_running_request_awaiting_output():
     """PP: a running request with its prompt fully scheduled is skipped until
     its output returns, but still holds its LoRA slot, so a request with
