@@ -623,8 +623,15 @@ class Scheduler(SchedulerInterface):
             )
             chunk = remaining
             if k > 1:
-                # Chunk ends must stay block aligned for Mamba "align" mode.
-                align = self.block_size if self.need_mamba_block_aligned_split else 1
+                # Chunk ends must stay aligned to the block _mamba_block_aligned_split
+                # floors them to (the cache block, which can differ from the
+                # scheduler's), or every chunk would be cut again and leave a
+                # remainder step.
+                align = (
+                    self.cache_config.block_size
+                    if self.need_mamba_block_aligned_split
+                    else 1
+                )
                 chunk = cdiv(cdiv(remaining, k), align) * align
             plan = (remaining, chunk)
             request.pp_prefill_chunk_plan = plan
