@@ -782,6 +782,60 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+def _pp_emulated_scheduler(unit: int):
+    # Constructing with pipeline_parallel_size>1 needs that many visible GPUs;
+    # emulate PP at the scheduler level as test_async_scheduler.py does.
+    scheduler = create_scheduler(
+        async_scheduling=True, max_num_batched_tokens=1024, max_model_len=2048
+    )
+    scheduler.use_pp = True
+    scheduler.decode_stagger = 2
+    scheduler.pp_prefill_balance_unit = unit
+    return scheduler
+
+
+def test_pp_balanced_prefill_chunks():
+    """PP + async: a long prompt is prefilled in equal chunks, not budget-filling
+    chunks plus a remainder (the last-stage bubble after a chunk tracks its
+    size, and a run's bubbles add up to its largest chunk)."""
+    scheduler = _pp_emulated_scheduler(128)
+    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
+    scheduler.add_request(req)
+    # k = max(cdiv(1800, 1024), round(sqrt(1800 / 128))) = 4 -> cdiv(1800, 4).
+    chunks = []
+    for _ in range(8):
+        n = scheduler.schedule().num_scheduled_tokens.get(req.request_id, 0)
+        if n:
+            chunks.append(n)
+        if sum(chunks) >= 1800:
+            break
+    assert chunks == [450, 450, 450, 450]
+    assert req.pp_prefill_chunk_plan == (1800, 450)
+
+    # A short prompt is not split.
+    (short,) = create_requests(num_requests=1, num_tokens=100, req_ids=["s"])
+    scheduler.add_request(short)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens["s"] == 100
+
+
+def test_pp_balanced_prefill_chunks_disabled():
+    scheduler = _pp_emulated_scheduler(0)
+    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
+    scheduler.add_request(req)
+    assert scheduler.schedule().num_scheduled_tokens[req.request_id] == 1024
+
+
+def test_pp_balanced_prefill_off_without_pp():
+    scheduler = create_scheduler(
+        async_scheduling=True, max_num_batched_tokens=1024, max_model_len=2048
+    )
+    assert scheduler.pp_prefill_balance_unit == 0
+    (req,) = create_requests(num_requests=1, num_tokens=1800, max_tokens=4)
+    scheduler.add_request(req)
+    assert scheduler.schedule().num_scheduled_tokens[req.request_id] == 1024
+
+
 def test_max_loras_counts_running_request_awaiting_output():
     """PP: a running request with its prompt fully scheduled is skipped until
     its output returns, but still holds its LoRA slot, so a request with

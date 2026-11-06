@@ -178,6 +178,10 @@ class Request:
         # so the worker's broadcast slot ring stays consistent.
         self.next_decode_eligible_step = 0
 
+        # PP prefill balance: (remaining prefill tokens when planned, chunk size)
+        # of this prompt's equal-size prefill chunks (Scheduler._pp_balanced_prefill_cap).
+        self.pp_prefill_chunk_plan: tuple[int, int] | None = None
+
         # Seq of the most recent step this request was scheduled in; fences
         # deferred block freeing (see Scheduler._free_request_blocks).
         self.last_sched_seq = 0

@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_PP_PREDICTED_RECV: bool = True
     VLLM_STEP_TIMELINE: str | None = None
+    VLLM_PP_PREFILL_BALANCE_UNIT: int = 1024
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -945,6 +946,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Directory for per-step host/device timestamps of TP rank 0 of every PP
     # stage (vllm/v1/worker/gpu/step_timeline.py). Unset disables it.
     "VLLM_STEP_TIMELINE": lambda: os.getenv("VLLM_STEP_TIMELINE", None),
+    # PP>1 with async scheduling: split each prompt's remaining prefill into k
+    # equal chunks, k = max(steps the budget needs, round(sqrt(remaining / unit)))
+    # (Scheduler._pp_balanced_prefill_cap). Larger units split less; 0 restores
+    # budget-filling chunks.
+    "VLLM_PP_PREFILL_BALANCE_UNIT": lambda: int(
+        os.getenv("VLLM_PP_PREFILL_BALANCE_UNIT", "1024")
+    ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (
