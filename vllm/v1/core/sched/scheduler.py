@@ -508,6 +508,8 @@ class Scheduler(SchedulerInterface):
             if envs.VLLM_SCHED_TRACE
             else None
         )
+        self._kv_breakdown_interval = envs.VLLM_KV_BREAKDOWN_S
+        self._kv_breakdown_last = 0.0
         from vllm.utils.runtime_knobs import get_runtime_knobs
 
         self._runtime_knobs = (
@@ -848,6 +850,8 @@ class Scheduler(SchedulerInterface):
                 )
             )
         self.current_step += 1
+        if self._kv_breakdown_interval > 0:
+            self._maybe_log_kv_breakdown()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -3185,6 +3189,64 @@ class Scheduler(SchedulerInterface):
             + len(self.kv_holding_waiting)
             + len(self.async_kv_waiting)
         )
+
+    def _maybe_log_kv_breakdown(self) -> None:
+        """Log how the shared block pool splits across cache groups (requests'
+        blocks, held Mamba states, evictable cached blocks); VLLM_KV_BREAKDOWN_S."""
+        now = time.monotonic()
+        if now - self._kv_breakdown_last < self._kv_breakdown_interval:
+            return
+        self._kv_breakdown_last = now
+        try:
+            from vllm.v1.core.kv_cache_utils import get_group_id
+
+            coordinator = self.kv_cache_manager.coordinator
+            pool = coordinator.block_pool
+            num_ref = num_free_hashed = num_free_plain = 0
+            free_hashed_by_group: dict[int, int] = {}
+            for block in pool.blocks:
+                if block.is_null:
+                    continue
+                if block.ref_cnt > 0:
+                    num_ref += 1
+                elif block.block_hash is not None:
+                    num_free_hashed += 1
+                    gid = get_group_id(block.block_hash)
+                    free_hashed_by_group[gid] = free_hashed_by_group.get(gid, 0) + 1
+                else:
+                    num_free_plain += 1
+            parts = []
+            for gid, manager in enumerate(coordinator.single_type_managers):
+                block_ids: set[int] = set()
+                num_req_blocks = 0
+                for blocks in manager.req_to_blocks.values():
+                    for block in blocks:
+                        if not block.is_null:
+                            block_ids.add(block.block_id)
+                            num_req_blocks += 1
+                held = getattr(manager, "_held_state", None)
+                parts.append(
+                    f"g{gid}:{type(manager).__name__.replace('Manager', '')}"
+                    f"/bs{manager.block_size} reqs={len(manager.req_to_blocks)}"
+                    f" blocks={len(block_ids)} refs={num_req_blocks}"
+                    f" held={len(held) if held is not None else 0}"
+                    f" cached_free={free_hashed_by_group.get(gid, 0)}"
+                )
+            num_running, num_waiting = self.get_request_counts()
+            logger.info(
+                "KVBREAKDOWN total=%d ref=%d free_hashed=%d free_plain=%d "
+                "running=%d waiting=%d | %s",
+                pool.num_gpu_blocks - 1,
+                num_ref,
+                num_free_hashed,
+                num_free_plain,
+                num_running,
+                num_waiting,
+                " | ".join(parts),
+            )
+        except Exception:
+            logger.exception("KV breakdown logging failed")
+            self._kv_breakdown_interval = 0.0
 
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""

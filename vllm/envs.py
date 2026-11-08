@@ -52,10 +52,11 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_PP_PREDICTED_RECV: bool = True
     VLLM_STEP_TIMELINE: str | None = None
-    VLLM_PP_PREFILL_BALANCE_UNIT: int = 1024
+    VLLM_PP_PREFILL_BALANCE_UNIT: int = 0
     VLLM_PP_EXTRA_INFLIGHT_BATCHES: int = 1
     VLLM_RUNTIME_KNOBS: str | None = None
     VLLM_SCHED_TRACE: str | None = None
+    VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -951,10 +952,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_STEP_TIMELINE": lambda: os.getenv("VLLM_STEP_TIMELINE", None),
     # PP>1 with async scheduling: split each prompt's remaining prefill into k
     # equal chunks, k = max(steps the budget needs, round(sqrt(remaining / unit)))
-    # (Scheduler._pp_balanced_prefill_cap). Larger units split less; 0 restores
-    # budget-filling chunks.
+    # (Scheduler._pp_balanced_prefill_cap). Larger units split less; 0 (the
+    # default: no measured gain on AgentX) keeps budget-filling chunks.
     "VLLM_PP_PREFILL_BALANCE_UNIT": lambda: int(
-        os.getenv("VLLM_PP_PREFILL_BALANCE_UNIT", "1024")
+        os.getenv("VLLM_PP_PREFILL_BALANCE_UNIT", "0")
     ),
     # V2 model runner + async scheduling + PP: in-flight batches beyond
     # pipeline_parallel_size (engine batch queue depth and UVA staging slots).
@@ -969,6 +970,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CSV file of every scheduled prefill chunk (scheduler.py
     # _PrefillScheduleTrace). Unset disables it.
     "VLLM_SCHED_TRACE": lambda: os.getenv("VLLM_SCHED_TRACE", None),
+    # Seconds between scheduler log lines breaking the KV block pool down by
+    # cache group (blocks held by requests, held Mamba states, evictable cached
+    # blocks). 0 disables it.
+    "VLLM_KV_BREAKDOWN_S": lambda: float(os.getenv("VLLM_KV_BREAKDOWN_S", "0")),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (
