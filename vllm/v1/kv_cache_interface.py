@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, fields, replace
@@ -1188,6 +1189,32 @@ def get_mamba_prefill_checkpoint_position(
     return max(checkpoint_position, 0)
 
 
+def mamba_checkpoint_reuses_initial_col(
+    query_start: int, query_end: int, mamba_block_size: int
+) -> bool:
+    """Whether the prefill checkpoint column is the initial-state column and may
+    take the checkpoint anyway (VLLM_MAMBA_CKPT_REUSE_INITIAL_COL).
+
+    A query starting mid-block reads its initial state from a block private to
+    the request: a partial hit's copy-on-write block, the request's own running
+    state after an early stop, or a freshly loaded external state. The step copies
+    that state into the query's final column before any layer runs, so once the
+    prefill kernel has run the column is free to hold the checkpoint.
+    ``MambaManager`` keeps the block unhashed for the step (a hashed one has its
+    cache entry moved to a copy first)."""
+    return (
+        _MAMBA_CKPT_REUSE_INITIAL_COL
+        and query_start % mamba_block_size != 0
+        and cdiv(query_end, mamba_block_size) - 2
+        == (query_start - 1) // mamba_block_size
+    )
+
+
+_MAMBA_CKPT_REUSE_INITIAL_COL = (
+    os.getenv("VLLM_MAMBA_CKPT_REUSE_INITIAL_COL", "0") == "1"
+)
+
+
 def is_mamba_prefill_checkpoint_valid(
     query_start: int,
     query_end: int,
@@ -1205,7 +1232,12 @@ def is_mamba_prefill_checkpoint_valid(
     checkpoint_col = cdiv(query_end, mamba_block_size) - 2
     return (
         query_start % hash_block_size == 0
-        and checkpoint_col > initial_state_col
+        and (
+            checkpoint_col > initial_state_col
+            or mamba_checkpoint_reuses_initial_col(
+                query_start, query_end, mamba_block_size
+            )
+        )
         and query_start + hash_block_size <= checkpoint_position
         and query_start < checkpoint_position < query_end
         and (checkpoint_position - query_start) % checkpoint_alignment == 0

@@ -221,6 +221,75 @@ def test_partial_checkpoint_resume_stops_at_mamba_block_boundary() -> None:
     )
 
 
+def test_reused_initial_col_checkpoint_folds_the_resume_into_one_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VLLM_MAMBA_CKPT_REUSE_INITIAL_COL: a mid-block resume that ends in the
+    next block exports its checkpoint into the (private) initial-state column,
+    so the remainder runs as one chunk instead of stopping at the boundary."""
+    import vllm.v1.kv_cache_interface as kv_cache_interface
+
+    monkeypatch.setattr(kv_cache_interface, "_MAMBA_CKPT_REUSE_INITIAL_COL", True)
+    prompt_len = 3602
+    resume_at = 1984
+    (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
+    request.num_computed_tokens = resume_at
+    assert (
+        _split(
+            request,
+            prompt_len - resume_at,
+            use_eagle=False,
+            partial_hit=True,
+            num_prefill_checkpoint_blocks=1,
+        )
+        == prompt_len - resume_at
+    )
+    # Without checkpoint blocks nothing changes.
+    assert (
+        _split(request, prompt_len - resume_at, use_eagle=False, partial_hit=True)
+        == MAMBA_BLOCK_SIZE - resume_at % MAMBA_BLOCK_SIZE
+    )
+
+
+@pytest.mark.parametrize(
+    ("query_start", "query_end", "checkpoint_position", "expected"),
+    [
+        # mid-block start, end in the next block: reuses column 1
+        (1984, 3602, 3600, True),
+        # block-aligned start: the initial state may be a shared cached block
+        (1600, 3000, 2992, False),
+        # start and end in the same block: no column left for the checkpoint
+        (1984, 3000, 2992, False),
+        # spans two blocks: the regular column, unchanged
+        (1984, 4802, 4800, True),
+    ],
+)
+def test_reused_initial_col_validity(
+    monkeypatch: pytest.MonkeyPatch,
+    query_start: int,
+    query_end: int,
+    checkpoint_position: int,
+    expected: bool,
+) -> None:
+    import vllm.v1.kv_cache_interface as kv_cache_interface
+
+    args = dict(
+        query_start=query_start,
+        query_end=query_end,
+        checkpoint_position=checkpoint_position,
+        hash_block_size=ATTN_BLOCK_SIZE,
+        mamba_block_size=MAMBA_BLOCK_SIZE,
+        checkpoint_alignment=16,
+    )
+    monkeypatch.setattr(kv_cache_interface, "_MAMBA_CKPT_REUSE_INITIAL_COL", True)
+    assert is_mamba_prefill_checkpoint_valid(**args) is expected
+    monkeypatch.setattr(kv_cache_interface, "_MAMBA_CKPT_REUSE_INITIAL_COL", False)
+    regular = cdiv(query_end, MAMBA_BLOCK_SIZE) - 2 > (query_start - 1) // (
+        MAMBA_BLOCK_SIZE
+    )
+    assert is_mamba_prefill_checkpoint_valid(**args) is (expected and regular)
+
+
 def test_disabling_eagle_block_drop_keeps_the_trailing_cache_boundary() -> None:
     (request,) = create_requests(1, num_tokens=3602, block_size=ATTN_BLOCK_SIZE)
 
@@ -353,6 +422,85 @@ def test_lookahead_split_caches_partial_tail_boundary(lookahead: int) -> None:
 
     _, num_computed, _ = manager.get_computed_blocks(make("resend"))
     assert num_computed == boundary
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_mid_block_hit_checkpoint_in_initial_col(
+    monkeypatch: pytest.MonkeyPatch, reuse: bool
+) -> None:
+    """A partial (mid-block) hit whose remainder ends in the next block. With
+    VLLM_MAMBA_CKPT_REUSE_INITIAL_COL the remainder runs as one chunk, the prompt
+    checkpoint lands in the hit's private copy-on-write column, a resend hits it,
+    and the producer's cached state keeps its own block and key."""
+    import vllm.v1.kv_cache_interface as kv_cache_interface
+
+    monkeypatch.setattr(kv_cache_interface, "_MAMBA_CKPT_REUSE_INITIAL_COL", reuse)
+    init_none_hash(sha256)
+    lookahead = 1
+    manager = _make_hybrid_kv_cache_manager(
+        num_prefill_checkpoint_blocks=1, num_hash_lookahead_tokens=lookahead
+    )
+    mamba_manager = manager.coordinator.single_type_managers[MAMBA_GROUP_ID]
+    split_kwargs = dict(
+        use_eagle_block_drop=False,
+        partial_hit=True,
+        num_prefill_checkpoint_blocks=1,
+        num_hash_lookahead_tokens=lookahead,
+    )
+
+    def make(request_id: str, tokens: list[int]) -> Request:
+        return make_request(
+            request_id,
+            tokens,
+            ATTN_BLOCK_SIZE,
+            sha256,
+            num_hash_lookahead_tokens=lookahead,
+        )
+
+    base = list(range(2002))
+    producer = make("producer", base)
+    _run_chunked_prefill(manager, producer, budgets=[], **split_kwargs)
+    assert producer.num_computed_tokens == len(base)
+    manager.free(producer)
+    manager.new_step_starts()
+
+    tokens = base + list(range(100000, 101500))  # 3502 tokens: ends in block 2
+    consumer = make("consumer", tokens)
+    computed_blocks, hit, _ = manager.get_computed_blocks(consumer)
+    assert MAMBA_BLOCK_SIZE < hit < 2 * MAMBA_BLOCK_SIZE
+    producer_block = computed_blocks.blocks[MAMBA_GROUP_ID][-1]
+    producer_key = producer_block.block_hash
+    consumer.num_computed_tokens = hit
+    num_new = _split(consumer, len(tokens) - hit, **split_kwargs)
+    consumer.num_computed_tokens = 0
+    assert (
+        manager.allocate_slots(
+            consumer,
+            num_new,
+            num_new_computed_tokens=hit,
+            new_computed_blocks=computed_blocks,
+            num_lookahead_tokens=NUM_SPEC,
+        )
+        is not None
+    )
+    consumer.num_computed_tokens = hit + num_new
+    if not reuse:
+        assert num_new < len(tokens) - hit
+        assert "consumer" not in mamba_manager._checkpoints
+        return
+    assert num_new == len(tokens) - hit
+    position, col = mamba_manager._checkpoints["consumer"]
+    assert col == (hit - 1) // MAMBA_BLOCK_SIZE
+    checkpoint_block = mamba_manager.req_to_blocks["consumer"][col]
+    assert checkpoint_block is not producer_block  # the private CoW copy
+    assert checkpoint_block.block_hash_num_tokens == position
+    assert position == (len(tokens) - lookahead) // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    # The producer's state keeps its block and key.
+    assert producer_block.block_hash == producer_key
+    manager.free(consumer)
+    manager.new_step_starts()
+    _, resend_hit, _ = manager.get_computed_blocks(make("resend", tokens))
+    assert resend_hit == position
 
 
 @pytest.mark.parametrize("first_chunk", [800, 900, 1599, 1601, 2000])

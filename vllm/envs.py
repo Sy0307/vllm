@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE: bool = True
     VLLM_MOONCAKE_LOOKUP_MIN_TOKENS: int = 0
     VLLM_KV_BREAKDOWN_S: float = 0.0
+    VLLM_MAMBA_CKPT_REUSE_INITIAL_COL: bool = False
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -995,6 +996,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # cache group (blocks held by requests, held Mamba states, evictable cached
     # blocks). 0 disables it.
     "VLLM_KV_BREAKDOWN_S": lambda: float(os.getenv("VLLM_KV_BREAKDOWN_S", "0")),
+    # Mamba "align" prefix caching: a prefill that starts mid-block and ends in
+    # the next block exports its prompt checkpoint into the initial-state column
+    # (private for the step) instead of splitting into up to three chunks at
+    # the block boundary and the checkpoint (kv_cache_interface.py).
+    "VLLM_MAMBA_CKPT_REUSE_INITIAL_COL": lambda: (
+        os.getenv("VLLM_MAMBA_CKPT_REUSE_INITIAL_COL", "0") == "1"
+    ),
     # (CPU backend only) CPU key-value cache space.
     # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE": lambda: (

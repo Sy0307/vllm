@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
+    mamba_checkpoint_reuses_initial_col,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
@@ -1755,8 +1756,44 @@ class MambaManager(SingleTypeKVCacheManager):
                     request_id in self._allocated_block_reqs
                     and checkpoint_idx >= len(blocks) - self.num_speculative_blocks
                 )
+                # The initial-state column, private for this step (see
+                # _private_initial_col_cow).
+                or mamba_checkpoint_reuses_initial_col(
+                    query_start, query_end, self.block_size
+                )
             )
         )
+
+    def _private_initial_col_cow(
+        self, request_id: str, query_start: int, query_end: int, prefill_end: int
+    ) -> tuple[int, KVCacheBlock] | None:
+        """The (column, block) whose cache entry must move to a copy before the
+        checkpoint of this query reuses the initial-state column: the request's
+        own block there carries a hash (a junction or partial tail cached by an
+        earlier step) that is not already queued for that move. Unhashed blocks
+        are exclusively owned, so they need nothing."""
+        if not mamba_checkpoint_reuses_initial_col(
+            query_start, query_end, self.block_size
+        ):
+            return None
+        checkpoint_position = get_mamba_prefill_checkpoint_position(
+            query_end,
+            self.cache_hit_alignment_tokens,
+            self.drop_eagle_checkpoint_block,
+            num_hash_lookahead_tokens=self.block_pool.num_hash_lookahead_tokens,
+        )
+        if not self._needs_internal_checkpoint(
+            request_id, query_start, query_end, checkpoint_position, prefill_end
+        ):
+            return None
+        col = (query_start - 1) // self.block_size
+        blocks = self.req_to_blocks[request_id]
+        if col >= len(blocks) or request_id in self._partial_hit_reqs:
+            return None
+        block = blocks[col]
+        if block.is_null or block.block_hash is None:
+            return None
+        return col, block
 
     def get_num_blocks_to_allocate(
         self,
@@ -1814,11 +1851,19 @@ class MambaManager(SingleTypeKVCacheManager):
                 - len(new_computed_blocks)
                 - len(self.req_to_blocks[request_id])
             )
+            forced_cow = self._private_initial_col_cow(
+                request_id, total_computed_tokens, num_tokens, prefill_end
+            )
+            if forced_cow is not None and not apply_admission_cap:
+                # Keep the request on its block and move the cache entry to a
+                # copy, as for a producer's partial tail (allocate_new_blocks).
+                self._partial_hit_reqs[request_id] = forced_cow
             has_partial_hit = (
                 self._has_partial_local_hit(
                     new_computed_blocks, num_local_computed_tokens
                 )
                 or request_id in self._partial_hit_reqs
+                or forced_cow is not None
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
