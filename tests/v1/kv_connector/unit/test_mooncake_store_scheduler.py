@@ -1037,6 +1037,29 @@ def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
     assert scheduler.load_specs[request.request_id].can_load is False
 
 
+@pytest.mark.parametrize(
+    "min_tokens, local_hit, expected",
+    [(0, 16, (16, True)), (64, 16, (0, False)), (32, 16, (16, True))],
+)
+def test_lookup_skipped_when_tail_past_local_hit_is_short(
+    monkeypatch, min_tokens, local_hit, expected
+):
+    """With VLLM_MOONCAKE_LOOKUP_MIN_TOKENS, a request whose uncached tail is
+    shorter than the threshold neither waits for the store lookup nor loads:
+    its prefetched lookup is dropped and the tail is recomputed."""
+    monkeypatch.setenv("VLLM_MOONCAKE_LOOKUP_MIN_TOKENS", str(min_tokens))
+    scheduler = _make_bare_scheduler()
+    scheduler.lookup_async = scheduler.load_async = True
+    scheduler.client = _StubLookupClient(hit_tokens=32)
+    request = _make_admission_request()  # 48 tokens
+
+    assert scheduler.get_num_new_matched_tokens(request, local_hit) == expected
+    skipped = expected == (0, False)
+    assert (scheduler.client.discarded == [request.request_id]) == skipped
+    assert (scheduler.client.num_tokens == []) == skipped
+    assert (request.request_id in scheduler.load_specs) != skipped
+
+
 def test_lookup_reprobes_when_local_hit_shrank_below_skipped_prefix():
     """The lookup took the local prefix hit as present without probing it. If
     local blocks were evicted before the result is consumed, the gap was never
@@ -1728,6 +1751,34 @@ def test_boundary_state_supersedes_the_resume_state_once():
 
     assert first.requests[0].superseded_state_tokens == 16
     assert second.requests[0].superseded_state_tokens == 0
+
+
+def test_resumed_request_boundary_past_prompt_supersedes_nothing():
+    """A resumed-from-preemption request re-prefills its generated tokens, but
+    a boundary past the original prompt is a decode-time boundary: the state
+    it resumed from (its own checkpoint) must not be marked superseded."""
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=24)
+    tracker = scheduler._request_trackers["req-0"]
+    tracker.resume_tokens = 16
+    tracker.prompt_end_tokens = 24
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads({"req-0": [(1, 7, 32)]}, meta)
+
+    assert meta.requests[0].superseded_state_tokens == 0
+
+
+def test_supersede_switch_off_keeps_the_resume_state(monkeypatch):
+    monkeypatch.setenv("VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE", "0")
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
+    scheduler._request_trackers["req-0"].resume_tokens = 16
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads({"req-0": [(1, 7, 32)]}, meta)
+
+    assert meta.requests[0].superseded_state_tokens == 0
 
 
 @pytest.mark.parametrize("resume_tokens, boundary", [(0, 32), (32, 32), (48, 32)])

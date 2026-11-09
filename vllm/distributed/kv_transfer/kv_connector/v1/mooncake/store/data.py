@@ -248,6 +248,10 @@ class RequestTracker:
     # stored there is superseded once this request stores a later prompt
     # boundary state (see ``ReqMeta.superseded_state_tokens``).
     resume_tokens: int = 0
+    # Original prompt length. A resumed-from-preemption request re-prefills its
+    # generated tokens too (``prefill_end_tokens``), but a boundary past the
+    # prompt is a decode-time boundary and supersedes nothing. 0 = unknown.
+    prompt_end_tokens: int = 0
 
     def update(
         self,

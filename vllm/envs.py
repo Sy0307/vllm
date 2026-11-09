@@ -57,6 +57,8 @@ if TYPE_CHECKING:
     VLLM_RUNTIME_KNOBS: str | None = None
     VLLM_SCHED_TRACE: str | None = None
     VLLM_REQ_TRACE: str | None = None
+    VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE: bool = True
+    VLLM_MOONCAKE_LOOKUP_MIN_TOKENS: int = 0
     VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -978,6 +980,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # wall-clock time of each stage from arrival to first token, local vs
     # connector prefix hits and admission blocks. Unset (default) disables it.
     "VLLM_REQ_TRACE": lambda: os.getenv("VLLM_REQ_TRACE", None),
+    # MooncakeStore removes the Mamba state a request resumed from once it stores
+    # a later prompt-boundary state (frees store capacity). 0 keeps both (LRU).
+    "VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE": lambda: bool(
+        int(os.getenv("VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE", "1"))
+    ),
+    # MooncakeStore skips the external lookup (and any load) when fewer than this
+    # many tokens are left past the local prefix hit: recomputing them is faster
+    # than a store load, and the async lookup costs a scheduling pass. 0 = off.
+    "VLLM_MOONCAKE_LOOKUP_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_MOONCAKE_LOOKUP_MIN_TOKENS", "0")
+    ),
     # Seconds between scheduler log lines breaking the KV block pool down by
     # cache group (blocks held by requests, held Mamba states, evictable cached
     # blocks). 0 disables it.

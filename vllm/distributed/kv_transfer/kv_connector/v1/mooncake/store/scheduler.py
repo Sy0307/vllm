@@ -7,6 +7,7 @@
 
 from collections.abc import Sequence
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -69,9 +70,12 @@ def _take_superseded_state(
     resumes from the newer one. Decode-time boundaries do not count, and a
     request that hit nothing has nothing to supersede.
     """
+    if not envs.VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE:
+        return 0
     resume = tracker.resume_tokens
+    prompt_end = tracker.prompt_end_tokens or tracker.prefill_end_tokens
     if resume <= 0 or not any(
-        resume < put.num_tokens <= tracker.prefill_end_tokens for put in mamba_puts
+        resume < put.num_tokens <= prompt_end for put in mamba_puts
     ):
         return 0
     tracker.resume_tokens = 0
@@ -276,6 +280,15 @@ class MooncakeStoreScheduler:
         if request.num_tokens < self._lookup_align():
             return 0, False
 
+        min_tokens = envs.VLLM_MOONCAKE_LOOKUP_MIN_TOKENS
+        if min_tokens > 0 and request.num_tokens - num_computed_tokens < min_tokens:
+            # Too little is left past the local hit for the store to pay off:
+            # a store load (~0.1-0.3 s) is slower than recomputing such a tail,
+            # and waiting for the async lookup costs the request a scheduling
+            # pass. Drop any prefetched lookup and compute the tail locally.
+            self.client.discard(request.request_id)
+            return 0, False
+
         lookup_result = self.client.lookup(
             request.request_id,
             request.num_tokens,
@@ -419,6 +432,11 @@ class MooncakeStoreScheduler:
                 ),
                 prefill_end_tokens=len(prefill_tokens),
                 resume_tokens=request.num_computed_tokens,
+                prompt_end_tokens=(
+                    len(request.prompt_token_ids)
+                    if request.prompt_token_ids is not None
+                    else len(prefill_tokens)
+                ),
             )
             self._request_trackers[request.req_id] = request_tracker
 
