@@ -4,6 +4,9 @@ import contextlib
 import copy
 import queue
 import re
+import threading
+from array import array
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias, TypeVar
@@ -188,6 +191,51 @@ def _make_fast_encode(tokenizer: HfTokenizer) -> Callable[[str], list[int]] | No
     return fast_encode
 
 
+class _PieceEncodeCache:
+    """Memoize a pure ``text -> token ids`` encoder for long pieces.
+
+    Tiktoken-backed remote tokenizers (Kimi) encode every chat message through
+    ``_encode_text_piece``. In multi-turn agentic traffic each request carries
+    the whole conversation again, so the same long message strings are
+    re-encoded on every turn (~0.7 us/token: ~70 ms of frontend time per 100K
+    tokens, serialized on the renderer thread). Results are cached by the exact
+    text (the dict compares it on a hit, so a hash collision cannot return a
+    wrong encoding) in compact arrays, LRU-evicted past ``max_tokens``.
+    """
+
+    def __init__(self, fn: Callable[..., list[int]], min_chars: int, max_tokens: int):
+        self._fn = fn
+        self._min_chars = min_chars
+        self._max_tokens = max_tokens
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[str, bool], array] = OrderedDict()
+        self._num_tokens = 0
+        self.hits = 0
+        self.misses = 0
+
+    def __call__(self, text: str, allow_special_tokens: bool = True) -> list[int]:
+        if len(text) < self._min_chars:
+            return self._fn(text, allow_special_tokens=allow_special_tokens)
+        key = (text, allow_special_tokens)
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached is not None:
+                self._entries.move_to_end(key)
+                self.hits += 1
+                return cached.tolist()
+        ids = self._fn(text, allow_special_tokens=allow_special_tokens)
+        packed = array("I", ids)
+        with self._lock:
+            self.misses += 1
+            if key not in self._entries and len(packed) <= self._max_tokens:
+                self._entries[key] = packed
+                self._num_tokens += len(packed)
+                while self._num_tokens > self._max_tokens:
+                    _, old = self._entries.popitem(last=False)
+                    self._num_tokens -= len(old)
+        return ids
+
+
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -214,6 +262,19 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     if hasattr(tokenizer, "vocab_size"):
         with contextlib.suppress(NotImplementedError):
             max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
+
+    piece_cache_tokens = envs.VLLM_TOKENIZER_PIECE_CACHE_TOKENS
+    if piece_cache_tokens > 0 and hasattr(tokenizer, "_encode_text_piece"):
+        # Instance attribute on the copy: the remote tokenizer's own methods
+        # (chat template included) call self._encode_text_piece.
+        cached_tokenizer._encode_text_piece = _PieceEncodeCache(
+            tokenizer._encode_text_piece, min_chars=1024, max_tokens=piece_cache_tokens
+        )
+        logger.info(
+            "Tokenizer %s: caching encodings of long text pieces (up to %d tokens).",
+            tokenizer.__class__.__name__,
+            piece_cache_tokens,
+        )
 
     fast_encode = _make_fast_encode(tokenizer)
     if fast_encode is not None:
