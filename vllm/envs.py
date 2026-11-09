@@ -1000,7 +1000,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Let tiktoken-backed remote tokenizers (e.g. Kimi) serve plain-text
     # tokenizer(text, add_special_tokens=False) calls with their native encode()
-    # when a startup self-check shows it equals the generic path. 0 disables.
+    # when a startup self-check shows it equals the generic path, and their text
+    # pieces skip the per-character whitespace-run split when no run exceeds its
+    # limit, and lone special-token pieces are looked up (same output). 0 disables
+    # all three.
     "VLLM_TOKENIZER_FAST_ENCODE": lambda: bool(
         int(os.getenv("VLLM_TOKENIZER_FAST_ENCODE", "1"))
     ),

@@ -7,7 +7,7 @@ import re
 import threading
 from array import array
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
@@ -191,6 +191,87 @@ def _make_fast_encode(tokenizer: HfTokenizer) -> Callable[[str], list[int]] | No
     return fast_encode
 
 
+_SPLIT_PROBES = (
+    "",
+    " ",
+    "abc",
+    "aaaa  bbbbb\n\n\n\tc",
+    "\u00a0\u3000\u2028x\x1c\x85\u5b57\u5b57\u5b57\u5b57 y",
+    "      a" + "z" * 9 + "\n" * 9,
+)
+
+
+def _make_fast_whitespace_split(
+    split: Callable[[str, int], Iterable[str]],
+) -> Callable[[str, int], Iterable[str]] | None:
+    """An exact fast path for Kimi's ``_split_whitespaces_or_nonwhitespaces``.
+
+    The remote tokenizer cuts every text piece before tiktoken so that no
+    substring has more than ``max_len`` (25,000) consecutive whitespace or
+    non-whitespace characters, scanning the piece one character at a time in
+    Python (~50 ns/char, about half of chat-template encoding, and it holds the
+    GIL while tiktoken's own encode releases it). Almost no piece has such a
+    run, and then the split yields the piece whole: this checks for a run in C
+    (``str.split`` and a regex anchored at whitespace-run starts; both use the
+    same whitespace predicate as ``str.isspace``) and only falls back to the
+    original split when one exists. None if it disagrees with ``split`` on the
+    probes."""
+    patterns: dict[int, re.Pattern[str]] = {}
+
+    def fast_split(s: str, max_len: int) -> Iterable[str]:
+        if len(s) <= max_len:
+            return (s,)
+        if max(map(len, s.split()), default=0) <= max_len:
+            ws = patterns.get(max_len)
+            if ws is None:
+                ws = patterns[max_len] = re.compile(r"(?<!\s)\s{%d}" % (max_len + 1))
+            if ws.search(s) is None:
+                return (s,)
+        return split(s, max_len)
+
+    try:
+        for text in _SPLIT_PROBES:
+            for max_len in (1, 2, 3, 4, 8):
+                if list(fast_split(text, max_len)) != list(split(text, max_len)):
+                    return None
+    except Exception:  # noqa: BLE001
+        return None
+    return fast_split
+
+
+def _make_special_piece_fast_path(
+    tokenizer: HfTokenizer, encode_piece: Callable[..., list[int]]
+) -> Callable[..., list[int]] | None:
+    """``encode_piece`` with lone special tokens looked up instead of encoded.
+
+    Kimi's chat template encodes every structural marker (``<|open|>``,
+    ``<|sep|>``, ``<|close|>``, ``<|end_of_msg|>``: about a third of all pieces)
+    as its own ``tiktoken.encode(text, allowed_special="all")`` call, which
+    converts the 256 special tokens into a native set on every call (~16 us
+    with the GIL held, ~23 ms for an 80-message agentic prompt). A piece that is
+    exactly one special token encodes to that token's id. None if the tokenizer
+    has no tiktoken special-token map or a special token encodes differently."""
+    specials = getattr(getattr(tokenizer, "model", None), "_special_tokens", None)
+    if not isinstance(specials, dict) or not specials:
+        return None
+    specials = dict(specials)
+
+    def encode(text: str, allow_special_tokens: bool = True) -> list[int]:
+        if allow_special_tokens:
+            token_id = specials.get(text)
+            if token_id is not None:
+                return [token_id]
+        return encode_piece(text, allow_special_tokens=allow_special_tokens)
+
+    try:
+        for text in specials:
+            if encode(text) != list(encode_piece(text, allow_special_tokens=True)):
+                return None
+    except Exception:  # noqa: BLE001
+        return None
+    return encode
+
+
 class _PieceEncodeCache:
     """Memoize a pure ``text -> token ids`` encoder for long pieces.
 
@@ -263,18 +344,50 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         with contextlib.suppress(NotImplementedError):
             max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
-    piece_cache_tokens = envs.VLLM_TOKENIZER_PIECE_CACHE_TOKENS
-    if piece_cache_tokens > 0 and hasattr(tokenizer, "_encode_text_piece"):
-        # Instance attribute on the copy: the remote tokenizer's own methods
-        # (chat template included) call self._encode_text_piece.
-        cached_tokenizer._encode_text_piece = _PieceEncodeCache(
-            tokenizer._encode_text_piece, min_chars=1024, max_tokens=piece_cache_tokens
-        )
-        logger.info(
-            "Tokenizer %s: caching encodings of long text pieces (up to %d tokens).",
-            tokenizer.__class__.__name__,
-            piece_cache_tokens,
-        )
+    split = getattr(type(tokenizer), "_split_whitespaces_or_nonwhitespaces", None)
+    if (
+        envs.VLLM_TOKENIZER_FAST_ENCODE
+        and split is not None
+        and hasattr(tokenizer, "_encode_text_piece")
+    ):
+        fast_split = _make_fast_whitespace_split(split)
+        if fast_split is not None:
+            # Instance attributes: _encode_text_piece calls it through self, and
+            # the piece cache below wraps the original tokenizer's bound method.
+            tokenizer._split_whitespaces_or_nonwhitespaces = fast_split
+            cached_tokenizer._split_whitespaces_or_nonwhitespaces = fast_split
+            logger.info(
+                "Tokenizer %s: text pieces skip the per-character run split "
+                "unless they contain a run longer than its limit.",
+                tokenizer.__class__.__name__,
+            )
+
+    encode_piece = getattr(tokenizer, "_encode_text_piece", None)
+    if encode_piece is not None:
+        # Installed as an instance attribute on the copy: the remote tokenizer's
+        # own methods (chat template included) call self._encode_text_piece.
+        piece_fn = encode_piece
+        piece_cache_tokens = envs.VLLM_TOKENIZER_PIECE_CACHE_TOKENS
+        if piece_cache_tokens > 0:
+            piece_fn = _PieceEncodeCache(
+                piece_fn, min_chars=1024, max_tokens=piece_cache_tokens
+            )
+            logger.info(
+                "Tokenizer %s: caching encodings of long text pieces (up to %d "
+                "tokens).",
+                tokenizer.__class__.__name__,
+                piece_cache_tokens,
+            )
+        if envs.VLLM_TOKENIZER_FAST_ENCODE:
+            special_fn = _make_special_piece_fast_path(tokenizer, piece_fn)
+            if special_fn is not None:
+                piece_fn = special_fn
+                logger.info(
+                    "Tokenizer %s: lone special-token pieces are looked up.",
+                    tokenizer.__class__.__name__,
+                )
+        if piece_fn is not encode_piece:
+            cached_tokenizer._encode_text_piece = piece_fn
 
     fast_encode = _make_fast_encode(tokenizer)
     if fast_encode is not None:

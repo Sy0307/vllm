@@ -3,7 +3,7 @@
 """The frontend cache of long text-piece encodings returns exactly what the
 wrapped encoder returns and stays within its token budget."""
 
-from vllm.tokenizers.hf import _PieceEncodeCache
+from vllm.tokenizers.hf import _PieceEncodeCache, _make_special_piece_fast_path
 
 
 class _CountingEncoder:
@@ -59,3 +59,45 @@ def test_piece_larger_than_budget_is_not_stored():
     text = "x" * 10
     assert cache(text) == enc(text)
     assert cache._num_tokens == 0 and not cache._entries
+
+
+class _FakeTiktoken:
+    def __init__(self, specials):
+        self._special_tokens = specials
+
+
+class _FakeTokenizer:
+    def __init__(self, specials):
+        self.model = _FakeTiktoken(specials)
+
+    def _encode_text_piece(self, text, allow_special_tokens=True):
+        if allow_special_tokens and text in self.model._special_tokens:
+            return [self.model._special_tokens[text]]
+        return [ord(c) for c in text]
+
+
+def test_lone_special_tokens_are_looked_up():
+    tok = _FakeTokenizer({"<|open|>": 900, "<|sep|>": 901})
+    calls = []
+
+    def encode_piece(text, allow_special_tokens=True):
+        calls.append((text, allow_special_tokens))
+        return tok._encode_text_piece(text, allow_special_tokens)
+
+    fast = _make_special_piece_fast_path(tok, encode_piece)
+    assert fast is not None
+    calls.clear()
+    assert fast("<|open|>") == [900]
+    assert not calls  # looked up, not encoded
+    # Not a lone special token, or specials not allowed: the wrapped encoder.
+    assert fast("<|open|>x") == encode_piece("<|open|>x")
+    assert fast("<|sep|>", allow_special_tokens=False) == [ord(c) for c in "<|sep|>"]
+
+
+def test_special_fast_path_rejects_mismatch():
+    tok = _FakeTokenizer({"<|open|>": 900})
+
+    def wrong(text, allow_special_tokens=True):
+        return [1]
+
+    assert _make_special_piece_fast_path(tok, wrong) is None
