@@ -10,6 +10,7 @@ from functools import partial, reduce
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import SpeculativeConfig, VllmConfig
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -549,6 +550,18 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    # The group count of a type sets how many blocks each request's state takes
+    # (one per group), while a block costs the widest group's pages on every PP
+    # stage, and this grouping does not see the stages. Kimi K3/K3.1 (69 KDA,
+    # 24 MLA/DSA + 5 draft layers, PP 48/45): the default size 29 gives 3 KDA
+    # groups of 11 layers on the last stage under its 17-layer attention group;
+    # 35 gives 2 KDA groups (17/16 there) that fill those blocks (K3 memory fix 5).
+    override = envs.VLLM_KV_CACHE_GROUP_SIZE
+    if override > 0:
+        logger.info(
+            "Overriding the KV cache group size %d with %d", group_size, override
+        )
+        group_size = override
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size

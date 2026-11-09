@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     VLLM_FUSED_MQA_TOPK_MIN_KEYS: int = 0
     VLLM_INDEXER_FLASHTOPK_MIN_KEYS: int = 0
     VLLM_PREFILL_WAITING_RESERVE: int = 0
+    VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS: bool = False
+    VLLM_KV_CACHE_GROUP_SIZE: int = 0
     VLLM_TOKENIZER_PIECE_CACHE_TOKENS: int = 0
     VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_MAMBA_CKPT_REUSE_INITIAL_COL: bool = False
@@ -1020,6 +1022,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Tokens of each step's budget a running prefill chunk leaves for waiting
     # requests while any are queued (short agentic turns otherwise queue behind
     # every chunk of a long prompt). 0 keeps strict running-first.
+    # Groups over identical ranks (e.g. TP/DCP/EP on one node) share one PyNccl
+    # communicator instead of one each (~0.6-1.1 GiB per 8-GPU communicator).
+    "VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS": lambda: bool(
+        int(os.getenv("VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS", "0"))
+    ),
+    # Layers per KV cache group (0: automatic). Hybrid models whose PP stages
+    # hold different layer mixes waste pages under the automatic size; Kimi
+    # K3/K3.1 at PP 48/45 use 35.
+    "VLLM_KV_CACHE_GROUP_SIZE": lambda: int(os.getenv("VLLM_KV_CACHE_GROUP_SIZE", "0")),
     "VLLM_PREFILL_WAITING_RESERVE": lambda: int(
         os.getenv("VLLM_PREFILL_WAITING_RESERVE", "0")
     ),

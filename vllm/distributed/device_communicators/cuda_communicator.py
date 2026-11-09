@@ -29,6 +29,11 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# PyNccl communicators shared by groups over identical ranks (see
+# CudaCommunicator.__init__; VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS).
+_SHARED_PYNCCL: dict[tuple[tuple[int, ...], int | None], "object"] = {}
+_SHARED_PYNCCL_REFS: dict[int, int] = {}
+
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
 # non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
 NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
@@ -109,13 +114,34 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: PyNcclCommunicator | None = None
-        if self.world_size > 1:
+        # Groups over the same ranks (TP, DCP and EP on one node for TP8/DCP8/EP8)
+        # can share one NCCL communicator: each extra 8-GPU communicator costs
+        # ~0.6-1.1 GiB of device memory on B200, taken before the KV cache is
+        # sized. Every rank issues the groups' collectives in the same program
+        # order, so one communicator keeps a valid order (K3 memory fix 3).
+        share_key = (
+            (tuple(self.ranks), self.device.index)
+            if envs.VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS and tcp_store_group is None
+            else None
+        )
+        if self.world_size > 1 and share_key in _SHARED_PYNCCL:
+            self.pynccl_comm = _SHARED_PYNCCL[share_key]  # type: ignore[assignment]
+            _SHARED_PYNCCL_REFS[id(self.pynccl_comm)] += 1
+            logger.info(
+                "Sharing the PyNccl communicator of ranks %s with group %s",
+                self.ranks,
+                unique_name,
+            )
+        elif self.world_size > 1:
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group if tcp_store_group is None else tcp_store_group,
                 device=self.device,
             )
             if is_symmetric_memory_enabled():
                 register_nccl_symmetric_ops(self.pynccl_comm)
+            if share_key is not None:
+                _SHARED_PYNCCL[share_key] = self.pynccl_comm
+                _SHARED_PYNCCL_REFS[id(self.pynccl_comm)] = 1
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
@@ -946,7 +972,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Borrowed from the TP group; the TP communicator owns and closes it.
         self._dcp_ag_comm = None
         if self.pynccl_comm is not None:
-            self.pynccl_comm.destroy()
+            comm_id = id(self.pynccl_comm)
+            refs = _SHARED_PYNCCL_REFS.get(comm_id, 1) - 1
+            if refs > 0:
+                # Shared with another group over the same ranks: the last owner
+                # destroys it.
+                _SHARED_PYNCCL_REFS[comm_id] = refs
+            else:
+                _SHARED_PYNCCL_REFS.pop(comm_id, None)
+                for key in [k for k, v in _SHARED_PYNCCL.items() if v is self.pynccl_comm]:
+                    del _SHARED_PYNCCL[key]
+                self.pynccl_comm.destroy()
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
