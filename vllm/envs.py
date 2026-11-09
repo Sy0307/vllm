@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     VLLM_TOKENIZER_FAST_ENCODE: bool = True
     VLLM_FUSED_MQA_TOPK_MIN_KEYS: int = 0
     VLLM_INDEXER_FLASHTOPK_MIN_KEYS: int = 0
+    VLLM_PREFILL_WAITING_RESERVE: int = 0
+    VLLM_TOKENIZER_PIECE_CACHE_TOKENS: int = 0
     VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_MAMBA_CKPT_REUSE_INITIAL_COL: bool = False
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -1010,6 +1012,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (needs the flashtopk package; 0 = never).
     "VLLM_INDEXER_FLASHTOPK_MIN_KEYS": lambda: int(
         os.getenv("VLLM_INDEXER_FLASHTOPK_MIN_KEYS", "0")
+    ),
+    # Tokens of each step's budget a running prefill chunk leaves for waiting
+    # requests while any are queued (short agentic turns otherwise queue behind
+    # every chunk of a long prompt). 0 keeps strict running-first.
+    "VLLM_PREFILL_WAITING_RESERVE": lambda: int(
+        os.getenv("VLLM_PREFILL_WAITING_RESERVE", "0")
+    ),
+    # Token capacity of the frontend cache of long text-piece encodings for
+    # tiktoken-backed remote tokenizers (multi-turn prompts repeat the same
+    # messages every turn). 0 disables it.
+    "VLLM_TOKENIZER_PIECE_CACHE_TOKENS": lambda: int(
+        os.getenv("VLLM_TOKENIZER_PIECE_CACHE_TOKENS", "0")
     ),
     # Seconds between scheduler log lines breaking the KV block pool down by
     # cache group (blocks held by requests, held Mamba states, evictable cached

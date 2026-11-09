@@ -1067,6 +1067,21 @@ class Scheduler(SchedulerInterface):
         ):
             defer_prefills = True
 
+        # Keep part of the budget for waiting requests while any are queued: a
+        # running prefill otherwise takes the whole budget every step, and a
+        # waiting request with a short uncached tail (agentic turns: a few
+        # thousand tokens past a long cached prefix) queues behind a long
+        # prompt's every chunk. 0 (default) keeps strict running-first.
+        waiting_reserve = (
+            envs.VLLM_PREFILL_WAITING_RESERVE
+            if len(self.waiting) > 0
+            and not defer_prefills
+            # No seat for a waiting request: the reserve would idle.
+            and len(self.running) + self.num_waiting_for_streaming_input
+            < self.max_num_active_reqs
+            else 0
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -1120,6 +1135,12 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = long_prefill_token_threshold
+            if waiting_reserve and request.is_prefill_chunk:
+                # A prefill chunk leaves waiting_reserve tokens of the budget;
+                # when the budget is already that low, it waits for a step.
+                num_new_tokens = min(
+                    num_new_tokens, max(token_budget - waiting_reserve, 0)
+                )
             if self.pp_prefill_balance_unit > 0 and request.is_prefill_chunk:
                 num_new_tokens = self._pp_balanced_prefill_cap(
                     request, request.num_computed_tokens, num_new_tokens
