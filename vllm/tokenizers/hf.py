@@ -3,11 +3,14 @@
 import contextlib
 import copy
 import queue
+import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
+from transformers import AutoTokenizer, BatchEncoding, PythonBackend, TokenizersBackend
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
@@ -105,6 +108,86 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     return tokenizer
 
 
+_FAST_ENCODE_KWARGS = frozenset({"add_special_tokens", "truncation", "max_length"})
+
+
+def _fast_encode_probes(tokenizer: HfTokenizer) -> list[str]:
+    """Strings on which the direct and the generic encode paths must agree:
+    every special token alone, glued to text and wrapped in whitespace, plus
+    multilingual and long text."""
+    specials = [t for t in tokenizer.get_added_vocab() if t][:512]
+    probes = [
+        "",
+        " ",
+        "\n\n  \t",
+        "Hello, world! 你好，世界。 Здравствуй, мир. 1234567890",
+        "def f(x):\n    return {'a': [1, 2, 3]}  # comment\n",
+        "ab" * 3000 + " " * 300 + "\u00e9\u0301" * 50,
+    ]
+    for tok in specials:
+        probes += [
+            tok,
+            f"x{tok}y",
+            f" {tok} ",
+            f"\n{tok}\n",
+            f"{tok}{tok}",
+            f"a {tok}b",
+        ]
+    probes.append(" text ".join(specials) + " tail")
+    return probes
+
+
+def _make_fast_encode(tokenizer: HfTokenizer) -> Callable[[str], list[int]] | None:
+    """A faster ``tokenizer(text, add_special_tokens=False)["input_ids"]``, or
+    None if it would not be identical.
+
+    Tiktoken-backed remote tokenizers (Kimi's ``TikTokenTokenizer``) encode a
+    plain string natively in ``encode(text)``, but ``__call__`` takes the
+    generic slow path: split on added tokens in Python, encode each piece, map
+    the ids to token strings and back to ids one by one (~1.7 us/token, i.e.
+    0.2 s for a 100K-token agentic prompt). This keeps the same split (so a
+    tokenizer that internally chunks long strings sees the same pieces) and
+    only drops the id -> string -> id round trip, ~3x faster. Enabled only if
+    it matches the generic path on every probe."""
+    if not envs.VLLM_TOKENIZER_FAST_ENCODE:
+        return None
+    if not (hasattr(tokenizer, "_encode_text_piece") and hasattr(tokenizer, "model")):
+        return None
+    added = dict(tokenizer.get_added_vocab())
+    if not added:
+        return None
+    pattern = re.compile(
+        "(" + "|".join(re.escape(t) for t in sorted(added, key=len, reverse=True)) + ")"
+    )
+    native = tokenizer.encode
+
+    def fast_encode(text: str) -> list[int]:
+        ids: list[int] = []
+        for i, part in enumerate(pattern.split(text)):
+            if part:
+                if i % 2:
+                    ids.append(added[part])
+                else:
+                    ids.extend(native(part))
+        return ids
+
+    try:
+        for text in _fast_encode_probes(tokenizer):
+            if fast_encode(text) != list(
+                tokenizer(text, add_special_tokens=False)["input_ids"]
+            ):
+                logger.warning(
+                    "Fast tokenizer encode disabled: it differs from the generic "
+                    "path on %r.",
+                    text[:80],
+                )
+                return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Fast tokenizer encode disabled: self-check failed: %s", e)
+        return None
+    return fast_encode
+
+
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -132,7 +215,39 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         with contextlib.suppress(NotImplementedError):
             max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
+    fast_encode = _make_fast_encode(tokenizer)
+    if fast_encode is not None:
+        logger.info(
+            "Tokenizer %s: plain-text encodes skip the id/string round trip.",
+            tokenizer.__class__.__name__,
+        )
+
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
+        def __call__(self, text=None, *args, **kwargs):
+            if (
+                fast_encode is not None
+                and isinstance(text, str)
+                and not args
+                and kwargs.get("add_special_tokens") is False
+                and kwargs.keys() <= _FAST_ENCODE_KWARGS
+            ):
+                ids = fast_encode(text)
+                max_length = kwargs.get("max_length")
+                if (
+                    kwargs.get("truncation")
+                    and max_length is not None
+                    and len(ids) > max_length
+                ):
+                    ids = (
+                        ids[-max_length:]
+                        if self.truncation_side == "left"
+                        else ids[:max_length]
+                    )
+                return BatchEncoding(
+                    {"input_ids": ids, "attention_mask": [1] * len(ids)}
+                )
+            return super().__call__(text, *args, **kwargs)
+
         @property
         def all_special_ids(self) -> list[int]:
             return tokenizer_all_special_ids

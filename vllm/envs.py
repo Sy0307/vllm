@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     VLLM_REQ_TRACE: str | None = None
     VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE: bool = True
     VLLM_MOONCAKE_LOOKUP_MIN_TOKENS: int = 0
+    VLLM_TOKENIZER_FAST_ENCODE: bool = True
     VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_MAMBA_CKPT_REUSE_INITIAL_COL: bool = False
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -991,6 +992,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # than a store load, and the async lookup costs a scheduling pass. 0 = off.
     "VLLM_MOONCAKE_LOOKUP_MIN_TOKENS": lambda: int(
         os.getenv("VLLM_MOONCAKE_LOOKUP_MIN_TOKENS", "0")
+    ),
+    # Let tiktoken-backed remote tokenizers (e.g. Kimi) serve plain-text
+    # tokenizer(text, add_special_tokens=False) calls with their native encode()
+    # when a startup self-check shows it equals the generic path. 0 disables.
+    "VLLM_TOKENIZER_FAST_ENCODE": lambda: bool(
+        int(os.getenv("VLLM_TOKENIZER_FAST_ENCODE", "1"))
     ),
     # Seconds between scheduler log lines breaking the KV block pool down by
     # cache group (blocks held by requests, held Mamba states, evictable cached
