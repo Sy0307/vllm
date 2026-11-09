@@ -298,8 +298,18 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 num_computed_tokens=align.num_computed_tokens.clone(),
             )
         n = self.num_spec_decodes
+        # A deferred RecoverSSM step's commit (the specialized decode's
+        # ``_DeferredStepCommit``) carries its own per-step operands; the
+        # stock commit contexts are shared across steps and kept as they are.
+        context = self.recoverssm_context
+        snapshot_context = getattr(type(context), "snapshot_for_deferred_commit", None)
         return replace(
             self,
+            recoverssm_context=(
+                snapshot_context(context, n)
+                if snapshot_context is not None
+                else context
+            ),
             recoverssm_commit=replace(
                 commit,
                 state_indices=commit.state_indices[:n].clone(),

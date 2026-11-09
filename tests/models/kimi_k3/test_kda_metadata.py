@@ -705,12 +705,10 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
 
 
-def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_build(
-    monkeypatch,
-):
-    """On a non-last PP rank a step's commit runs after the next step's build
-    and verify: its verify records live at each request's slot (not its row of
-    the step), and its deferred-commit snapshot keeps the step's own inputs."""
+def _pp_slot_record_builder(monkeypatch):
+    """A RecoverSSM KDA builder of a non-last PP rank (records by request
+    slot), and a build of the step [prefill, spec, spec] with request slots
+    `req_idx`."""
     monkeypatch.setattr("vllm.utils.torch_utils.PIN_MEMORY", False)
     monkeypatch.setattr("vllm.v1.attention.backends.utils.PIN_MEMORY", False)
     monkeypatch.setattr(
@@ -773,6 +771,17 @@ def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_buil
             num_accepted_tokens=torch.ones(3, dtype=torch.int32),
         )
 
+    return builder, build
+
+
+def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_build(
+    monkeypatch,
+):
+    """On a non-last PP rank a step's commit runs after the next step's build
+    and verify: its verify records live at each request's slot (not its row of
+    the step), and its deferred-commit snapshot keeps the step's own inputs."""
+    builder, build = _pp_slot_record_builder(monkeypatch)
+
     # Batch rows must never stand in for request slots: the other micro-batch's
     # verify would overwrite them before this step's deferred commit.
     with pytest.raises(ValueError, match="request slot"):
@@ -797,6 +806,53 @@ def test_pp_recoverssm_records_use_request_slots_and_snapshot_outlives_next_buil
     snapshot.commit_recoverssm_state(num_accepted)
     commit_call = builder.recoverssm_context.commit.call_args
     assert commit_call.kwargs["record_rows"].tolist() == [4, 9]
+
+
+def test_pp_deferred_step_commit_snapshot_outlives_next_build(monkeypatch):
+    """The deferred RecoverSSM (vllm#66040 on the stock path) under PP: a
+    step's commit only records pending replays, at record rows held in a
+    persistent builder buffer that the next step's build rewrites before a
+    non-last PP rank's deferred commit runs. The snapshot keeps the step's
+    rows, and the commit uses them (not the stock slot rows) exactly once."""
+    from vllm.models.kimi_k3.nvidia.specialized_decode.recoverssm.context import (
+        KDARecoverSSMDeferred,
+    )
+    from vllm.models.kimi_k3.nvidia.specialized_decode.recoverssm.state import (
+        _DeferredStepCommit,
+    )
+
+    _, build = _pp_slot_record_builder(monkeypatch)
+    rows = torch.full((16,), -1, dtype=torch.int32)
+    pending = torch.zeros(16, dtype=torch.int32)
+    context = Mock()
+
+    def deferred_step(req_idx: list[int]) -> KimiK3KDAMetadata:
+        step = build(req_idx)
+        commit = step.recoverssm_commit
+        assert commit is not None
+        # As install_builder's build: stage the record slots, wrap the context.
+        rows[:2].copy_(torch.tensor(req_idx[1:], dtype=torch.int32))
+        deferred = KDARecoverSSMDeferred(
+            record_rows=rows,
+            pending=pending,
+            eager=torch.tensor([0, 1], dtype=torch.int32),
+            context=context,
+            state_indices=commit.state_indices[:, 0],
+        )
+        step.recoverssm_context = _DeferredStepCommit(context, deferred)  # type: ignore[assignment]
+        return step
+
+    step = deferred_step([7, 4, 9])
+    snapshot = step.snapshot_for_deferred_commit()
+    assert snapshot.recoverssm_context is not step.recoverssm_context
+    deferred_step([3, 1, 2])
+    assert rows[:2].tolist() == [1, 2]
+
+    snapshot.commit_recoverssm_state(torch.tensor([1, 3, 2], dtype=torch.int32))
+    (call,) = context.commit.call_args_list
+    assert call.kwargs["record_rows"].tolist() == [4, 9]
+    assert call.kwargs["pending"] is pending
+    assert call.kwargs["eager"].tolist() == [0, 1]
 
 
 def test_recoverssm_distinguishes_draftless_decode_from_one_token_prefill():

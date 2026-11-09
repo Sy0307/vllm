@@ -131,6 +131,7 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
         of ``eager`` (a [B] mask, or None: no row), which are committed now."""
         if self.backend != FP32_DEFERRED:
             assert pending is None
+            # record_rows: a non-last PP rank's request-slot records.
             super().commit(
                 num_accepted_tokens,
                 state_indices,
@@ -139,6 +140,7 @@ class KDADeferredCommitContext(KDARecoverSSMCommitContext):
                 block_table=block_table,
                 num_computed_tokens=num_computed_tokens,
                 mamba_block_size=mamba_block_size,
+                record_rows=record_rows,
             )
             return
         batch = state_indices.shape[0]

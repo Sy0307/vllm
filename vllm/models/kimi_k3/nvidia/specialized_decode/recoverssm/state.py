@@ -12,6 +12,7 @@ objects, without changing their classes:
 - the KDA metadata builders (``install_builder``, on first bind): the
   ``fp32_deferred`` commit context, and each step's ``recoverssm_deferred``."""
 
+from dataclasses import replace
 from types import MethodType
 from typing import Any
 
@@ -124,12 +125,33 @@ class _DeferredStepCommit:
 
     def commit(self, *args, **kwargs) -> None:
         deferred = self.deferred
+        # On a non-last PP rank the KDA metadata also passes the request-slot
+        # rows its builder staged for the stock commit: the same slots as the
+        # step's record rows, which this commit uses.
+        kwargs.pop("record_rows", None)
         self.context.commit(
             *args,
             **kwargs,
             record_rows=deferred.record_rows,
             pending=deferred.pending,
             eager=deferred.eager,
+        )
+
+    def snapshot_for_deferred_commit(self, num_rows: int) -> "_DeferredStepCommit":
+        """This step's commit with the operands the builder's next step
+        overwrites cloned (the record rows live in a persistent builder buffer),
+        for a commit that runs once its sampled tokens arrive (non-last PP
+        ranks). ``pending`` stays shared: it is the runner's per-slot state."""
+        deferred = self.deferred
+        eager = deferred.eager
+        return _DeferredStepCommit(
+            self.context,
+            replace(
+                deferred,
+                record_rows=deferred.record_rows[:num_rows].clone(),
+                eager=eager[:num_rows].clone() if eager is not None else None,
+                state_indices=deferred.state_indices[:num_rows].clone(),
+            ),
         )
 
 
@@ -310,16 +332,25 @@ def deferred_recoverssm_verify(
     conv_weight: torch.Tensor,
     query_start_loc: torch.Tensor,
     out: torch.Tensor | None,
+    f_a: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``KimiK3DeltaAttention._recoverssm_verify`` of a Triton RecoverSSM layer
     under the deferred RecoverSSM: a deferred step's verify does not replay the
     last step's accepted tokens, so it folds them into the checkpoints first (every
     layer, once per step), and writes its records to the request slots. Other steps
-    run the stock verify."""
+    run the stock verify (``f_a`` feeds its KdaWide path)."""
     deferred = getattr(m, "recoverssm_deferred", None)
     if deferred is None:
         return type(self)._recoverssm_verify(
-            self, m, mixed_qkv, raw_g, raw_beta, conv_weight, query_start_loc, out
+            self,
+            m,
+            mixed_qkv,
+            raw_g,
+            raw_beta,
+            conv_weight,
+            query_start_loc,
+            out,
+            f_a=f_a,
         )
     num_tokens = mixed_qkv.shape[0]
     if out is None:

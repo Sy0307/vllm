@@ -245,6 +245,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
     VLLM_KIMI_K3_KDA_WIDE_VERIFY: bool = True
+    VLLM_KIMI_K3_KDA_DEFERRED_VERIFY: bool = False
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1889,6 +1890,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # verify. 0 keeps the Triton verify (debugging).
     "VLLM_KIMI_K3_KDA_WIDE_VERIFY": lambda: bool(
         int(os.getenv("VLLM_KIMI_K3_KDA_WIDE_VERIFY", "1"))
+    ),
+    # Run the Kimi-K3 KDA RecoverSSM of FP32-state layers deferred (upstream
+    # vllm#66040): each verify replays the last step's accepted tokens into the
+    # checkpoint (CuTe KdaFusedTC/WS/Fused on SM100) and the commit after
+    # sampling only records them. Replaces KdaWide on the layers it serves.
+    # Opt-in: 1 enables it where the kernels fit.
+    "VLLM_KIMI_K3_KDA_DEFERRED_VERIFY": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K3_KDA_DEFERRED_VERIFY", "0"))
     ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
