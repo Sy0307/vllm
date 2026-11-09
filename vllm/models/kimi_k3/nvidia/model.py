@@ -3,6 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
+import os
 from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -140,6 +141,11 @@ logger = init_logger(__name__)
 # it the GEMMs saturate the device and the cross-stream sync is pure overhead,
 # so it falls back to sequential.
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
+# Overlap the shared experts with MegaMoE on the aux stream for batches of at most
+# this many local tokens (0 disables). MegaMoE is a whole-grid launch, so it gives
+# up _MEGAMOE_RESERVED_SMS SMs for the shared-expert branch (K3 deployment: 64/16).
+_SHARED_OVERLAP_MAX_TOKENS = int(os.environ.get("VLLM_K3_SHARED_OVERLAP_MAX_TOKENS", "0"))
+_MEGAMOE_RESERVED_SMS = int(os.environ.get("VLLM_K3_MEGAMOE_RESERVED_SMS", "16"))
 
 
 def shard_sequence_parallel_mlp(
@@ -542,6 +548,7 @@ class KimiMoE(nn.Module):
             # _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD).
             self._down_proj_stream: torch.cuda.Stream | None = aux_stream()
             self._down_proj_events = (torch.cuda.Event(), torch.cuda.Event())
+            self._shared_overlap_events = (torch.cuda.Event(), torch.cuda.Event())
         else:
             self.routed_expert_down_proj = None
             self.routed_expert_norm = None
@@ -681,6 +688,43 @@ class KimiMoE(nn.Module):
         )
         return routed_hidden_states, router_output, topk_ids
 
+    def _overlap_shared_with_mega_moe(
+        self,
+        hidden_states: torch.Tensor,
+        routed_hidden_states: torch.Tensor,
+        router_output: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the shared experts on the aux stream while MegaMoE runs.
+
+        MegaMoE is launched with _MEGAMOE_RESERVED_SMS fewer SMs, so the shared
+        expert GEMMs and their SP all-gather / reduce-scatter find free SMs
+        instead of queueing behind the whole-grid launch. Both branches run the
+        same kernels on the same inputs as the sequential path (ported from the
+        K3 deployment, VLLM_K3_SHARED_OVERLAP_MAX_TOKENS=64)."""
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        assert self.shared_experts is not None
+
+        def mega_moe() -> torch.Tensor:
+            full_sms = deep_gemm.get_num_sms()
+            budget = max(2, full_sms - _MEGAMOE_RESERVED_SMS)
+            budget -= budget % 2
+            deep_gemm.set_num_sms(budget)
+            try:
+                return self.experts(routed_hidden_states, router_output, topk_ids)
+            finally:
+                deep_gemm.set_num_sms(full_sms)
+
+        return maybe_execute_in_parallel(
+            mega_moe,
+            lambda: self.shared_experts(hidden_states),
+            self._shared_overlap_events[0],
+            self._shared_overlap_events[1],
+            self._down_proj_stream,
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
@@ -693,18 +737,29 @@ class KimiMoE(nn.Module):
         if self.use_mega_moe:
             assert self.routed_output_transform is not None
             assert topk_ids is not None
-            # The shared expert reads the un-projected hidden states, so it
-            # stays outside the latent-space MegaMoE launch.
-            final_hidden_states = self.experts(
-                routed_hidden_states, router_output, topk_ids
-            )
+            if (
+                self.shared_experts is not None
+                and getattr(self, "_down_proj_stream", None) is not None
+                and num_tokens <= _SHARED_OVERLAP_MAX_TOKENS
+            ):
+                final_hidden_states, shared_output = (
+                    self._overlap_shared_with_mega_moe(
+                        hidden_states, routed_hidden_states, router_output, topk_ids
+                    )
+                )
+            else:
+                # The shared expert reads the un-projected hidden states, so it
+                # stays outside the latent-space MegaMoE launch.
+                final_hidden_states = self.experts(
+                    routed_hidden_states, router_output, topk_ids
+                )
+                shared_output = (
+                    self.shared_experts(hidden_states)
+                    if self.shared_experts is not None
+                    else None
+                )
             # The shared output is folded into the up-projection GEMM's beta-add
             # epilogue, so combining the two branches costs no extra kernel.
-            shared_output = (
-                self.shared_experts(hidden_states)
-                if self.shared_experts is not None
-                else None
-            )
             final_hidden_states = self.routed_output_transform(
                 final_hidden_states, residual=shared_output
             )
