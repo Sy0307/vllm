@@ -28,6 +28,67 @@ pub(super) const IMAGE_PLACEHOLDER: &str = "<|media_pad|>";
 
 const DEFAULT_THINKING_EFFORT: &str = "max";
 
+/// Characters per tiktoken call in `tokenization_kimi.py` (`TIKTOKEN_MAX_ENCODE_CHARS`).
+const PY_MAX_ENCODE_CHARS: usize = 400_000;
+/// Longest run of whitespace or non-whitespace characters encoded in one call
+/// (`MAX_NO_WHITESPACES_CHARS`).
+const PY_MAX_RUN_CHARS: usize = 25_000;
+
+/// Python's `str.isspace`: Unicode White_Space plus U+001C..U+001F (bidi classes
+/// B/S), which Rust's `char::is_whitespace` leaves out.
+fn py_isspace(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// The pieces `TikTokenTokenizer._encode_text_piece` encodes separately: the text
+/// cut every 400,000 characters, each part split so that no piece has a run of more
+/// than 25,000 whitespace or non-whitespace characters
+/// (`_split_whitespaces_or_nonwhitespaces`). BPE never merges across these cuts, so
+/// encoding the pieces one by one gives the Python token ids.
+fn python_encode_pieces(text: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    if text.is_empty() {
+        return pieces;
+    }
+    // Fast path: a text this short has neither a chunk cut nor a long run.
+    if text.len() <= PY_MAX_RUN_CHARS {
+        pieces.push(text);
+        return pieces;
+    }
+    let bounds: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .step_by(PY_MAX_ENCODE_CHARS)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    for w in bounds.windows(2) {
+        let chunk = &text[w[0]..w[1]];
+        let mut chars = chunk.char_indices();
+        let Some((_, first)) = chars.clone().next() else {
+            continue;
+        };
+        let mut run_is_space = py_isspace(first);
+        let mut run_len = 0usize;
+        let mut slice_start = 0usize;
+        for (i, c) in chars.by_ref() {
+            let is_space = py_isspace(c);
+            if run_is_space != is_space {
+                run_len = 1;
+                run_is_space = is_space;
+            } else {
+                run_len += 1;
+                if run_len > PY_MAX_RUN_CHARS {
+                    pieces.push(&chunk[slice_start..i]);
+                    slice_start = i;
+                    run_len = 1;
+                }
+            }
+        }
+        pieces.push(&chunk[slice_start..]);
+    }
+    pieces
+}
+
 /// K3 prompt encoder preserving Python's per-segment tokenization boundaries.
 pub(super) struct K3TokenWriter<'a> {
     tokenizer: &'a dyn Tokenizer,
@@ -46,16 +107,16 @@ impl<'a> K3TokenWriter<'a> {
 
     /// Encode one trusted segment with normal added-token recognition.
     pub(super) fn control(&mut self, text: &str) -> Result<()> {
-        if !text.is_empty() {
-            self.token_ids.extend(self.tokenizer.encode(text, false)?);
+        for piece in python_encode_pieces(text) {
+            self.token_ids.extend(self.tokenizer.encode(piece, false)?);
         }
         Ok(())
     }
 
     /// Encode one literal segment while bypassing every added-token matcher.
     pub(super) fn ordinary(&mut self, text: &str) -> Result<()> {
-        if !text.is_empty() {
-            self.token_ids.extend(self.tokenizer.encode_ordinary(text)?);
+        for piece in python_encode_pieces(text) {
+            self.token_ids.extend(self.tokenizer.encode_ordinary(piece)?);
         }
         Ok(())
     }
@@ -623,5 +684,65 @@ fn sort_json(value: &Value) -> Value {
             Value::Object(sorted)
         }
         _ => value.clone(),
+    }
+}
+
+#[cfg(test)]
+mod python_piece_tests {
+    use super::{PY_MAX_ENCODE_CHARS, PY_MAX_RUN_CHARS, py_isspace, python_encode_pieces};
+
+    /// Direct port of `_encode_text_piece`'s chunking + `_split_whitespaces_or_nonwhitespaces`.
+    fn reference(text: &str) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = Vec::new();
+        for chunk in chars.chunks(PY_MAX_ENCODE_CHARS) {
+            let mut cur_space = py_isspace(chunk[0]);
+            let mut len = 0usize;
+            let mut start = 0usize;
+            for (i, &c) in chunk.iter().enumerate() {
+                let now = py_isspace(c);
+                if cur_space ^ now {
+                    len = 1;
+                    cur_space = now;
+                } else {
+                    len += 1;
+                    if len > PY_MAX_RUN_CHARS {
+                        out.push(chunk[start..i].iter().collect());
+                        start = i;
+                        len = 1;
+                    }
+                }
+            }
+            out.push(chunk[start..].iter().collect());
+        }
+        out
+    }
+
+    fn check(text: &str) {
+        let got: Vec<String> = python_encode_pieces(text).into_iter().map(String::from).collect();
+        assert_eq!(got, reference(text), "len {}", text.chars().count());
+        assert_eq!(got.concat(), text);
+    }
+
+    #[test]
+    fn matches_python_split() {
+        check("short text");
+        check(&"word ".repeat(10_000));
+        check(&format!("{} tail", "q".repeat(30_000)));
+        check(&format!("a{}b", " ".repeat(60_000)));
+        check(&"\u{3000}".repeat(26_000));
+        check(&format!("{}{}", "x\u{1c}".repeat(13_000), "\u{1d}".repeat(25_001)));
+        check(&"字".repeat(25_001));
+        check(&format!("{}{}", "ab".repeat(210_000), " ".repeat(30_000)));
+    }
+
+    #[test]
+    fn python_isspace_extras() {
+        for c in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}', ' ', '\n', '\u{a0}', '\u{3000}', '\u{2028}'] {
+            assert!(py_isspace(c));
+        }
+        for c in ['a', '字', '\u{200b}', '\u{feff}'] {
+            assert!(!py_isspace(c));
+        }
     }
 }
