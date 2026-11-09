@@ -1029,9 +1029,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_INDEXER_FLASHTOPK_MIN_KEYS": lambda: int(
         os.getenv("VLLM_INDEXER_FLASHTOPK_MIN_KEYS", "0")
     ),
-    # Tokens of each step's budget a running prefill chunk leaves for waiting
-    # requests while any are queued (short agentic turns otherwise queue behind
-    # every chunk of a long prompt). 0 keeps strict running-first.
     # Groups over identical ranks (e.g. TP/DCP/EP on one node) share one PyNccl
     # communicator instead of one each (~0.6-1.1 GiB per 8-GPU communicator).
     "VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS": lambda: bool(
@@ -1041,6 +1038,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # hold different layer mixes waste pages under the automatic size; Kimi
     # K3/K3.1 at PP 48/45 use 35.
     "VLLM_KV_CACHE_GROUP_SIZE": lambda: int(os.getenv("VLLM_KV_CACHE_GROUP_SIZE", "0")),
+    # Tokens of each step's budget a running prefill chunk leaves for waiting
+    # requests while any are queued (short agentic turns otherwise queue behind
+    # every chunk of a long prompt). 0 keeps strict running-first.
     "VLLM_PREFILL_WAITING_RESERVE": lambda: int(
         os.getenv("VLLM_PREFILL_WAITING_RESERVE", "0")
     ),
