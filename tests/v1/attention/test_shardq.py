@@ -121,3 +121,29 @@ def test_shard_q_round_trip(use_sm, q_dtype, num_leading_rows, pad):
         args=(world, get_open_port(), use_sm, q_dtype, num_leading_rows, pad),
         nprocs=world,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_split_upload_survives_next_build():
+    """Building the next step's split must not change this step's still-queued
+    uploads (async scheduling builds step N+1 before step N's copies run), so
+    each step stages its host data in fresh pinned memory (vllm#66052)."""
+    device = torch.device("cuda")
+    world, rank, num_decode_tokens = 2, 0, 5
+
+    def build(lens):
+        qsl = np.r_[0, np.cumsum(lens)]
+        split = make_shardq_split(qsl, world, rank, device)
+        return split, indexer_rows(split, num_decode_tokens)
+
+    first_lens = [3000, 1200]
+    torch.cuda._sleep(1 << 30)  # keep the uploads queued
+    first, (first_rows_cpu, first_rows) = build(first_lens)
+    build([700])
+    torch.cuda.synchronize()
+    expected = fold_split(np.r_[0, np.cumsum(first_lens)], world)
+    np.testing.assert_array_equal(
+        first.rank_order.cpu().numpy(), np.concatenate(expected)
+    )
+    np.testing.assert_array_equal(first.local_idx.cpu().numpy(), expected[rank])
+    np.testing.assert_array_equal(first_rows.cpu().numpy(), first_rows_cpu)
