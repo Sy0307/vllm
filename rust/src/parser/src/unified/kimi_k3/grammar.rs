@@ -79,6 +79,7 @@ pub(super) fn build_output_grammar(
         KimiK3Mode::Reasoning
         | KimiK3Mode::Epilogue
         | KimiK3Mode::Tools
+        | KimiK3Mode::ToolsText
         | KimiK3Mode::Call { .. }
         | KimiK3Mode::Done => {
             unreachable!("initialization leaves the parser idle or inside `think` or `response`")

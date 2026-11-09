@@ -197,6 +197,12 @@ enum KimiK3Mode {
     Epilogue,
     /// Inside the `tools` channel, between `call` blocks.
     Tools,
+    /// Inside a `tools` channel of a request without tools. Python's K3
+    /// reasoning parser hands everything after the `think` channel through as
+    /// content when no tool parser runs, so the channel streams as text until
+    /// the message closes instead of being buffered call by call (and dropped
+    /// when generation stops mid-call).
+    ToolsText,
     /// Inside one `call` block, buffering its body until the close marker.
     Call {
         name: String,
@@ -214,13 +220,16 @@ pub struct KimiK3UnifiedParser {
     markers: Markers,
     /// Number of calls emitted in the current response.
     emitted_call_count: usize,
+    /// The request declares no tools: a `tools` channel is surfaced as text
+    /// (see [`KimiK3Mode::ToolsText`]).
+    tools_as_text: bool,
     tokenizer: DynTokenizer,
     special_tokens: SpecialTokens,
 }
 
 impl KimiK3UnifiedParser {
     /// Create a Kimi K3 parser expecting token-attributed input.
-    pub fn new(_tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
+    pub fn new(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
         let special_tokens = SpecialTokens::new(tokenizer.as_ref())?;
 
         Ok(Self {
@@ -228,6 +237,7 @@ impl KimiK3UnifiedParser {
             mode: KimiK3Mode::default(),
             markers: Markers::new(&special_tokens),
             emitted_call_count: 0,
+            tools_as_text: tools.is_empty(),
             tokenizer,
             special_tokens,
         })
@@ -282,6 +292,10 @@ impl KimiK3UnifiedParser {
             KimiK3Event::ThinkClose => self.mode = KimiK3Mode::Idle,
             KimiK3Event::ResponseOpen => self.mode = KimiK3Mode::Response,
             KimiK3Event::ResponseClose => self.mode = KimiK3Mode::Epilogue,
+            KimiK3Event::ToolsOpen if self.tools_as_text => {
+                output.push_text(piece.text);
+                self.mode = KimiK3Mode::ToolsText;
+            }
             KimiK3Event::ToolsOpen => self.mode = KimiK3Mode::Tools,
             KimiK3Event::ToolsClose => self.mode = KimiK3Mode::Epilogue,
             KimiK3Event::MessageEnd => self.mode = KimiK3Mode::Done,
@@ -369,7 +383,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
         let mut output = UnifiedParserOutput::default();
 
         match &self.mode {
-            KimiK3Mode::Idle | KimiK3Mode::Response => {
+            KimiK3Mode::Idle | KimiK3Mode::Response | KimiK3Mode::ToolsText => {
                 output.push_text(self.buffer.take().text);
             }
             KimiK3Mode::Reasoning | KimiK3Mode::PrefilledReasoning => {
@@ -405,6 +419,7 @@ fn parse_next_kimi_k3_event(
         KimiK3Mode::Response => parse_response_event(input),
         KimiK3Mode::Epilogue => parse_epilogue_event(input),
         KimiK3Mode::Tools => parse_tools_event(input),
+        KimiK3Mode::ToolsText => parse_tools_text_event(input),
         KimiK3Mode::Call { scan, .. } => call_body_event(input, scan),
         KimiK3Mode::Done => parse_done_event(input),
     }
@@ -486,6 +501,17 @@ fn parse_tools_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
         message_end_event,
         skip_tools_noise_event,
     ))
+    .parse_next(input)
+}
+
+/// Parse an event inside a `tools` channel surfaced as text: everything up to
+/// the message close is text, markup included.
+fn parse_tools_text_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
+    let markers = input.markers();
+    alt((message_end_event, |input: &mut KimiK3Input<'_>| {
+        safe_text_len_mul(input, &[&markers.message_close, &markers.end_of_msg])
+            .map(|_| KimiK3Event::Text)
+    }))
     .parse_next(input)
 }
 
@@ -742,6 +768,7 @@ mod tests {
         THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
     };
     use crate::tool::ToolCallDelta;
+    use crate::tool::test_utils::test_tools;
     use crate::unified::{
         UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput,
     };
@@ -821,6 +848,11 @@ mod tests {
     /// The parser as constructed in production: markers must be spelled by
     /// their special tokens.
     fn test_parser() -> KimiK3UnifiedParser {
+        KimiK3UnifiedParser::new(&test_tools(), Arc::new(tokenizer())).unwrap()
+    }
+
+    /// A parser for a request that declares no tools.
+    fn test_parser_without_tools() -> KimiK3UnifiedParser {
         KimiK3UnifiedParser::new(&[], Arc::new(tokenizer())).unwrap()
     }
 
@@ -1287,6 +1319,52 @@ mod tests {
         output.append(parser.finish().unwrap());
 
         assert_eq!(output.normal_text(), "answer<|clo");
+    }
+
+    #[test]
+    fn kimi_k3_without_tools_streams_tools_channel_as_text() {
+        let mut parser = test_parser_without_tools();
+        start_in_reasoning(&mut parser);
+        let call_text = call("tool=\"calc\" index=\"1\"", &arg("x", "number", "1"));
+        let output = collect_stream(
+            &mut parser,
+            &[THINK_CLOSE, TOOLS_OPEN, &call_text, TOOLS_CLOSE, "<|close|>message<|sep|>"],
+        );
+
+        assert!(output.calls().is_empty());
+        assert_eq!(output.normal_text(), format!("{TOOLS_OPEN}{call_text}{TOOLS_CLOSE}"));
+    }
+
+    #[test]
+    fn kimi_k3_without_tools_streams_truncated_call_text() {
+        let mut parser = test_parser_without_tools();
+        start_in_reasoning(&mut parser);
+        let mut output = UnifiedParserOutput::default();
+        for chunk in [
+            "plan",
+            THINK_CLOSE,
+            RESPONSE_OPEN,
+            "ok",
+            RESPONSE_CLOSE,
+            TOOLS_OPEN,
+            "<|open|>call tool=\"write\" index=\"1\"<|sep|>",
+            "<|open|>argument key=\"text\" type=\"string\"<|sep|>par",
+        ] {
+            output.append(parser.parse_chunk(chunk).unwrap());
+        }
+        // Text streams before generation stops; nothing waits for a close marker.
+        assert_eq!(output.reasoning_text(), "plan");
+        assert!(output.normal_text().ends_with("type=\"string\"<|sep|>par"));
+        output.append(parser.finish().unwrap());
+
+        assert!(output.calls().is_empty());
+        assert_eq!(
+            output.normal_text(),
+            format!(
+                "ok{TOOLS_OPEN}<|open|>call tool=\"write\" index=\"1\"<|sep|>\
+                 <|open|>argument key=\"text\" type=\"string\"<|sep|>par"
+            )
+        );
     }
 
     #[test]
