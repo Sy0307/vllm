@@ -61,7 +61,9 @@ _NCCL_SUSPEND_MEM = 0x01
 
 def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
+        get_symm_scratch,
         nccl_symm_mem_context,
+        report_symmetric_placement,
     )
     from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -71,12 +73,32 @@ def register_nccl_symmetric_ops(pynccl_comm):
     _NCCL_SYMM_OPS_REGISTERED = True
 
     def all_reduce_symmetric_with_copy_impl(input_tensor: torch.Tensor) -> torch.Tensor:
-        with nccl_symm_mem_context(pynccl_comm):
-            symm_input = torch.empty_like(input_tensor)
-            symm_output = torch.empty_like(input_tensor)
-        symm_input.copy_(input_tensor)
-        symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
-        return symm_output
+        if envs.VLLM_NCCL_SYMM_MEM_LEGACY_PERCALL:
+            # Diagnostic only: the former per-call pool tensors, with their
+            # cross-rank placement compared on every eager call.
+            with nccl_symm_mem_context(pynccl_comm):
+                symm_input = torch.empty_like(input_tensor)
+                symm_output = torch.empty_like(input_tensor)
+            report_symmetric_placement(
+                pynccl_comm, (symm_input, symm_output), "all_reduce"
+            )
+            symm_input.copy_(input_tensor)
+            return pynccl_comm.all_reduce(symm_input, symm_output)
+        # Grow-only scratch, not per-call pool tensors: a per-call allocation can
+        # land at a different window offset on one rank (see get_symm_scratch).
+        from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+        flat = (input_tensor.numel(),)
+        ubatch = dbo_current_ubatch_id()
+        symm_input = get_symm_scratch(
+            pynccl_comm, "ar_in", flat, input_tensor.dtype, input_tensor.device, ubatch
+        )
+        symm_output = get_symm_scratch(
+            pynccl_comm, "ar_out", flat, input_tensor.dtype, input_tensor.device, ubatch
+        )
+        symm_input.copy_(input_tensor.reshape(-1))
+        pynccl_comm.all_reduce(symm_input, symm_output)
+        return symm_output.view(input_tensor.shape).clone()
 
     def all_reduce_symmetric_with_copy_fake(input_tensor: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(input_tensor)

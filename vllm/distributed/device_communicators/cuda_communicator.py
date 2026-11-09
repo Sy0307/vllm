@@ -723,12 +723,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         Allocating a fresh symm tensor per collective pays the
         ``nccl_symm_mem_context`` snapshot + window-registration scan on every
-        call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead,
-        each ``(role, shape[1:], dtype, device)`` keeps a geometric high-water
-        allocation and returns a leading slice. Superseded allocations remain
-        referenced because a captured CUDA graph may still use their pointers;
-        geometric growth bounds their total capacity to less than twice the
-        current allocation.
+        call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself), and can
+        place the buffer at a different window offset on one rank. Each
+        ``(role, ubatch, shape[1:], dtype, device)`` keeps a grow-only
+        allocation, checked symmetric across ranks when it grows, and returns a
+        leading slice (see ``pynccl_allocator.get_symm_scratch``).
 
         These buffers are internal scratch. Returning one would let a later
         collective with the same cache key overwrite an earlier live result.
@@ -736,31 +735,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
         ordered on the same stream. DBO microbatches use distinct cache entries.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
-            nccl_symm_mem_context,
+            get_symm_scratch,
         )
         from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        assert shape, "symmetric scratch buffers require at least one dimension"
-        cache = self.__dict__.setdefault("_symm_scratch_bufs", {})
-        key = (role, dbo_current_ubatch_id(), tuple(shape[1:]), dtype, device)
-        buf = cache.get(key)
-        requested_rows = shape[0]
-        if buf is None or buf.shape[0] < requested_rows:
-            capacity = (
-                requested_rows if buf is None else max(requested_rows, 2 * buf.shape[0])
-            )
-            with nccl_symm_mem_context(pynccl_comm):
-                new_buf = torch.empty(
-                    (capacity, *shape[1:]), dtype=dtype, device=device
-                )
-            if buf is not None:
-                retired = self.__dict__.setdefault("_retired_symm_scratch_bufs", {})
-                retired.setdefault(key, []).append(buf)
-            buf = new_buf
-            cache[key] = buf
-        return buf[:requested_rows]
+        return get_symm_scratch(
+            pynccl_comm, role, shape, dtype, device, dbo_current_ubatch_id()
+        )
 
     def _reduce_scatter_symm_mem(
         self,
@@ -1136,28 +1119,53 @@ class CudaCommunicator(DeviceCommunicatorBase):
         Only the output needs to be in symmetric memory (see
         _all_gather_symm_mem).
         """
-        from vllm.distributed.device_communicators.pynccl_allocator import (
-            nccl_symm_mem_context,
-        )
-
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
         world_size = self.world_size
 
-        symm_outputs = []
-        with nccl_symm_mem_context(pynccl_comm):
-            for inp in inputs:
-                out_size = (inp.size(0) * world_size,) + inp.size()[1:]
-                symm_outputs.append(
-                    torch.empty(out_size, dtype=inp.dtype, device=inp.device)
-                )
+        if envs.VLLM_NCCL_SYMM_MEM_LEGACY_PERCALL:
+            # Diagnostic only: the former per-call pool outputs, placement logged.
+            from vllm.distributed.device_communicators.pynccl_allocator import (
+                nccl_symm_mem_context,
+                report_symmetric_placement,
+            )
+
+            with nccl_symm_mem_context(pynccl_comm):
+                legacy_outputs = [
+                    torch.empty(
+                        (inp.size(0) * world_size,) + inp.size()[1:],
+                        dtype=inp.dtype,
+                        device=inp.device,
+                    )
+                    for inp in inputs
+                ]
+            report_symmetric_placement(
+                pynccl_comm, tuple(legacy_outputs), "all_gather_batched"
+            )
+            pynccl_comm.group_start()
+            for out, inp in zip(legacy_outputs, inputs):
+                pynccl_comm.all_gather(out, inp)
+            pynccl_comm.group_end()
+            return legacy_outputs
+
+        # One grow-only scratch per position in the batch (never per-call pool
+        # tensors, which can sit at different window offsets across ranks).
+        symm_outputs = [
+            self._get_symm_scratch(
+                f"ag_batched_{i}",
+                (inp.size(0) * world_size,) + tuple(inp.size()[1:]),
+                inp.dtype,
+                inp.device,
+            )
+            for i, inp in enumerate(inputs)
+        ]
 
         pynccl_comm.group_start()
         for symm_out, inp in zip(symm_outputs, inputs):
             pynccl_comm.all_gather(symm_out, inp)
         pynccl_comm.group_end()
 
-        return symm_outputs
+        return [symm_out.clone() for symm_out in symm_outputs]
 
     def dispatch_router_logits(
         self,

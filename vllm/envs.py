@@ -328,6 +328,9 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
+    VLLM_NCCL_SYMM_MEM_LOG: bool = False
+    VLLM_NCCL_SYMM_MEM_CHECK: bool = True
+    VLLM_NCCL_SYMM_MEM_LEGACY_PERCALL: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
@@ -2288,6 +2291,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable NCCL symmetric memory allocation and registration
     "VLLM_USE_NCCL_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))
+    ),
+    # Log every NCCL symmetric-memory window registration (rank, communicator,
+    # segment address and size), to check that ranks register matching windows.
+    "VLLM_NCCL_SYMM_MEM_LOG": lambda: bool(
+        int(os.getenv("VLLM_NCCL_SYMM_MEM_LOG", "0"))
+    ),
+    # Check, whenever NCCL symmetric scratch grows, that every rank placed it at
+    # the same offset of a same-size pool segment (one CPU all-gather per growth).
+    "VLLM_NCCL_SYMM_MEM_CHECK": lambda: bool(
+        int(os.getenv("VLLM_NCCL_SYMM_MEM_CHECK", "1"))
+    ),
+    # Diagnostic only: the former per-call symmetric all-reduce tensors, with
+    # their cross-rank placement compared (and mismatches logged) on each call.
+    "VLLM_NCCL_SYMM_MEM_LEGACY_PERCALL": lambda: bool(
+        int(os.getenv("VLLM_NCCL_SYMM_MEM_LEGACY_PERCALL", "0"))
     ),
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),

@@ -21,17 +21,29 @@ logger = init_logger(__name__)
 
 nccl_allocator_source = """
 #include <nccl.h>
+#include <stdio.h>
 extern "C" {
 
 void* nccl_alloc_plug(size_t size, int device, void* stream) {
-  void* ptr;
+  // A failed ncclMemAlloc leaves ptr unset: return nullptr so the caching
+  // allocator reports out-of-memory instead of handing out a garbage pointer
+  // that would then be registered as a symmetric window.
+  void* ptr = nullptr;
   ncclResult_t err = ncclMemAlloc(&ptr, size);
+  if (err != ncclSuccess) {
+    fprintf(stderr, "[vllm nccl_alloc_plug] ncclMemAlloc(%zu) on device %d "
+            "failed: %d\\n", size, device, (int)err);
+    return nullptr;
+  }
   return ptr;
-
 }
 
 void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
   ncclResult_t err = ncclMemFree(ptr);
+  if (err != ncclSuccess) {
+    fprintf(stderr, "[vllm nccl_free_plug] ncclMemFree(%p, %zu) on device %d "
+            "failed: %d\\n", ptr, size, device, (int)err);
+  }
 }
 
 }
@@ -191,9 +203,151 @@ class nccl_symm_mem_context:
             _registered_base_addrs[comm_key] = set()
         for segment in _cached_pool_snapshot:
             if segment["address"] not in _registered_base_addrs[comm_key]:
+                if envs.VLLM_NCCL_SYMM_MEM_LOG:
+                    # Window registration is collective: every rank of the
+                    # communicator must register matching segments in the same
+                    # order. Log each one to compare ranks after the fact.
+                    logger.info(
+                        "NCCL symm window register: rank %d/%d comm %s "
+                        "addr 0x%x size %d (pool segments %d, registered %d)",
+                        self.pynccl_comm.rank,
+                        self.pynccl_comm.world_size,
+                        comm_key[:6].hex(),
+                        segment["address"],
+                        segment["total_size"],
+                        len(_cached_pool_snapshot),
+                        len(_registered_base_addrs[comm_key]),
+                    )
                 self.pynccl_comm.register_comm_window_raw(
                     segment["address"], segment["total_size"]
                 )
                 _registered_base_addrs[comm_key].add(segment["address"])
         if self.is_graph_capture:
             torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)
+
+
+# NCCL symmetric kernels address a peer's buffer as (peer window base + this
+# rank's offset in its own window): a collective is only correct when every
+# rank's buffer sits at the same offset of a matching window. Tensors taken per
+# call from the shared caching pool do not guarantee that: whether a freed block
+# can be reused depends on when its stream events complete, which differs per
+# rank, so the next allocation can land at a different offset on one rank. A
+# peer then writes or reads the wrong bytes of that rank's window, or past it
+# (an NVLink access the GPU rejects). Symmetric buffers therefore come only from
+# grow-only scratch: shape-driven allocations that are never freed, so every
+# rank issues the same allocation sequence on the pool and gets the same layout.
+_symm_scratch: dict[tuple, torch.Tensor] = {}
+# Outgrown scratch stays alive: captured CUDA graphs may still use its pointer.
+_symm_scratch_retired: list[torch.Tensor] = []
+
+
+def _symm_placement(tensor: torch.Tensor) -> tuple[int, int | None, int | None]:
+    """(pool segments, size of the tensor's segment, offset in it)."""
+    snapshot = _cached_pool_snapshot or []
+    ptr = tensor.untyped_storage().data_ptr()
+    for segment in snapshot:
+        base, size = segment["address"], segment["total_size"]
+        if base <= ptr < base + size:
+            return len(snapshot), size, ptr - base
+    return len(snapshot), None, None
+
+
+def check_symmetric_placement(
+    pynccl_comm: PyNcclCommunicator, tensor: torch.Tensor, what: str
+) -> None:
+    """Fail loudly unless ``tensor`` sits in a pool segment of the same size at
+    the same offset on every rank of ``pynccl_comm`` (one CPU all-gather; only
+    called when scratch grows). An asymmetric symmetric buffer corrupts
+    collectives silently or faults a peer's NVLink, so this is not optional."""
+    if not envs.VLLM_NCCL_SYMM_MEM_CHECK or pynccl_comm.group is None:
+        return
+    mine = _symm_placement(tensor) + (tensor.nbytes,)
+    group = pynccl_comm.group
+    if isinstance(group, torch.distributed.ProcessGroup):
+        gathered: list[Any] = [None] * pynccl_comm.world_size
+        torch.distributed.all_gather_object(gathered, mine, group=group)
+    else:
+        gathered = group.all_gather_obj(mine)
+    if any(other[1:] != mine[1:] for other in gathered):
+        raise RuntimeError(
+            f"NCCL symmetric memory: {what} is not symmetric across ranks "
+            f"(segments, segment size, offset, bytes per rank: {gathered}). "
+            "Set VLLM_USE_NCCL_SYMM_MEM=0 to run without symmetric memory."
+        )
+    if envs.VLLM_NCCL_SYMM_MEM_LOG:
+        logger.info(
+            "NCCL symm scratch %s: rank %d/%d segments %d size %s offset %s "
+            "bytes %d (symmetric)",
+            what,
+            pynccl_comm.rank,
+            pynccl_comm.world_size,
+            *mine,
+        )
+
+
+def get_symm_scratch(
+    pynccl_comm: PyNcclCommunicator,
+    role: str,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+    ubatch: int = 0,
+) -> torch.Tensor:
+    """Grow-only symmetric scratch of at least ``shape[0]`` rows, keyed by the
+    communicator, role, ubatch and row shape; returns a leading slice. Growth
+    doubles, so outgrown buffers total less than the live one. The caller owns
+    the slice only until the next call with the same key: copy results out."""
+    assert shape, "symmetric scratch buffers require at least one dimension"
+    key = (
+        bytes(pynccl_comm.unique_id.internal),
+        role,
+        ubatch,
+        tuple(shape[1:]),
+        dtype,
+        device,
+    )
+    buf = _symm_scratch.get(key)
+    rows = shape[0]
+    if buf is None or buf.shape[0] < rows:
+        capacity = rows if buf is None else max(rows, 2 * buf.shape[0])
+        with nccl_symm_mem_context(pynccl_comm):
+            new_buf = torch.empty((capacity, *shape[1:]), dtype=dtype, device=device)
+        check_symmetric_placement(pynccl_comm, new_buf, f"scratch {role}")
+        if buf is not None:
+            _symm_scratch_retired.append(buf)
+        buf = new_buf
+        _symm_scratch[key] = buf
+    return buf[:rows]
+
+
+_placement_mismatches = 0
+
+
+def report_symmetric_placement(
+    pynccl_comm: PyNcclCommunicator, tensors: tuple[torch.Tensor, ...], what: str
+) -> None:
+    """Diagnostic for VLLM_NCCL_SYMM_MEM_LEGACY_PERCALL: compare the placement
+    of per-call symmetric tensors across ranks (one CPU all-gather per call)
+    and log mismatches instead of raising, to observe the legacy behavior."""
+    global _placement_mismatches
+    if pynccl_comm.group is None or torch.cuda.is_current_stream_capturing():
+        return
+    mine = tuple(_symm_placement(t)[1:] for t in tensors)
+    group = pynccl_comm.group
+    if isinstance(group, torch.distributed.ProcessGroup):
+        gathered: list[Any] = [None] * pynccl_comm.world_size
+        torch.distributed.all_gather_object(gathered, mine, group=group)
+    else:
+        gathered = group.all_gather_obj(mine)
+    if any(other != mine for other in gathered):
+        _placement_mismatches += 1
+        if _placement_mismatches <= 50 or _placement_mismatches % 1000 == 0:
+            logger.warning(
+                "NCCL symm placement MISMATCH #%d %s rank %d/%d: "
+                "(segment size, offset) per tensor per rank: %s",
+                _placement_mismatches,
+                what,
+                pynccl_comm.rank,
+                pynccl_comm.world_size,
+                gathered,
+            )
