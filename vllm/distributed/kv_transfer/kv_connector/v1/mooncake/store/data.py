@@ -291,6 +291,9 @@ class ReqMeta:
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
     current_event: torch.cuda.Event | None = None
+    # Non-last PP stages: recorded on the compute stream when the load is
+    # issued; the receive thread waits for it before writing into the blocks.
+    load_ready_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
     # Absolute request offset represented by token_ids[0].

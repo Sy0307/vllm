@@ -1262,6 +1262,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.task_done()
 
 
+def _is_last_pp_rank() -> bool:
+    """True without pipeline parallelism (or before its group exists)."""
+    from vllm.distributed import parallel_state
+
+    return parallel_state._PP is None or get_pp_group().is_last_rank
+
+
 class KVCacheStoreRecvingThread(KVTransferThread):
     """Background thread for loading KV cache blocks from the store."""
 
@@ -1338,6 +1345,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         return invalid_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
+        if req_meta.load_ready_event is not None:
+            # See start_load_kv: GPU work still pending on these blocks.
+            req_meta.load_ready_event.synchronize()
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
         req_id = req_meta.req_id
         mask_num = (
@@ -2366,11 +2376,23 @@ class MooncakeStoreWorker:
         if self._capacity_only:
             return
 
+        # A non-last PP stage commits a step's deferred KDA (RecoverSSM) state
+        # at the start of a later step, after the scheduler already freed a
+        # finished request's blocks. The store writes into the blocks it loads
+        # directly, unordered with the compute stream, so a reused block could
+        # be loaded and then overwritten by that pending commit. Every such
+        # commit was launched before this step's forward, so loads wait for an
+        # event recorded here.
+        ready_event = None
         for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:
                 continue
 
+            if ready_event is None and not _is_last_pp_rank():
+                ready_event = torch.cuda.Event()
+                ready_event.record()
+            request.load_ready_event = ready_event
             load_spec.token_len = load_spec.kvpool_cached_tokens
             self.recv_request_queue.put(request)
 
