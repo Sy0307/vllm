@@ -319,9 +319,15 @@ class CustomAllreduce:
         self.max_size = max_size
         self.max_all_gather_size = max_all_gather_size
         if max_mnnvl_all_gather_size is None:
-            max_mnnvl_all_gather_size = self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES[
-                world_size
-            ]
+            max_mnnvl_all_gather_size = (
+                envs.VLLM_MNNVL_ALL_GATHER_MAX_SIZE
+                or self._DEFAULT_MNNVL_ALL_GATHER_MAX_SIZES[world_size]
+            )
+            if max_mnnvl_all_gather_size % 16:
+                raise ValueError(
+                    "VLLM_MNNVL_ALL_GATHER_MAX_SIZE must be a multiple of 16 "
+                    f"bytes, got {max_mnnvl_all_gather_size}"
+                )
         self.max_mnnvl_all_gather_size = max_mnnvl_all_gather_size
         self.max_reduce_scatter_size = max_reduce_scatter_size
         self.max_mnnvl_reduce_scatter_size = max_mnnvl_reduce_scatter_size

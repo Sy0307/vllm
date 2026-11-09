@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_INDEXER_FLASHTOPK_MIN_KEYS: int = 0
     VLLM_PREFILL_WAITING_RESERVE: int = 0
     VLLM_SHARE_PYNCCL_IDENTICAL_GROUPS: bool = False
+    VLLM_MNNVL_ALL_GATHER_MAX_SIZE: int = 0
     VLLM_KV_CACHE_GROUP_SIZE: int = 0
     VLLM_TOKENIZER_PIECE_CACHE_TOKENS: int = 0
     VLLM_KV_BREAKDOWN_S: float = 0.0
@@ -969,6 +970,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # equal chunks, k = max(steps the budget needs, round(sqrt(remaining / unit)))
     # (Scheduler._pp_balanced_prefill_cap). Larger units split less; 0 (the
     # default: no measured gain on AgentX) keeps budget-filling chunks.
+    # Per-rank input size cap (bytes) of the TP MNNVL Lamport all-gather;
+    # larger inputs fall back to NCCL. 0 keeps the per-world-size defaults
+    # (2 MiB at TP8, about 1.2K tokens of a 7168-wide bf16 hidden). With NCCL
+    # symmetric memory off, NCCL runs SP all-gathers of mixed steps as ring LL;
+    # a cap covering the scheduler budget keeps them on the one-shot multicast
+    # kernel. The Lamport buffer is 6 * max(cap * tp, RS cap) bytes per GPU.
+    "VLLM_MNNVL_ALL_GATHER_MAX_SIZE": lambda: int(
+        os.getenv("VLLM_MNNVL_ALL_GATHER_MAX_SIZE", "0")
+    ),
     "VLLM_PP_PREFILL_BALANCE_UNIT": lambda: int(
         os.getenv("VLLM_PP_PREFILL_BALANCE_UNIT", "0")
     ),
