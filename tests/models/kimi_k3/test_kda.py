@@ -1363,6 +1363,11 @@ def test_flashinfer_fused_kda_spec_decode_integration(
             prefix="test.layer",
             kv_cache=(conv_state.transpose(-1, -2), recurrent_state),
             kda_spec_decode_backend="flashinfer",
+            # Attributes _forward reads before picking the FlashInfer path.
+            spec_query_len=T,
+            recoverssm_wide=None,
+            deferred_verify=None,
+            use_recoverssm=False,
             decode_conv1d_weight=fused_weight,
             decode_norm_weight=norm_weight,
             gate_lower_bound=-5.0,

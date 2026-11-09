@@ -1050,6 +1050,22 @@ def _get_packed_kv_cache_groups(
             num_groups = max(
                 num_groups, cdiv(len(spec.kv_cache_specs), states_per_block)
             )
+        if isinstance(spec.first_spec, MambaSpec) and envs.VLLM_KV_CACHE_GROUP_SIZE > 0:
+            # Fewer, wider state groups: fewer state blocks per request, but a
+            # wider block on stages whose attention group is narrower (this
+            # planning does not see PP stages). Kimi K3.1 at PP 48/45: 35 gives
+            # 2 KDA groups (PP0 18/18, PP1 17/16) instead of 3 (12/12/12,
+            # 11/11/11) under the 12 (PP0) / 17 (PP1) layer attention group.
+            forced = cdiv(len(spec.kv_cache_specs), envs.VLLM_KV_CACHE_GROUP_SIZE)
+            logger.info(
+                "Splitting the %d-layer state bucket into %d groups instead of %d "
+                "(VLLM_KV_CACHE_GROUP_SIZE=%d)",
+                len(spec.kv_cache_specs),
+                forced,
+                num_groups,
+                envs.VLLM_KV_CACHE_GROUP_SIZE,
+            )
+            num_groups = forced
         if num_groups == 1:
             groups.append(KVCacheGroupSpec(list(spec.kv_cache_specs), spec))
             continue
