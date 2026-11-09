@@ -63,6 +63,17 @@ The environment variables:
 !!! warning
     Claude Code recently started injecting a per-request hash in the system prompt, which can defeat [prefix caching](../../design/prefix_caching.md) because the prompt changes on every request, causing greatly reduced performance. This is addressed automatically in vLLM versions > 0.17.1 but for older versions `"CLAUDE_CODE_ATTRIBUTION_HEADER": "0"` should be added to the `"env"` section of `~/.claude/settings.json` (see this [blog post](https://unsloth.ai/docs/basics/claude-code#fixing-90-slower-inference-in-claude-code) from Unsloth).
 
+## Thinking Token Usage
+
+With `--reasoning-parser` configured, Messages API responses include
+`usage.output_tokens_details.thinking_tokens`, using the same count as Chat
+Completions' `usage.completion_tokens_details.reasoning_tokens`. These tokens are
+already included in `output_tokens`, not an additional charge. Known zero counts
+are returned as `0`; when reasoning-token details are unavailable, the breakdown
+is omitted. For streaming requests, use the final `message_delta.usage` for the
+cumulative count. Counts follow the configured vLLM reasoning parser's token
+boundaries; they are not inferred by re-tokenizing the returned thinking text.
+
 ## Testing the Setup
 
 Once Claude Code launches, try a simple prompt to verify the connection:

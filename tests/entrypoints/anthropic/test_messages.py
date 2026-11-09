@@ -22,6 +22,8 @@ def server():
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "hermes",
+        "--reasoning-parser",
+        "qwen3",
         "--served-model-name",
         "claude-3-7-sonnet-latest",
     ]
@@ -34,6 +36,32 @@ def server():
 async def client(server):
     async with server.get_async_client_anthropic() as async_client:
         yield async_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("disabled", [False, True])
+async def test_thinking_tokens_in_message_usage(client, stream, disabled):
+    response = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        messages=[{"role": "user", "content": "What is 17 times 23?"}],
+        max_tokens=64,
+        extra_body={"temperature": 0},
+        thinking={"type": "disabled"} if disabled else {"type": "adaptive"},
+        stream=stream,
+    )
+    if stream:
+        usage = None
+        async for event in response:
+            if event.type == "message_delta":
+                usage = event.usage
+        assert usage is not None
+    else:
+        usage = response.usage
+    data = usage.model_dump()
+    thinking_tokens = data["output_tokens_details"]["thinking_tokens"]
+    assert 0 <= thinking_tokens <= data["output_tokens"]
+    assert (thinking_tokens == 0) == disabled
 
 
 @pytest.mark.asyncio
@@ -188,8 +216,8 @@ async def test_anthropic_structured_output(client: anthropic.AsyncAnthropic):
             }
         },
     )
-    print(response.content[0].text)
-    json_obj = json.loads(response.content[0].text)
+    text = next(block.text for block in response.content if block.type == "text")
+    json_obj = json.loads(text)
     for key in ["name", "email", "plan_interest", "demo_requested"]:
         assert key in json_obj, f"Missing key in output: {key}"
 

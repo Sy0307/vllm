@@ -29,6 +29,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
+    AnthropicOutputTokensDetails,
     AnthropicStreamEvent,
     AnthropicThinkingConfig,
     AnthropicTool,
@@ -108,7 +109,15 @@ def _build_anthropic_usage(
                 kwargs["cache_creation_input_tokens"] = cache_creation
 
         kwargs["input_tokens"] = max(0, input_tokens)
-    return AnthropicUsage(**kwargs)
+    result = AnthropicUsage(**kwargs)
+    if (
+        usage is not None
+        and (completion_details := usage.completion_tokens_details) is not None
+    ):
+        result.output_tokens_details = AnthropicOutputTokensDetails(
+            thinking_tokens=completion_details.reasoning_tokens
+        )
+    return result
 
 
 def _to_anthropic_stop_reason(

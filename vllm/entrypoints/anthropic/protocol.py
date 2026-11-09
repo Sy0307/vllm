@@ -53,6 +53,12 @@ def translate_error_type(status_code: int) -> str:
     return "invalid_request_error"
 
 
+class AnthropicOutputTokensDetails(BaseModel):
+    """Breakdown of tokens already included in output_tokens."""
+
+    thinking_tokens: int
+
+
 class AnthropicUsage(BaseModel):
     """Token usage information."""
 
@@ -60,6 +66,7 @@ class AnthropicUsage(BaseModel):
     output_tokens: int
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
+    output_tokens_details: AnthropicOutputTokensDetails | None = None
 
 
 class AnthropicContentBlock(BaseModel):

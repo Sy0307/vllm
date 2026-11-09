@@ -29,6 +29,8 @@ from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+    AnthropicStreamEvent,
 )
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
@@ -49,7 +51,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
@@ -801,6 +807,37 @@ class TestBuildAnthropicUsage:
         assert result.input_tokens == 100
         assert result.cache_read_input_tokens is None
         assert result.cache_creation_input_tokens is None
+
+    @pytest.mark.parametrize("reasoning_tokens", [None, 0, 7])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_thinking_tokens_survive_response_serialization(
+        self, reasoning_tokens, stream
+    ):
+        usage = _build_anthropic_usage(
+            UsageInfo(
+                prompt_tokens=100,
+                completion_tokens=10,
+                completion_tokens_details=(
+                    CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+                    if reasoning_tokens is not None
+                    else None
+                ),
+            )
+        )
+        if stream:
+            response = AnthropicStreamEvent(type="message_delta", usage=usage)
+        else:
+            response = AnthropicMessagesResponse(
+                id="msg-test", content=[], model="test-model", usage=usage
+            )
+        result = json.loads(response.model_dump_json(exclude_unset=True))["usage"]
+        assert result["output_tokens"] == 10
+        if reasoning_tokens is None:
+            assert "output_tokens_details" not in result
+        else:
+            assert result["output_tokens_details"] == {
+                "thinking_tokens": reasoning_tokens
+            }
 
 
 class TestInlineSystemMessageInMessagesArray:
