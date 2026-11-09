@@ -28,7 +28,11 @@ FUSED_MQA_TOPK_MAX_ROWS = 16384
 
 def fused_mqa_topk_min_keys(topk: int) -> int:
     """Longest-row key count from which fused_mqa_topk beats the dense path
-    on SM100f (shorter chunks stay dense): 32K, or 64K for top-2048."""
+    on SM100f (shorter chunks stay dense): 32K, or 64K for top-2048.
+    VLLM_FUSED_MQA_TOPK_MIN_KEYS overrides it (e.g. 131072: on B200 with DCP
+    ShardQ's ~1.1K rows per call, dense stays faster up to ~98K keys)."""
+    if envs.VLLM_FUSED_MQA_TOPK_MIN_KEYS > 0:
+        return envs.VLLM_FUSED_MQA_TOPK_MIN_KEYS
     return 1 << 16 if topk > 1024 else 1 << 15
 
 
@@ -181,4 +185,74 @@ def fused_mqa_topk_prefill(
         ends,
         output,
         *get_fused_mqa_topk_workspaces(q.device, q.shape[0]),
+    )
+
+
+@functools.cache
+def _flashtopk_selector(device_index: int, topk: int):
+    import flashtopk
+
+    # Adaptive pruning only pays off for whole-prompt calls (rows ~ keys); at a
+    # chunk's ~1K rows its planning launches cost more than it saves.
+    return flashtopk.Selector(
+        topk=topk, pruning="off", device=torch.device("cuda", device_index)
+    )
+
+
+@functools.cache
+def flashtopk_available() -> bool:
+    try:
+        import flashtopk
+    except ImportError:
+        logger.warning(
+            "VLLM_INDEXER_FLASHTOPK_MIN_KEYS is set but flashtopk is missing"
+        )
+        return False
+    return current_platform.is_cuda() and bool(
+        flashtopk.supported(
+            torch.empty(
+                (1, FUSED_MQA_TOPK_HEADS, FUSED_MQA_TOPK_HEAD_DIM),
+                dtype=torch.float8_e4m3fn,
+                device="cuda",
+            )
+        )
+    )
+
+
+def use_flashtopk_chunk(max_seqlen_k: int) -> bool:
+    """Whether a fused_mqa_topk-eligible prefill chunk takes FlashTopK instead:
+    opt-in by VLLM_INDEXER_FLASHTOPK_MIN_KEYS (longest-row keys from which to
+    use it; 0 = never) and the flashtopk package on SM90/SM100."""
+    min_keys = envs.VLLM_INDEXER_FLASHTOPK_MIN_KEYS
+    return min_keys > 0 and max_seqlen_k >= min_keys and flashtopk_available()
+
+
+def flashtopk_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    scales: torch.Tensor,
+    weights: torch.Tensor,
+    starts: torch.Tensor,
+    ends: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    """Same contract as ``fused_mqa_topk_prefill`` (indices relative to each
+    row's ``start``, unordered, -1 padded) through FlashTopK, which scores and
+    selects in one pipeline and returns absolute key ids. The selector's
+    workspace grows to the largest call; the first call per process compiles
+    its kernels."""
+    logger.info_once(
+        "Using FlashTopK for DSA indexer prefill chunks (top-k %d).", output.shape[1]
+    )
+    index = (
+        q.device.index
+        if q.device.index is not None
+        else (torch.accelerator.current_device_index())
+    )
+    selector = _flashtopk_selector(index, output.shape[1])
+    if selector.max_rows < q.shape[0] or selector.max_kv < k.shape[0]:
+        selector.plan(q.shape[0], k.shape[0])
+    absolute = selector.run(q, k, weights, starts, ends, kv_scales=scales)
+    output.copy_(
+        torch.where(absolute >= 0, absolute - starts.unsqueeze(1), -1).to(output.dtype)
     )

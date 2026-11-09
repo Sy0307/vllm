@@ -31,10 +31,12 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    flashtopk_prefill,
     fused_mqa_topk_chunk,
     fused_mqa_topk_key_scales,
     fused_mqa_topk_prefill,
     get_fused_mqa_topk_workspaces,
+    use_flashtopk_chunk,
     use_fused_mqa_topk,
 )
 from vllm.model_executor.layers.indexer_topk import (
@@ -71,6 +73,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backends.mla.indexer import (
     DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
     dense_logits_rows,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
@@ -570,6 +573,42 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def _chunk_logits_schedule(
+    chunk: DeepseekV32IndexerPrefillChunkMetadata,
+    rows: slice,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    num_kv: int,
+    num_heads: int,
+) -> torch.Tensor | None:
+    """DeepGEMM's K-range schedule for a dense logits call over ``rows`` of
+    ``chunk``. It depends only on the rows' key ranges, which every indexer
+    layer of a step shares, so the first layer computes it and the rest reuse
+    it (one fewer kernel launch per layer and row block)."""
+    # The bounds tensors are part of the key: layers with and without ShardQ
+    # pass different rows of the same chunk. The cache keeps them alive for
+    # the step, so their addresses stay unique.
+    key = (
+        "logits_schedule",
+        cu_seqlen_ks.data_ptr(),
+        cu_seqlen_ke.data_ptr(),
+        rows.start,
+        rows.stop,
+        num_kv,
+        num_heads,
+    )
+    if key not in chunk.layer_cache:
+        chunk.layer_cache[("bounds", key[1], key[2])] = (cu_seqlen_ks, cu_seqlen_ke)
+        chunk.layer_cache[key] = get_mqa_logits_metadata(
+            cu_seqlen_ks[rows],
+            cu_seqlen_ke[rows],
+            num_kv,
+            num_heads,
+            chunk.max_seqlen_k,
+        )
+    return chunk.layer_cache[key]
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -958,15 +997,24 @@ def sparse_attn_indexer(
                 # gathers above stay unconditional for continuation chunks
                 # that reuse the workspace. The top-k is written compactly, in
                 # token order, for the token-sharded attention.
-                lo, hi = np.searchsorted(
-                    shardq.indexer_rows_cpu, (chunk.token_start, chunk.token_end)
-                )
-                topk_rows = slice(int(lo), int(hi))
-                chunk_rows = shardq.indexer_rows[lo:hi] - chunk.token_start
-                cu_seqlen_ks = cu_seqlen_ks[chunk_rows]
-                cu_seqlen_ke = cu_seqlen_ke[chunk_rows]
-                # A compact query holds only the indexer rows, in their order.
-                q_rows = topk_rows if q_compact else shardq.indexer_rows[lo:hi]
+                # Same for every indexer layer of this step: computed once.
+                key = ("shardq", id(shardq), q_compact)
+                mapped = chunk.layer_cache.get(key)
+                if mapped is None:
+                    lo, hi = np.searchsorted(
+                        shardq.indexer_rows_cpu, (chunk.token_start, chunk.token_end)
+                    )
+                    rows_slice = slice(int(lo), int(hi))
+                    chunk_rows = shardq.indexer_rows[lo:hi] - chunk.token_start
+                    mapped = (
+                        rows_slice,
+                        cu_seqlen_ks[chunk_rows],
+                        cu_seqlen_ke[chunk_rows],
+                        # A compact query holds only the indexer rows, in order.
+                        rows_slice if q_compact else shardq.indexer_rows[lo:hi],
+                    )
+                    chunk.layer_cache[key] = mapped
+                topk_rows, cu_seqlen_ks, cu_seqlen_ke, q_rows = mapped
             q_slice = q_quant[q_rows]
             q_scale_slice = q_scale[q_rows] if q_scale is not None else None
             chunk_weights = weights[q_rows]
@@ -981,6 +1029,19 @@ def sparse_attn_indexer(
             if chunk.local_total_seq_lens == 0 or q_slice.shape[0] == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
+            elif fused_mqa_topk and use_flashtopk_chunk(chunk.max_seqlen_k):
+                # Same eligibility as fused_mqa_topk (FP8, 32x128, whole
+                # context per row); opt-in, see use_flashtopk_chunk.
+                flashtopk_prefill(
+                    q_slice,
+                    k_quant,
+                    fused_mqa_topk_key_scales(k_scale),
+                    chunk_weights,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    topk_indices,
+                )
+                logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
             elif fused_mqa_topk and fused_mqa_topk_chunk(
                 chunk.max_seqlen_k,
                 k_quant.shape[0],
@@ -1048,12 +1109,13 @@ def sparse_attn_indexer(
                             cu_seqlen_ke[rows],
                             chunk.max_seqlen_k,
                             logits_dtype=logits_dtype,
-                            schedule_meta=get_mqa_logits_metadata(
-                                cu_seqlen_ks[rows],
-                                cu_seqlen_ke[rows],
+                            schedule_meta=_chunk_logits_schedule(
+                                chunk,
+                                rows,
+                                cu_seqlen_ks,
+                                cu_seqlen_ke,
                                 k_quant_cast.shape[0],
                                 q_slice_cast.shape[1],
-                                chunk.max_seqlen_k,
                             ),
                         )
                         # DeepSelect ranks the bf16 logits in place of their

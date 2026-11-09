@@ -60,6 +60,8 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_SUPERSEDE_MAMBA_STATE: bool = True
     VLLM_MOONCAKE_LOOKUP_MIN_TOKENS: int = 0
     VLLM_TOKENIZER_FAST_ENCODE: bool = True
+    VLLM_FUSED_MQA_TOPK_MIN_KEYS: int = 0
+    VLLM_INDEXER_FLASHTOPK_MIN_KEYS: int = 0
     VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_MAMBA_CKPT_REUSE_INITIAL_COL: bool = False
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -998,6 +1000,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when a startup self-check shows it equals the generic path. 0 disables.
     "VLLM_TOKENIZER_FAST_ENCODE": lambda: bool(
         int(os.getenv("VLLM_TOKENIZER_FAST_ENCODE", "1"))
+    ),
+    # Longest-row key count from which DSA indexer prefill chunks take the fused
+    # MQA+top-k kernel instead of dense logits + top-k (0 = built-in default).
+    "VLLM_FUSED_MQA_TOPK_MIN_KEYS": lambda: int(
+        os.getenv("VLLM_FUSED_MQA_TOPK_MIN_KEYS", "0")
+    ),
+    # Longest-row key count from which DSA indexer prefill chunks take FlashTopK
+    # (needs the flashtopk package; 0 = never).
+    "VLLM_INDEXER_FLASHTOPK_MIN_KEYS": lambda: int(
+        os.getenv("VLLM_INDEXER_FLASHTOPK_MIN_KEYS", "0")
     ),
     # Seconds between scheduler log lines breaking the KV block pool down by
     # cache group (blocks held by requests, held Mamba states, evictable cached
