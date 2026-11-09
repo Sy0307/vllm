@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     VLLM_PP_EXTRA_INFLIGHT_BATCHES: int = 1
     VLLM_RUNTIME_KNOBS: str | None = None
     VLLM_SCHED_TRACE: str | None = None
+    VLLM_REQ_TRACE: str | None = None
     VLLM_KV_BREAKDOWN_S: float = 0.0
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -973,6 +974,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # CSV file of every scheduled prefill chunk (scheduler.py
     # _PrefillScheduleTrace). Unset disables it.
     "VLLM_SCHED_TRACE": lambda: os.getenv("VLLM_SCHED_TRACE", None),
+    # Per-request lifecycle trace (engine core): one CSV row per request with the
+    # wall-clock time of each stage from arrival to first token, local vs
+    # connector prefix hits and admission blocks. Unset (default) disables it.
+    "VLLM_REQ_TRACE": lambda: os.getenv("VLLM_REQ_TRACE", None),
     # Seconds between scheduler log lines breaking the KV block pool down by
     # cache group (blocks held by requests, held Mamba states, evictable cached
     # blocks). 0 disables it.

@@ -92,7 +92,6 @@ class _RequeueEntries(list):
     """Deferred-free entry: (block, hash) pairs to move to the LRU tail."""
 
 
-
 class _PrefillScheduleTrace:
     """VLLM_SCHED_TRACE=<file>: one CSV row per prefill chunk per step (the
     request's prompt length, where the chunk starts, how many tokens it got and
@@ -122,6 +121,124 @@ class _PrefillScheduleTrace:
         if self._unflushed >= 256:
             self._file.flush()
             self._unflushed = 0
+
+
+class _RequestLifecycleTrace:
+    """VLLM_REQ_TRACE=<file>: one CSV row per request, written at its first
+    output token (or when it finishes without one). Wall-clock seconds for each
+    stage between arrival and first token, the prefix hit split into local and
+    connector (Mooncake) tokens, and how often admission was blocked, to locate
+    where time-to-first-token goes on a live server."""
+
+    _COLS = (
+        "req,prompt,arrival,add,admit,local,ext,async_load,lookup_pending,"
+        "kv_blocked,load_done,first_sched,first_step,last_sched,chunks,first_tok"
+    )
+
+    def __init__(self, path: str):
+        self._file = open(path, "w")  # noqa: SIM115
+        self._file.write(self._COLS + "\n")
+        self._recs: dict[str, dict[str, Any]] = {}
+        self._unflushed = 0
+
+    def on_add(self, request: Request) -> None:
+        self._recs[request.request_id] = {
+            "prompt": request.num_prompt_tokens,
+            "arrival": request.arrival_time,
+            "add": time.time(),
+            "pend": 0,
+            "blocked": 0,
+            "chunks": 0,
+        }
+
+    def on_lookup_pending(self, request_id: str) -> None:
+        rec = self._recs.get(request_id)
+        if rec is not None:
+            rec["pend"] += 1
+
+    def on_kv_blocked(self, request_id: str) -> None:
+        rec = self._recs.get(request_id)
+        if rec is not None:
+            rec["blocked"] += 1
+
+    def on_admit(self, request_id: str, local: int, ext: int, async_load: bool) -> None:
+        rec = self._recs.get(request_id)
+        if rec is not None and "admit" not in rec:
+            rec.update(
+                admit=time.time(), local=local, ext=ext, async_load=int(async_load)
+            )
+
+    def on_load_done(self, request_id: str) -> None:
+        rec = self._recs.get(request_id)
+        if rec is not None and "load_done" not in rec:
+            rec["load_done"] = time.time()
+
+    def on_scheduled(
+        self, scheduler: "Scheduler", scheduler_output: SchedulerOutput
+    ) -> None:
+        now = time.time()
+        for req_id, n in scheduler_output.num_scheduled_tokens.items():
+            rec = self._recs.get(req_id)
+            request = scheduler.requests.get(req_id)
+            if rec is None or request is None:
+                continue
+            start = request.num_computed_tokens
+            if start >= request.num_prompt_tokens:
+                continue
+            rec["chunks"] += 1
+            if "first_sched" not in rec:
+                rec["first_sched"] = now
+                rec["first_step"] = scheduler.current_step
+            if start + n >= request.num_prompt_tokens:
+                rec["last_sched"] = now
+
+    def on_first_token(self, request_id: str) -> None:
+        rec = self._recs.pop(request_id, None)
+        if rec is not None:
+            rec["first_tok"] = time.time()
+            self._write(request_id, rec)
+
+    def on_finished(self, request_id: str) -> None:
+        rec = self._recs.pop(request_id, None)
+        if rec is not None:
+            self._write(request_id, rec)
+
+    def _write(self, request_id: str, rec: dict[str, Any]) -> None:
+        def f(key: str) -> str:
+            v = rec.get(key)
+            return "" if v is None else (f"{v:.4f}" if isinstance(v, float) else str(v))
+
+        self._file.write(
+            ",".join(
+                [request_id]
+                + [
+                    f(k)
+                    for k in (
+                        "prompt",
+                        "arrival",
+                        "add",
+                        "admit",
+                        "local",
+                        "ext",
+                        "async_load",
+                        "pend",
+                        "blocked",
+                        "load_done",
+                        "first_sched",
+                        "first_step",
+                        "last_sched",
+                        "chunks",
+                        "first_tok",
+                    )
+                ]
+            )
+            + "\n"
+        )
+        self._unflushed += 1
+        if self._unflushed >= 64:
+            self._file.flush()
+            self._unflushed = 0
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -507,6 +624,9 @@ class Scheduler(SchedulerInterface):
             _PrefillScheduleTrace(envs.VLLM_SCHED_TRACE)
             if envs.VLLM_SCHED_TRACE
             else None
+        )
+        self._req_trace = (
+            _RequestLifecycleTrace(envs.VLLM_REQ_TRACE) if envs.VLLM_REQ_TRACE else None
         )
         self._kv_breakdown_interval = envs.VLLM_KV_BREAKDOWN_S
         self._kv_breakdown_last = 0.0
@@ -1342,6 +1462,8 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
+                            if self._req_trace is not None:
+                                self._req_trace.on_lookup_pending(request_id)
                             skip_request(request_queue)
                             continue
 
@@ -1682,7 +1804,16 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    if self._req_trace is not None:
+                        self._req_trace.on_kv_blocked(request_id)
                     break
+                if self._req_trace is not None:
+                    self._req_trace.on_admit(
+                        request_id,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                        load_kv_async,
+                    )
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -2010,6 +2141,8 @@ class Scheduler(SchedulerInterface):
 
         if self._sched_trace is not None:
             self._sched_trace.write(self, scheduler_output)
+        if self._req_trace is not None:
+            self._req_trace.on_scheduled(self, scheduler_output)
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -2629,6 +2762,8 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request status.
             if new_token_ids:
+                if self._req_trace is not None and not output_is_stale:
+                    self._req_trace.on_first_token(req_id)
                 has_output_placeholders = request.num_output_placeholders > 0
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
@@ -3257,6 +3392,8 @@ class Scheduler(SchedulerInterface):
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
+        if existing is None and self._req_trace is not None:
+            self._req_trace.on_add(request)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
             if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
@@ -3365,6 +3502,8 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        if self._req_trace is not None:
+            self._req_trace.on_finished(request.request_id)
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
@@ -3918,6 +4057,8 @@ class Scheduler(SchedulerInterface):
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
+                if self._req_trace is not None:
+                    self._req_trace.on_load_done(req_id)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._aborted_kv_loads.discard(req_id)
