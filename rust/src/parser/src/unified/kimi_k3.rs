@@ -211,6 +211,11 @@ enum KimiK3Mode {
     },
     /// After the message closed: ignore the rest (EOS leakage guard).
     Done,
+    /// After the message closed in a request without tools. Text only follows
+    /// under `ignore_eos` / `min_tokens`; Python's K3 reasoning parser streams
+    /// everything after the `think` channel as content when no tool parser
+    /// runs, so it streams as text here too.
+    DoneText,
 }
 
 /// Unified parser for Kimi K3 XTML think / response / tools channels.
@@ -298,6 +303,9 @@ impl KimiK3UnifiedParser {
             }
             KimiK3Event::ToolsOpen => self.mode = KimiK3Mode::Tools,
             KimiK3Event::ToolsClose => self.mode = KimiK3Mode::Epilogue,
+            KimiK3Event::MessageEnd if self.tools_as_text => {
+                self.mode = KimiK3Mode::DoneText;
+            }
             KimiK3Event::MessageEnd => self.mode = KimiK3Mode::Done,
             KimiK3Event::CallOpen { name, index } => {
                 self.mode = KimiK3Mode::Call {
@@ -383,7 +391,10 @@ impl UnifiedParser for KimiK3UnifiedParser {
         let mut output = UnifiedParserOutput::default();
 
         match &self.mode {
-            KimiK3Mode::Idle | KimiK3Mode::Response | KimiK3Mode::ToolsText => {
+            KimiK3Mode::Idle
+            | KimiK3Mode::Response
+            | KimiK3Mode::ToolsText
+            | KimiK3Mode::DoneText => {
                 output.push_text(self.buffer.take().text);
             }
             KimiK3Mode::Reasoning | KimiK3Mode::PrefilledReasoning => {
@@ -422,6 +433,7 @@ fn parse_next_kimi_k3_event(
         KimiK3Mode::ToolsText => parse_tools_text_event(input),
         KimiK3Mode::Call { scan, .. } => call_body_event(input, scan),
         KimiK3Mode::Done => parse_done_event(input),
+        KimiK3Mode::DoneText => rest.value(KimiK3Event::Text).parse_next(input),
     }
 }
 
@@ -443,9 +455,11 @@ fn parse_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event
     let markers = input.markers();
     alt((
         markers.think_close.value(KimiK3Event::ThinkClose),
-        // `<|end_of_msg|>` can reach the parser under `ignore_eos` or
-        // `include_stop_str_in_output`; never leak it into reasoning.
-        markers.end_of_msg.value(KimiK3Event::MessageEnd),
+        // `<|end_of_msg|>` can reach the parser under `ignore_eos`,
+        // `min_tokens` or `include_stop_str_in_output`. The marker never leaks
+        // into reasoning, but whatever is generated after it stays reasoning,
+        // as in Python (the think channel never closed).
+        markers.end_of_msg.value(KimiK3Event::Skip),
         safe_reasoning_event,
     ))
     .parse_next(input)
@@ -461,7 +475,8 @@ fn parse_prefilled_reasoning_event(input: &mut KimiK3Input<'_>) -> ModalResult<K
         markers.think_close.value(KimiK3Event::ThinkClose),
         markers.think_open.value(KimiK3Event::ThinkOpen),
         markers.response_open.value(KimiK3Event::ResponseOpen),
-        markers.end_of_msg.value(KimiK3Event::MessageEnd),
+        // As in `parse_reasoning_event`: drop the marker, keep reasoning.
+        markers.end_of_msg.value(KimiK3Event::Skip),
         safe_prefilled_reasoning_event,
     ))
     .parse_next(input)
@@ -1286,6 +1301,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.normal_text(), "answer");
+    }
+
+    #[test]
+    fn kimi_k3_without_tools_streams_text_after_message_close() {
+        let mut parser = test_parser_without_tools();
+        let output = parser
+            .parse_complete(&format!(
+                "{RESPONSE_OPEN}answer{RESPONSE_CLOSE}<|close|>message{SEP}junk{END_OF_MSG}more"
+            ))
+            .unwrap();
+
+        assert_eq!(output.normal_text(), format!("answerjunk{END_OF_MSG}more"));
+    }
+
+    #[test]
+    fn kimi_k3_end_of_msg_inside_think_keeps_reasoning() {
+        // Under ignore_eos the model can end the message inside `think` and
+        // keep generating; the marker is dropped, the rest stays reasoning.
+        for mut parser in [test_parser(), test_parser_without_tools()] {
+            start_in_reasoning(&mut parser);
+            let mut output = parser
+                .parse_chunk(&format!("{END_OF_MSG}after{END_OF_MSG}more"))
+                .unwrap();
+            output.append(parser.finish().unwrap());
+
+            assert_eq!(output.reasoning_text(), "aftermore");
+            assert_eq!(output.normal_text(), "");
+        }
     }
 
     #[test]
